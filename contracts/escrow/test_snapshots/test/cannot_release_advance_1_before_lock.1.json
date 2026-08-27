@@ -77,6 +77,9 @@
                 },
                 {
                   "u32": 1500
+                },
+                {
+                  "u64": "604800"
                 }
               ]
             }
@@ -213,6 +216,30 @@
                           },
                           {
                             "key": {
+                              "symbol": "advance1_claimed"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "advance1_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "advance1_expired"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "advance2_bps"
                             },
                             "val": {
@@ -221,10 +248,42 @@
                           },
                           {
                             "key": {
+                              "symbol": "advance2_claimed"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "advance2_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "advance2_expired"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "buyer"
                             },
                             "val": {
                               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "claim_window_secs"
+                            },
+                            "val": {
+                              "u64": "604800"
                             }
                           },
                           {

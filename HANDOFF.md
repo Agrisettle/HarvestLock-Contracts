@@ -59,7 +59,10 @@ One contract, `contracts/escrow`, crate name `harvestlock-escrow`. One
 `Commitment` per contract instance, matching PRD §4.8's "one instance per
 commitment."
 
-The **happy-path state machine is fully implemented and covered by tests**:
+The **happy-path state machine is fully implemented and covered by tests**,
+and advance tranches now use **real claimable-balance-equivalent semantics**
+(claim within a window, reclaim after it lapses) — this was the top item in
+last session's "next steps" and is no longer a gap:
 
 ```
 Draft --lock()--> Locked --release_advance_1()--> Advance1Released
@@ -67,151 +70,199 @@ Draft --lock()--> Locked --release_advance_1()--> Advance1Released
       --confirm_delivery()--> Delivered --settle()--> Settled
 ```
 
-- `initialize` — validates `total_amount > 0` and `advance1_bps + advance2_bps <= 10_000`, requires buyer auth, sets `Draft`.
-- `lock` — requires buyer auth, pulls `total_amount` of the token into the contract via `token::Client::transfer`, sets `Locked`.
-- `release_advance_1` / `release_advance_2` — pay the cooperative the relevant bps of `total_amount`. **Not auth-gated** — see "Design decisions" below for why that's deliberate, not an oversight.
-- `mark_checkpoint` / `confirm_delivery` — **auth-gated to the warehouse operator**, since these are attestations, not mechanical advances.
-- `settle` — pays the cooperative whatever remains after both advances.
-- `get_status` / `get_commitment` — read-only accessors.
+- `initialize` — validates `total_amount > 0`, `advance1_bps + advance2_bps <= 10_000`, and `claim_window_secs > 0`; requires buyer auth; sets `Draft`.
+- `lock` — requires buyer auth, pulls `total_amount` of the token into the contract, sets `Locked`.
+- `release_advance_1` / `release_advance_2` — **open** a tranche's claim window (set a deadline, advance the status). Move **no funds**. Not auth-gated — see "Design decisions."
+- `claim_advance_1` / `claim_advance_2` — **cooperative-auth-gated.** Pays the tranche's bps amount to the cooperative, only if called within the window and not already claimed or expired.
+- `reclaim_advance_1` / `reclaim_advance_2` — **buyer-auth-gated.** Returns the tranche's bps amount to the buyer, only if called after the window has passed and not already claimed or expired.
+- `mark_checkpoint` / `confirm_delivery` — warehouse-operator-auth-gated attestations, unchanged from before.
+- `settle` — **requires both tranches already resolved** (each claimed or expired) or returns `Error::TrancheUnresolved`. Once that holds, pays the cooperative the contract's entire remaining balance. See "Design decisions" for why the resolve-first requirement exists — it's the result of catching a real fairness bug during this session's audit, not an arbitrary constraint.
+- `get_status` / `get_commitment` — read-only accessors; `get_commitment` now also exposes each tranche's deadline/claimed/expired fields.
 
-Tests (`src/test.rs`) cover: initialize sets Draft; can't initialize twice;
-lock moves the full deposit; advance release pays the correct bps; the full
-happy path pays out exactly `total_amount` in total with nothing stuck in
-the contract; each state-guarded function rejects being called out of
-order; zero-bps advances are valid and pay nothing; bps summing over
-10,000 is rejected at `initialize`.
+Tests (`src/test.rs`, **24 tests, all passing, zero warnings**) cover, beyond
+the prior session's happy-path/ordering/bps-validation set: opening a
+tranche moves no funds; claiming within the window pays the right amount;
+claiming before opening, twice, or after the window fails with the specific
+right error each time; the exact-boundary case (claiming in the same second
+as the deadline still succeeds — the guard is `>`, not `>=`); reclaiming
+before the window passes fails; reclaiming after it passes returns funds to
+the buyer; reclaiming twice fails; claiming after the buyer already
+reclaimed fails, and vice versa; `settle` is blocked with
+`TrancheUnresolved` if either tranche is untouched, verified for both
+tranches independently; a full happy path where one tranche is claimed and
+the other is deliberately left to expire and get reclaimed still sums
+`buyer_balance + cooperative_balance == total_amount` exactly; a zero-bps
+tranche still requires explicit resolution before `settle` (documented as
+intentional, not a bug — see below).
 
-**Run it**: `cd contracts/escrow && cargo test` — **confirmed passing, 9/9, this session**, clean build with zero warnings.
+**Run it**: `cd contracts/escrow && cargo test`
 
-## Verified on testnet — this is not just "it compiles"
+## Verified on testnet — twice now, and the second time specifically exercised the new mechanic
 
-The WASM was built (`stellar contract build`, produces
-`target/wasm32v1-none/release/harvestlock_escrow.wasm`, 9,925 bytes
-optimized, 9 exported functions) and **deployed to Stellar testnet**, then
-the full happy path was walked end-to-end with real transactions against
-the native XLM Stellar Asset Contract as the token — not a mock, the actual
-testnet SAC.
+**Deployment 1** (prior session, contract `CDUWXPAC2AT353J4UF5WWJVW3ZUMATZH7PGNZ2AEXWOGT2USDRR77JSO`) validated the pre-claimable-balance happy path. Superseded — that contract predates this session's changes and shouldn't be used as a reference for current behavior.
 
-- **Contract**: `CDUWXPAC2AT353J4UF5WWJVW3ZUMATZH7PGNZ2AEXWOGT2USDRR77JSO`
-  ([stellar.expert](https://stellar.expert/explorer/testnet/contract/CDUWXPAC2AT353J4UF5WWJVW3ZUMATZH7PGNZ2AEXWOGT2USDRR77JSO))
-- **Token used**: native XLM SAC, `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`
-  (this is the deterministic per-network wrapper — get it via
-  `stellar contract id asset --asset native --network testnet`, don't try
-  to `deploy` it, it already exists and deploying will error
-  `contract already exists`, which is expected, not a failure)
-- **Commitment**: 1,000,000,000 stroops (100 XLM), 15% / 20% advance split
-- **Result**: advance 1 paid 150,000,000 to the cooperative, advance 2 paid
-  200,000,000, settlement paid the remaining 650,000,000 — **sums to
-  exactly the total, contract balance ends at 0**, final status `Settled`.
-  Cooperative's on-chain balance reflects the full amount received.
+**Deployment 2** (this session) — **contract `CDVF6UVJOLF3OHCFSYSJ72RMG2T6DUQ42VRJ6IHL6MVEFDYEBZ3KTFK4`**
+([stellar.expert](https://stellar.expert/explorer/testnet/contract/CDVF6UVJOLF3OHCFSYSJ72RMG2T6DUQ42VRJ6IHL6MVEFDYEBZ3KTFK4)),
+WASM 13,472 bytes optimized, 13 exported functions. Initialized with a
+**deliberately short 20-second `claim_window_secs`** so the reclaim/expiry
+path could actually be exercised live within a session rather than only
+tested in the simulated-clock unit tests — this is a demo-only choice, not
+a suggested production value (see the open question about a sane minimum
+window, below).
 
-This is a real, reproducible validation, not a demo built to look
-convincing — every number above was read back from the ledger via
-`stellar contract invoke ... get_status` / `... balance`, not asserted.
-Re-run it yourself with the identities and commands above if you want to
-confirm independently rather than trust this document.
+Walked through, on real testnet transactions, against the real native-XLM
+SAC, 1,000,000,000 stroops (100 XLM), 15%/20% advance split:
 
-**This deployed instance is a validation artifact, not infrastructure.**
-Don't build anything that depends on this specific contract address
-continuing to exist or hold correct state — redeploy fresh for any future
-testing rather than reusing it, since nothing about the deployer or funding
-here is meant to be durable.
+1. `lock` — 1,000,000,000 moved buyer → contract.
+2. `release_advance_1`, then `claim_advance_1` **within** the window — 150,000,000 to the cooperative.
+3. `mark_checkpoint`, `release_advance_2`, `confirm_delivery`.
+4. **Attempted `settle` immediately — rejected on-chain with `Error(Contract, #12)`**, i.e. `TrancheUnresolved`, because tranche 2 hadn't been claimed or reclaimed yet. This is the actual deployed WASM enforcing the guard, not just the native test build — confirms the fix is real, not something that only works in `cargo test`.
+5. Waited past the 20-second window (real time), then `reclaim_advance_2` — 200,000,000 returned buyer ← contract.
+6. `settle` now succeeds — sweeps the remaining 650,000,000 to the cooperative.
+7. Final check: `get_status` → `Settled`, contract token balance → `0`. Cooperative received 150M + 650M = 800,000,000; buyer got back 200,000,000. **800,000,000 + 200,000,000 = 1,000,000,000 exactly.**
+
+Every number above was read back from the ledger, not asserted. Re-run it
+yourself with the identities from the toolchain section if you want to
+confirm independently.
+
+**Both deployed instances are validation artifacts, not infrastructure.**
+Redeploy fresh for future testing; don't build anything that depends on
+either address continuing to exist or hold correct state.
 
 ## What's deliberately NOT implemented yet
 
 Don't assume these are oversights — each one is a scoping decision, listed
 so nobody "fixes" them without knowing what they're trading off.
 
-1. **No claimable-balance-with-expiry mechanic.** PRD §4.3/§4.8 describes
-   the advance tranches as native claimable balances that revert to the
-   buyer if unclaimed within a window. What's built instead is a direct,
-   immediate transfer once the state-guard permits it. Implementing real
-   expiry-and-reclaim semantics is the next real piece of work on this
-   contract — see "Next steps."
-2. **No cancellation, dispute, or default paths.** `Status::Cancelled`,
+1. **No cancellation, dispute, or default paths.** `Status::Cancelled`,
    `Status::Defaulted`, and `Status::Disputed` exist in the enum (so
    downstream code can match on them) but no function transitions into
    them. PRD §7's mutual-cancellation unwind, buyer-default forfeiture, and
    side-selling forfeiture are all unbuilt.
-3. **No shortfall/grade adjustment at delivery.** `confirm_delivery` is a
+2. **No shortfall/grade adjustment at delivery.** `confirm_delivery` is a
    boolean gate. It doesn't read a warehouse receipt's quantity or grade,
    and doesn't apply the PRD §7 adjustment schedule to the settlement
    amount.
-4. **No NGN/oracle conversion.** `total_amount` is treated as already being
+3. **No NGN/oracle conversion.** `total_amount` is treated as already being
    in the settlement asset. PRD §4.2's NGN-denomination-with-stablecoin-
    settlement design, and §16.3's oracle staleness bound, aren't here.
-5. **No allocation ledger.** PRD §4.8's per-member salted-hash allocation
+4. **No allocation ledger.** PRD §4.8's per-member salted-hash allocation
    (and the NDPA-driven off-chain identity map from §16.1) don't exist in
-   this contract at all yet. This is a separate, substantial piece of work.
-6. **`release_advance_1`/`release_advance_2` are not auth-gated.** This is
-   explained in "Design decisions," not listed as a gap — but flagging it
-   here too because it's the kind of thing a security-minded reviewer will
-   flag on sight, and the reasoning needs to travel with the code.
+   this contract at all yet. This is a separate, substantial piece of work,
+   and is now the **top priority** in "Next steps."
+5. **No minimum (or maximum) enforced on `claim_window_secs`.** The buyer
+   sets it at `initialize` with no floor. A careless or adversarial buyer
+   could set it to something absurdly short (as this session's testnet
+   demo deliberately did, for demo purposes), making it practically
+   impossible for the cooperative to claim in time and near-guaranteeing
+   a reclaim. Whether the contract should enforce a floor (and what a
+   reasonable one is) is a genuine open question — it's as much a business
+   decision as a technical one, so it's flagged here rather than answered
+   with an arbitrary constant. If nothing else changes this, at minimum
+   whatever calls `initialize` in a real deployment (the API layer, not
+   yet built) should validate this before submitting the transaction.
+6. **`release_advance_1`/`release_advance_2` remain not auth-gated** (see
+   "Design decisions" — this is deliberate, not new this session, but
+   still worth a security reviewer's attention on sight).
 
 ## Design decisions worth knowing before you change anything
 
-- **Why `release_advance_1`/`release_advance_2` have no `require_auth`
-  call**: the recipient (cooperative) and amount (a fixed bps of the
-  already-locked total) are both fixed at `initialize` and can't be
-  redirected by whoever calls the function. Calling it early does nothing
-  (state guard blocks it); calling it once eligible just executes the
-  already-agreed transfer. There's no privilege to gate. If this
-  assumption ever stops holding — e.g., if amounts become
-  caller-influenced — this needs to change to require the buyer's or
-  cooperative's auth immediately.
+- **Why claims/reclaims are built as contract-native state (a deadline +
+  two booleans) instead of an actual classic Stellar `ClaimableBalanceEntry`**:
+  Soroban contracts don't have a clean host-function path to construct a
+  classic-ledger claimable balance from within contract code without
+  juggling cross-VM interop. Reimplementing the same user-facing semantics
+  natively — a stored deadline, a `claim_*` the cooperative can call within
+  it, a `reclaim_*` the buyer can call after — delivers identical behavior
+  with a much smaller, fully-auditable surface inside one contract. If a
+  future need specifically requires a *classic* claimable balance (e.g.
+  external tooling that only understands that ledger entry type), that's a
+  deliberate reconsideration, not a "fix."
+- **Why `claim_tranche`/`reclaim_tranche`/`open_tranche` are private
+  functions parameterized by a `Tranche` enum, rather than each having a
+  separate hand-written implementation for tranche 1 and tranche 2**: two
+  independently-maintained copies of the same claim/reclaim logic is
+  exactly the kind of duplication where one copy quietly gets a bugfix and
+  the other doesn't. One implementation, called by four thin public
+  wrappers (`claim_advance_1`, `claim_advance_2`, etc.), means the rules
+  can't drift between tranches by construction.
+- **Why `settle` requires both tranches already resolved, rather than
+  auto-resolving whatever's left**: this is the one genuine bug this
+  session's audit caught before it shipped. The first version of `settle`
+  swept the contract's balance to the cooperative unconditionally,
+  marking any still-open tranche as claimed. That's wrong: if a tranche's
+  claim window had already passed but the buyer simply hadn't gotten
+  around to calling `reclaim_advance_*` yet, that sweep would silently
+  hand the buyer's already-vested reclaim right to the cooperative
+  instead — no adversarial timing required, just an inactive buyer and a
+  cooperative or buyer calling `settle`. Requiring explicit resolution
+  first means every stroop's destination is always the result of an
+  actual `claim`/`reclaim` call, never something `settle` infers. The
+  cost is one extra required call per unresolved tranche before
+  settlement can complete — worth it for removing the ambiguity entirely.
+  **If you're tempted to "simplify" `settle` back to auto-resolving,
+  re-read this paragraph first.**
+- **Why state is mutated and saved *before* the external token transfer
+  in `lock`, `claim_tranche`, `reclaim_tranche`, and `settle`
+  (checks-effects-interactions ordering)**: defensive hardening against a
+  hypothetical future token with transfer hooks that could call back into
+  this contract. The current native/SAC token has no such hook, so this
+  isn't closing a demonstrated exploit — but Soroban's atomicity guarantee
+  (a panic anywhere unwinds the *entire* invocation, including earlier
+  storage writes) means this ordering costs nothing in the failure case
+  and only helps in a reentrancy scenario, so there's no reason not to.
+- **Why `release_advance_1`/`release_advance_2` still have no
+  `require_auth` call**: opening a tranche only starts a clock — it moves
+  no funds, and the recipient/amount of any later claim are fixed at
+  `initialize` regardless of who calls `release_advance_*`. There's no
+  privilege to gate.
 - **Why `mark_checkpoint`/`confirm_delivery` *are* auth-gated to the
   warehouse operator**: these represent a judgment call by a specific
   trusted party (PRD §4.1 — the warehouse operator is the enforcement
-  backstop), not a mechanical consequence of contract state. Anyone should
-  be able to "unlock what's already been earned"; nobody but the operator
-  should be able to assert that a checkpoint or delivery happened.
+  backstop), not a mechanical consequence of contract state. Checkpoint
+  status is independent of whether tranche 1 was actually claimed yet —
+  crop progress doesn't wait on paperwork.
 - **Why one contract instance per commitment, not one contract managing
   many commitments**: matches PRD §4.8 directly. It also means there's no
-  need for a caller to pass a commitment ID anywhere — every function
-  operates on "the" commitment, which simplifies the state model
-  considerably. Don't refactor to a multi-commitment registry without
-  updating the PRD first — that's an architecture change, not a code change.
-- **`saturating_add` for the bps check in `initialize`**: deliberate,
-  not a copy-paste habit — with `u32` inputs that could theoretically be
-  passed as very large by a malicious caller, a normal `+` would panic on
-  overflow (which Soroban would just turn into a trap, not a graceful
-  `Error::InvalidBps`), while `saturating_add` guarantees the comparison
-  against 10,000 always executes and rejects cleanly.
+  need for a caller to pass a commitment ID anywhere. Don't refactor to a
+  multi-commitment registry without updating the PRD first — that's an
+  architecture change, not a code change.
+- **`saturating_add` for the bps check in `initialize`**: with `u32`
+  inputs that could theoretically be very large, a normal `+` would panic
+  on overflow (a trap, not a graceful `Error::InvalidBps`), while
+  `saturating_add` guarantees the comparison against 10,000 always
+  executes and rejects cleanly.
 
 ## Next steps, in priority order
 
-Matches `ROADMAP.md` (main repo) Phase 0 Track B, Week 3 onward — Weeks 1-2
-are essentially what's described above.
+Matches `ROADMAP.md` (main repo) Phase 0 Track B — the claimable-balance
+item that used to be #1 here is done; everything shifts up by one.
 
-1. **Claimable-balance-with-expiry for the advance tranches** (Week 3-4 in
-   the roadmap, pulled forward conceptually since it changes
-   `release_advance_1`/`release_advance_2`'s shape). Needs a design
-   decision first: does this use Soroban-native logic (a stored deadline +
-   a `reclaim()` function the buyer can call after expiry, entirely inside
-   this contract) or actually construct a classic Stellar
-   `ClaimableBalanceEntry` via cross-VM interop? Recommend the former —
-   it's what's actually buildable cleanly inside one Soroban contract
-   without juggling classic-operation interop, and it delivers the same
-   user-facing behavior (cooperative claims within a window, buyer
-   reclaims after). If you pick the latter, document why here.
-2. **Allocation ledger** (Week 4-5) — salted-hash member entries, decided
-   per-contract-instance. This is genuinely new surface, not an extension
-   of what exists.
-3. **Settlement logic against a real attestation** (Week 5-6) — replace
+1. **Allocation ledger** (Week 4-5) — salted-hash member entries, decided
+   per-contract-instance. Genuinely new surface, not an extension of what
+   exists. This is also the piece most directly tied to the NDPA
+   compliance finding in PRD §16.1 — get the salting scheme right the
+   first time (per-contract salt, never a bare hash of a phone number),
+   since retrofitting it after real data exists would be a migration, not
+   a refactor.
+2. **Settlement logic against a real attestation** (Week 5-6) — replace
    the boolean `confirm_delivery` with something that takes delivered
    quantity/grade and applies PRD §7's adjustment schedule, plus the
    oracle staleness bound from §16.3.
-4. **Assignability** (Week 6-7) — buyer position transfer with cooperative
+3. **Assignability** (Week 6-7) — buyer position transfer with cooperative
    consent.
-5. **Regression tests for the edge cases** (Week 7-8) — partial delivery,
-   over-delivery, buyer default, side-selling forfeiture, mutual
+4. **Regression tests for the remaining edge cases** (Week 7-8) — partial
+   delivery, over-delivery, buyer default, side-selling forfeiture, mutual
    cancellation unwind. None of these have corresponding contract logic
-   yet (see "What's deliberately NOT implemented"), so this step includes
-   writing the logic, not just the tests.
+   yet, so this step includes writing the logic, not just the tests.
+5. **Decide the `claim_window_secs` minimum question** (see "What's
+   deliberately NOT implemented," item 5) — doesn't have to block the
+   items above, but shouldn't be forgotten either.
 
-~~6. Deploy to testnet, exercise the happy path end-to-end.~~ **Done this
-session** — see "Verified on testnet" above. Re-deploy fresh rather than
-reusing that instance when you next need a live one.
+~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, twice.**
+~~Claimable-balance-with-expiry for the advance tranches.~~ **Done this
+session** — see "Verified on testnet" above for the live proof, including
+the negative case (`settle` correctly rejected on-chain before resolution).
 
 ## If you're an AI agent picking this up cold
 
@@ -223,6 +274,10 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 27 Aug 2026 — initial contract implementation, 9/9 tests
-passing, deployed and exercised end-to-end on Stellar testnet. Update the
+*Last updated: 27 Aug 2026 (second session same day) — added
+claimable-balance-with-expiry semantics for both advance tranches, caught
+and fixed a real fairness bug in `settle` during self-audit before it ever
+shipped, hardened transfer ordering against reentrancy, expanded to 24
+passing tests, redeployed and re-verified end-to-end on Stellar testnet
+including the negative `TrancheUnresolved` guard live on-chain. Update the
 date/context here when you next touch this repo.*

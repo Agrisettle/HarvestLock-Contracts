@@ -21,10 +21,13 @@ deliberately not, and why. This README won't be kept as precisely in sync;
 treat it as orientation, HANDOFF.md as ground truth.
 
 Short version as of this writing: the happy-path state machine
-(`Draft` through `Settled`) is implemented in `contracts/escrow` with
-passing tests. Claimable-balance expiry semantics, cancellation/dispute
-paths, the allocation ledger, and NGN/oracle conversion are not yet built —
-all tracked in HANDOFF.md's "next steps," matching
+(`Draft` through `Settled`) is implemented in `contracts/escrow`, including
+real claim/reclaim-with-expiry semantics for both advance tranches — 24
+tests passing, deployed and exercised twice on Stellar testnet (both the
+claim path and the reclaim-after-expiry path proven live, plus the
+`settle`-blocks-until-resolved guard). Cancellation/dispute paths, the
+allocation ledger, and NGN/oracle conversion are not yet built — all
+tracked in HANDOFF.md's "next steps," matching
 [`ROADMAP.md`, Phase 0 Track B](https://github.com/agrisettle/harvestlock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
 in the main repo.
 
