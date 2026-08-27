@@ -1,0 +1,10 @@
+# Rust / Soroban
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
