@@ -15,13 +15,26 @@ code that changes on a different cadence.
 
 ## Status
 
-Not started. First tasks — toolchain setup through the initial state-machine
-skeleton — are in the main repo's roadmap:
-[`ROADMAP.md`, Phase 0 Track B](https://github.com/agrisettle/harvestlock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel).
+**Read [`HANDOFF.md`](./HANDOFF.md) first — always.** It's the current,
+maintained source of truth for exactly what's implemented, what's
+deliberately not, and why. This README won't be kept as precisely in sync;
+treat it as orientation, HANDOFF.md as ground truth.
 
-Dependencies (`soroban-sdk` and its pinned version) are deliberately not
-declared yet — they get pinned fresh at the point of actually starting,
-not guessed in advance.
+Short version as of this writing: the happy-path state machine
+(`Draft` through `Settled`) is implemented in `contracts/escrow` with
+passing tests. Claimable-balance expiry semantics, cancellation/dispute
+paths, the allocation ledger, and NGN/oracle conversion are not yet built —
+all tracked in HANDOFF.md's "next steps," matching
+[`ROADMAP.md`, Phase 0 Track B](https://github.com/agrisettle/harvestlock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
+in the main repo.
+
+## Building and testing
+
+```bash
+cd contracts/escrow
+cargo test              # runs on host target, no Stellar CLI needed
+stellar contract build  # produces the deployable .wasm (needs stellar-cli)
+```
 
 ## Reference
 
