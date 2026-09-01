@@ -77,9 +77,10 @@ Draft --lock()--> Locked --release_advance_1()--> Advance1Released
 - `reclaim_advance_1` / `reclaim_advance_2` — **buyer-auth-gated.** Returns the tranche's bps amount to the buyer, only if called after the window has passed and not already claimed or expired.
 - `mark_checkpoint` / `confirm_delivery` — warehouse-operator-auth-gated attestations, unchanged from before.
 - `settle` — **requires both tranches already resolved** (each claimed or expired) or returns `Error::TrancheUnresolved`. Once that holds, pays the cooperative the contract's entire remaining balance. See "Design decisions" for why the resolve-first requirement exists — it's the result of catching a real fairness bug during this session's audit, not an arbitrary constraint.
+- `cancel` — **mutual unwind** (PRD §7): requires **both** buyer and cooperative auth in the same call. Reachable from `Draft` through `Advance2Released`, not from `Delivered` onward. Pays the contract's current balance back to the buyer (whatever's already been claimed stays with the cooperative — no clawback), sets `Cancelled`.
 - `get_status` / `get_commitment` — read-only accessors; `get_commitment` now also exposes each tranche's deadline/claimed/expired fields.
 
-Tests (`src/test.rs`, **24 tests, all passing, zero warnings**) cover, beyond
+Tests (`src/test.rs`, **30 tests, all passing, zero warnings**) cover, beyond
 the prior session's happy-path/ordering/bps-validation set: opening a
 tranche moves no funds; claiming within the window pays the right amount;
 claiming before opening, twice, or after the window fails with the specific
@@ -93,7 +94,12 @@ tranches independently; a full happy path where one tranche is claimed and
 the other is deliberately left to expire and get reclaimed still sums
 `buyer_balance + cooperative_balance == total_amount` exactly; a zero-bps
 tranche still requires explicit resolution before `settle` (documented as
-intentional, not a bug — see below).
+intentional, not a bug — see below); `cancel` from `Draft` (nothing to
+return), from `Locked` (full refund), and after a partial claim (claimed
+share stays with the cooperative, remainder returns to the buyer); `cancel`
+rejected after delivery is confirmed and rejected a second time once
+already cancelled; an auth-trace check confirming `cancel` genuinely
+requires *both* parties, not just one.
 
 **Run it**: `cd contracts/escrow && cargo test`
 
@@ -125,20 +131,46 @@ Every number above was read back from the ledger, not asserted. Re-run it
 yourself with the identities from the toolchain section if you want to
 confirm independently.
 
-**Both deployed instances are validation artifacts, not infrastructure.**
-Redeploy fresh for future testing; don't build anything that depends on
-either address continuing to exist or hold correct state.
+**Deployment 3** (this session, 1 Sept 2026) — **contract `CAVWBS5USXL5WRIB2HBGKBEABQZ6AT6YH7P4JO452WWEMWPWER5T6RDF`**,
+WASM hash `c6b73c5c483c5946be73fe68e0cb798c6cd39440ec1430e05cf1f048c1018327`
+(14,825 bytes optimized, 14 exported functions — the +1 is `cancel`).
+Initialized and `lock`ed live on testnet, confirming the new WASM deploys
+and the pre-existing functions still work unchanged.
+
+`cancel` itself is verified **at the unit-test level** (30/30, including
+the dual-auth-trace check) but **not** via an ad-hoc `stellar-cli`
+testnet call the way earlier mechanics were: `stellar contract invoke`
+only signs with one key (the tx source), and hand-assembling a
+multi-party-signed transaction via `stellar tx sign --sign-with-key
+<second party>` on top of that fails with `TxBadAuthExtra` — the second
+signature lands as an extra classic envelope signature rather than a
+proper per-entry Soroban auth credential, at least with this CLI version
+and this workflow. This looks like a CLI tooling gap for ad-hoc multi-
+party calls, not a contract bug. `cancel` **is** verified end-to-end on
+live testnet, correctly multi-signed, via `@stellar/stellar-sdk` in the
+`api/` repo instead — `Transaction.sign()` called once per required
+party on the same transaction object handles per-entry Soroban auth
+correctly. See that repo's `HANDOFF.md`/test suite for the live proof.
+If you need to hand-verify a multi-party call from the CLI again, look
+for a newer `stellar-cli` release before re-deriving this — this may
+already be fixed upstream.
+
+**All three deployed instances are validation artifacts, not
+infrastructure.** Redeploy fresh for future testing; don't build anything
+that depends on any of these addresses continuing to exist or hold correct
+state.
 
 ## What's deliberately NOT implemented yet
 
 Don't assume these are oversights — each one is a scoping decision, listed
 so nobody "fixes" them without knowing what they're trading off.
 
-1. **No cancellation, dispute, or default paths.** `Status::Cancelled`,
-   `Status::Defaulted`, and `Status::Disputed` exist in the enum (so
-   downstream code can match on them) but no function transitions into
-   them. PRD §7's mutual-cancellation unwind, buyer-default forfeiture, and
-   side-selling forfeiture are all unbuilt.
+1. **No dispute or default paths.** `Status::Defaulted` and
+   `Status::Disputed` exist in the enum (so downstream code can match on
+   them) but no function transitions into either. Buyer-default forfeiture
+   and side-selling forfeiture (PRD §7) are unbuilt. **Mutual cancellation
+   is now built** (`cancel`, see above) — this item used to cover all three,
+   it no longer does.
 2. **No shortfall/grade adjustment at delivery.** `confirm_delivery` is a
    boolean gate. It doesn't read a warehouse receipt's quantity or grade,
    and doesn't apply the PRD §7 adjustment schedule to the settlement
@@ -252,17 +284,24 @@ item that used to be #1 here is done; everything shifts up by one.
 3. **Assignability** (Week 6-7) — buyer position transfer with cooperative
    consent.
 4. **Regression tests for the remaining edge cases** (Week 7-8) — partial
-   delivery, over-delivery, buyer default, side-selling forfeiture, mutual
-   cancellation unwind. None of these have corresponding contract logic
-   yet, so this step includes writing the logic, not just the tests.
+   delivery, over-delivery, buyer default, side-selling forfeiture. Mutual
+   cancellation is now done (see `cancel`, above) — this item used to
+   include it, it no longer does. None of the rest have corresponding
+   contract logic yet, so this step includes writing the logic, not just
+   the tests.
 5. **Decide the `claim_window_secs` minimum question** (see "What's
    deliberately NOT implemented," item 5) — doesn't have to block the
    items above, but shouldn't be forgotten either.
 
-~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, twice.**
-~~Claimable-balance-with-expiry for the advance tranches.~~ **Done this
-session** — see "Verified on testnet" above for the live proof, including
-the negative case (`settle` correctly rejected on-chain before resolution).
+~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, three
+times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~
+**Done, a previous session** — see "Verified on testnet" above for the
+live proof, including the negative case (`settle` correctly rejected
+on-chain before resolution). ~~Mutual cancellation (`cancel`).~~ **Code
+and unit tests (30/30) done this session.** Live-testnet, correctly-
+multi-signed verification is queued next via the `api/` repo's SDK
+layer, once `cancel` is wired into it — check `api/HANDOFF.md`'s
+"What's real" list for whether that's landed yet before assuming it has.
 
 ## If you're an AI agent picking this up cold
 
@@ -274,10 +313,17 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 27 Aug 2026 (second session same day) — added
-claimable-balance-with-expiry semantics for both advance tranches, caught
-and fixed a real fairness bug in `settle` during self-audit before it ever
-shipped, hardened transfer ordering against reentrancy, expanded to 24
-passing tests, redeployed and re-verified end-to-end on Stellar testnet
-including the negative `TrancheUnresolved` guard live on-chain. Update the
-date/context here when you next touch this repo.*
+*Last updated: 1 Sept 2026 — added `cancel` (mutual unwind, PRD §7):
+buyer+cooperative co-signed, reachable Draft through Advance2Released,
+balance-based refund to the buyer. 30/30 tests passing (6 new). Rebuilt
+and redeployed to testnet (deployment 3, new WASM hash) and confirmed
+the new binary still deploys/initializes/locks correctly; `cancel`
+itself needs the `api/` repo's SDK-based multi-signer flow to verify
+live, since `stellar-cli`'s `tx sign` doesn't cleanly support ad-hoc
+multi-party Soroban auth (see "Verified on testnet" for the
+`TxBadAuthExtra` detail) — check `api/HANDOFF.md` for whether that's
+landed. Prior entry: claimable-balance-with-expiry semantics for both
+advance tranches, a real fairness bug in `settle` caught and fixed
+during self-audit, reentrancy-hardened transfer ordering, 24 passing
+tests at the time. Update the date/context here when you next touch
+this repo.*
