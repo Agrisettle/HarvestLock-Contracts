@@ -189,17 +189,16 @@ so nobody "fixes" them without knowing what they're trading off.
    (and the NDPA-driven off-chain identity map from §16.1) don't exist in
    this contract at all yet. This is a separate, substantial piece of work,
    and is now the **top priority** in "Next steps."
-5. **No minimum (or maximum) enforced on `claim_window_secs`.** The buyer
-   sets it at `initialize` with no floor. A careless or adversarial buyer
-   could set it to something absurdly short (as this session's testnet
-   demo deliberately did, for demo purposes), making it practically
-   impossible for the cooperative to claim in time and near-guaranteeing
-   a reclaim. Whether the contract should enforce a floor (and what a
-   reasonable one is) is a genuine open question — it's as much a business
-   decision as a technical one, so it's flagged here rather than answered
-   with an arbitrary constant. If nothing else changes this, at minimum
-   whatever calls `initialize` in a real deployment (the API layer, not
-   yet built) should validate this before submitting the transaction.
+5. **Still no minimum (or maximum) enforced on `claim_window_secs` at the
+   contract level** — this remains deliberate, not an oversight. The
+   `api/` repo now enforces a 1 hour floor / 90 day ceiling before it will
+   even build an `initialize` transaction (`api/src/server.ts`), resolving
+   the "at minimum whatever calls initialize should validate this" note
+   this item used to end on. The contract itself staying unenforced is
+   still correct: anything calling `initialize` directly (a different
+   future API, a test, `stellar-cli`) bypasses that check entirely, same
+   as it always could — this was never a security boundary, just the
+   right layer for a business-judgment default.
 6. **`release_advance_1`/`release_advance_2` remain not auth-gated** (see
    "Design decisions" — this is deliberate, not new this session, but
    still worth a security reviewer's attention on sight).
