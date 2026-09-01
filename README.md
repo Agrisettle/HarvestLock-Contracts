@@ -41,7 +41,7 @@ stellar contract build  # produces the deployable .wasm (needs stellar-cli)
 
 ## Reference
 
-- **PRD** (living document): https://claude.ai/code/artifact/c9a2f2a6-b9f2-4218-b4e8-60651ddfbb5d — see §4.8 (contract design), §4.5 (why this can't hold custody keys), §16.3 (oracle staleness and depeg handling the contract must account for)
+- **PRD**: [`docs/PRD.md`](https://github.com/agrisettle/harvestlock/blob/main/docs/PRD.md) in the `harvestlock` repo — see §4.8 (contract design), §4.5 (why this can't hold custody keys), §16.3 (oracle staleness and depeg handling the contract must account for)
 - **Org**: [agrisettle](https://github.com/agrisettle)
 
 ## License
