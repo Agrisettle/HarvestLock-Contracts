@@ -137,23 +137,30 @@ WASM hash `c6b73c5c483c5946be73fe68e0cb798c6cd39440ec1430e05cf1f048c1018327`
 Initialized and `lock`ed live on testnet, confirming the new WASM deploys
 and the pre-existing functions still work unchanged.
 
-`cancel` itself is verified **at the unit-test level** (30/30, including
-the dual-auth-trace check) but **not** via an ad-hoc `stellar-cli`
-testnet call the way earlier mechanics were: `stellar contract invoke`
-only signs with one key (the tx source), and hand-assembling a
-multi-party-signed transaction via `stellar tx sign --sign-with-key
-<second party>` on top of that fails with `TxBadAuthExtra` — the second
-signature lands as an extra classic envelope signature rather than a
-proper per-entry Soroban auth credential, at least with this CLI version
-and this workflow. This looks like a CLI tooling gap for ad-hoc multi-
-party calls, not a contract bug. `cancel` **is** verified end-to-end on
-live testnet, correctly multi-signed, via `@stellar/stellar-sdk` in the
-`api/` repo instead — `Transaction.sign()` called once per required
-party on the same transaction object handles per-entry Soroban auth
-correctly. See that repo's `HANDOFF.md`/test suite for the live proof.
-If you need to hand-verify a multi-party call from the CLI again, look
-for a newer `stellar-cli` release before re-deriving this — this may
-already be fixed upstream.
+`cancel` is now verified **both** at the unit-test level (30/30,
+including the dual-auth-trace check) **and** live on testnet with two
+genuinely different, correctly-authorized signers, via `@stellar/stellar-
+sdk` in the `api/` repo (`api/test/helpers.ts`'s `submitMultiPartyCall`,
+exercised by `api/test/stellar.test.ts`).
+
+Getting there took two false starts worth recording so nobody re-treads
+them. First, ad-hoc `stellar-cli`: `stellar contract invoke` only signs
+with one key (the tx source), and hand-assembling a multi-party
+transaction via `stellar tx sign --sign-with-key <second party>` on top
+of that fails with `TxBadAuthExtra` — the second signature lands as an
+extra classic envelope signature, not a proper per-entry Soroban auth
+credential. Second, the seemingly-obvious SDK equivalent —
+`Transaction.sign()` called once per party on the same transaction
+object — **fails the exact same way**, for the exact same reason: neither
+approach produces a real per-entry `SorobanAuthorizationEntry` signature
+for the non-source party, both just pile up classic envelope signatures.
+The actual fix: sign each non-source auth entry individually via
+`authorizeEntry()`, then rebuild the operation/transaction around the
+signed entries (mutating the built transaction's auth array in place
+doesn't work either — it's a derived view). Full detail, including a
+third gotcha about unfunded accounts, is in `api/test/helpers.ts`'s doc
+comment — read that before trying to hand-verify a multi-party call
+again, from the CLI or otherwise.
 
 **All three deployed instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
@@ -297,11 +304,9 @@ item that used to be #1 here is done; everything shifts up by one.
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~
 **Done, a previous session** — see "Verified on testnet" above for the
 live proof, including the negative case (`settle` correctly rejected
-on-chain before resolution). ~~Mutual cancellation (`cancel`).~~ **Code
-and unit tests (30/30) done this session.** Live-testnet, correctly-
-multi-signed verification is queued next via the `api/` repo's SDK
-layer, once `cancel` is wired into it — check `api/HANDOFF.md`'s
-"What's real" list for whether that's landed yet before assuming it has.
+on-chain before resolution). ~~Mutual cancellation (`cancel`).~~ **Done,
+this session** — 30/30 unit tests plus a genuine two-signer live-testnet
+run via the `api/` repo's SDK layer. See "Verified on testnet" above.
 
 ## If you're an AI agent picking this up cold
 
@@ -315,14 +320,13 @@ this file to match before doing anything else.
 ---
 *Last updated: 1 Sept 2026 — added `cancel` (mutual unwind, PRD §7):
 buyer+cooperative co-signed, reachable Draft through Advance2Released,
-balance-based refund to the buyer. 30/30 tests passing (6 new). Rebuilt
-and redeployed to testnet (deployment 3, new WASM hash) and confirmed
-the new binary still deploys/initializes/locks correctly; `cancel`
-itself needs the `api/` repo's SDK-based multi-signer flow to verify
-live, since `stellar-cli`'s `tx sign` doesn't cleanly support ad-hoc
-multi-party Soroban auth (see "Verified on testnet" for the
-`TxBadAuthExtra` detail) — check `api/HANDOFF.md` for whether that's
-landed. Prior entry: claimable-balance-with-expiry semantics for both
+balance-based refund to the buyer. 30/30 unit tests passing (6 new),
+rebuilt and redeployed to testnet (deployment 3, new WASM hash), and
+`cancel` itself verified live with two genuinely different, correctly-
+authorized signers via the `api/` repo's SDK layer — see "Verified on
+testnet" for what it took to get a real multi-party Soroban auth call
+working (two false starts, both look-alikes for the right answer).
+Prior entry: claimable-balance-with-expiry semantics for both
 advance tranches, a real fairness bug in `settle` caught and fixed
 during self-audit, reentrancy-hardened transfer ordering, 24 passing
 tests at the time. Update the date/context here when you next touch
