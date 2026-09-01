@@ -6,9 +6,11 @@
 //!   Draft -> Locked -> Advance1Released -> CheckpointPassed
 //!         -> Advance2Released -> Delivered -> Settled
 //!
-//! Cancelled / Defaulted / Disputed exist in the `Status` enum because the
-//! PRD's state machine names them, but no function transitions into them
-//! yet — see HANDOFF.md for what's deliberately not implemented and why.
+//! `cancel` is a mutual-consent unwind (PRD §7) reachable from any state
+//! up through `Advance2Released` — see its doc comment. `Defaulted` /
+//! `Disputed` still exist in the `Status` enum because the PRD's state
+//! machine names them, but no function transitions into either yet — see
+//! HANDOFF.md for what's deliberately not implemented and why.
 //!
 //! Advance tranches use claimable-balance-equivalent semantics, built
 //! natively in this contract rather than via classic Stellar
@@ -311,6 +313,50 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
+        }
+        Ok(())
+    }
+
+    /// Mutual cancellation — PRD §7: "Defined unwind: advance settled per
+    /// agreed schedule, remaining escrow returned, no penalty, logged."
+    /// Allowed from any pre-delivery state (`Draft` through
+    /// `Advance2Released`). Not from `Delivered` onward — at that point
+    /// `settle` is the correct path, an unwind doesn't apply anymore.
+    ///
+    /// Requires **both** the buyer's and the cooperative's auth in the same
+    /// call, since this is mutual, not unilateral — unlike `reclaim_*`,
+    /// which is the buyer's unilateral right once a claim window lapses on
+    /// its own.
+    ///
+    /// "Advance settled per agreed schedule, no penalty": whatever's
+    /// already been claimed stays with the cooperative — this doesn't claw
+    /// anything back. "Remaining escrow returned": whatever's still in the
+    /// contract (zero, if nothing was ever locked) goes back to the buyer,
+    /// via the same balance-based transfer `settle` uses, so it's correct
+    /// regardless of claim/reclaim history. "Logged": the state transition
+    /// and the transfer both land on the ledger from this call — no
+    /// separate event needed, same as every other transition here.
+    pub fn cancel(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        match c.status {
+            Status::Draft
+            | Status::Locked
+            | Status::Advance1Released
+            | Status::CheckpointPassed
+            | Status::Advance2Released => {}
+            _ => return Err(Error::InvalidState),
+        }
+        c.buyer.require_auth();
+        c.cooperative.require_auth();
+
+        // Effects before interaction — see `lock`'s comment for why.
+        c.status = Status::Cancelled;
+        Self::save(&env, &c);
+
+        let token_client = token::Client::new(&env, &c.token);
+        let balance = token_client.balance(&env.current_contract_address());
+        if balance > 0 {
+            token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
         }
         Ok(())
     }

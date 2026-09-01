@@ -435,3 +435,87 @@ fn confirm_delivery_requires_warehouse_operator() {
     let touched_warehouse = auths.iter().any(|(addr, _)| *addr == s.warehouse);
     assert!(touched_warehouse, "expected warehouse operator auth on confirm_delivery");
 }
+
+// ---------- mutual cancellation ----------
+
+#[test]
+fn cancel_from_draft_marks_cancelled_with_nothing_to_return() {
+    let s = setup(1_500, 1_500);
+    // Never locked — contract never held any of the buyer's deposit.
+    s.contract.cancel();
+    assert_eq!(s.contract.get_status(), Status::Cancelled);
+    assert_eq!(s.token.balance(&s.buyer), s.total_amount);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn cancel_after_lock_returns_full_deposit_to_buyer() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    assert_eq!(s.token.balance(&s.buyer), 0);
+
+    s.contract.cancel();
+
+    assert_eq!(s.contract.get_status(), Status::Cancelled);
+    assert_eq!(s.token.balance(&s.buyer), s.total_amount);
+    assert_eq!(s.token.balance(&s.cooperative), 0);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn cancel_after_partial_claim_leaves_claimed_advance_with_cooperative() {
+    let s = setup(1_500, 2_000); // 15% + 20%
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1(); // cooperative already has 15% — no penalty means this stays theirs
+
+    s.contract.cancel();
+
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    assert_eq!(s.contract.get_status(), Status::Cancelled);
+    assert_eq!(s.token.balance(&s.cooperative), advance1_amount);
+    assert_eq!(s.token.balance(&s.buyer), s.total_amount - advance1_amount);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn cannot_cancel_after_delivery_confirmed() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.confirm_delivery();
+
+    let result = s.contract.try_cancel();
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn cannot_cancel_twice() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.cancel();
+
+    let result = s.contract.try_cancel();
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn cancel_requires_both_buyer_and_cooperative_auth() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    // mock_all_auths() means this can't check *rejection* of a missing
+    // signer — see confirm_delivery_requires_warehouse_operator's comment.
+    // What it confirms is that cancel's auth trace genuinely names both
+    // parties, not just one — mutual means mutual.
+    s.contract.cancel();
+    let auths = s.env.auths();
+    let touched_buyer = auths.iter().any(|(addr, _)| *addr == s.buyer);
+    let touched_cooperative = auths.iter().any(|(addr, _)| *addr == s.cooperative);
+    assert!(touched_buyer, "expected buyer auth on cancel");
+    assert!(touched_cooperative, "expected cooperative auth on cancel");
+}
