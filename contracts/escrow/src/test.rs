@@ -519,3 +519,66 @@ fn cancel_requires_both_buyer_and_cooperative_auth() {
     assert!(touched_buyer, "expected buyer auth on cancel");
     assert!(touched_cooperative, "expected cooperative auth on cancel");
 }
+
+// ---------- buyer-position assignability ----------
+
+#[test]
+fn reassign_buyer_updates_the_buyer_field() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_buyer = Address::generate(&s.env);
+
+    s.contract.reassign_buyer(&new_buyer);
+
+    assert_eq!(s.contract.get_commitment().buyer, new_buyer);
+}
+
+#[test]
+fn reassign_buyer_transfers_reclaim_rights_to_the_new_buyer() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_buyer = Address::generate(&s.env);
+    s.contract.reassign_buyer(&new_buyer);
+
+    s.contract.release_advance_1();
+    advance_time(&s, WINDOW + 1);
+    s.contract.reclaim_advance_1();
+
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    assert_eq!(s.token.balance(&new_buyer), advance1_amount);
+    assert_eq!(s.token.balance(&s.buyer), 0, "original buyer should receive nothing after reassignment");
+}
+
+#[test]
+fn cannot_reassign_buyer_after_delivery_confirmed() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.confirm_delivery();
+    let new_buyer = Address::generate(&s.env);
+
+    let result = s.contract.try_reassign_buyer(&new_buyer);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn reassign_buyer_requires_current_buyer_cooperative_and_new_buyer_auth() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_buyer = Address::generate(&s.env);
+
+    // mock_all_auths() means this can't check *rejection* of a missing
+    // signer — see confirm_delivery_requires_warehouse_operator's comment.
+    // What it confirms is that all three named parties' auth genuinely
+    // appears in the trace, not just some of them.
+    s.contract.reassign_buyer(&new_buyer);
+    let auths = s.env.auths();
+    let touched = |addr: &Address| auths.iter().any(|(a, _)| a == addr);
+    assert!(touched(&s.buyer), "expected the outgoing buyer's auth");
+    assert!(touched(&s.cooperative), "expected the cooperative's auth");
+    assert!(touched(&new_buyer), "expected the incoming buyer's auth");
+}

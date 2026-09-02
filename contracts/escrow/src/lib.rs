@@ -7,10 +7,12 @@
 //!         -> Advance2Released -> Delivered -> Settled
 //!
 //! `cancel` is a mutual-consent unwind (PRD §7) reachable from any state
-//! up through `Advance2Released` — see its doc comment. `Defaulted` /
-//! `Disputed` still exist in the `Status` enum because the PRD's state
-//! machine names them, but no function transitions into either yet — see
-//! HANDOFF.md for what's deliberately not implemented and why.
+//! up through `Advance2Released` — see its doc comment. `reassign_buyer`
+//! (PRD §4.8) transfers the buyer position, three-party-consented, over
+//! the same state range. `Defaulted` / `Disputed` still exist in the
+//! `Status` enum because the PRD's state machine names them, but no
+//! function transitions into either yet — see HANDOFF.md for what's
+//! deliberately not implemented and why.
 //!
 //! Advance tranches use claimable-balance-equivalent semantics, built
 //! natively in this contract rather than via classic Stellar
@@ -358,6 +360,46 @@ impl EscrowContract {
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
         }
+        Ok(())
+    }
+
+    /// Buyer-position assignability (PRD §4.8): transfers `buyer` to
+    /// `new_buyer`. Deliberately **not** a market — there's no order book,
+    /// no listing, no on-chain price discovery here, just a novation of
+    /// who holds the position. No funds move; this only ever rewrites who
+    /// `buyer` refers to for every future `reclaim_*`/`cancel` auth check.
+    ///
+    /// Requires **three** signatures in the same call, not two: the
+    /// current buyer's (they're giving up the position), the
+    /// cooperative's (PRD's explicit "with cooperative consent"), and the
+    /// new buyer's. That third one isn't named in the PRD line this
+    /// implements, but leaving it out would let the current buyer and
+    /// cooperative saddle a third party with a position — including its
+    /// obligations — without that party ever agreeing to take it on. Two
+    /// consents where the PRD asked for two would be the smaller change;
+    /// three is the safer one, and safety wins here.
+    ///
+    /// Reachable from the same states as `cancel` (`Draft` through
+    /// `Advance2Released`) and for the same reason: past `Delivered`,
+    /// `buyer` no longer gates any remaining action (`settle` doesn't
+    /// check it), so reassigning it after that point would be a no-op
+    /// dressed up as a real transfer.
+    pub fn reassign_buyer(env: Env, new_buyer: Address) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        match c.status {
+            Status::Draft
+            | Status::Locked
+            | Status::Advance1Released
+            | Status::CheckpointPassed
+            | Status::Advance2Released => {}
+            _ => return Err(Error::InvalidState),
+        }
+        c.buyer.require_auth();
+        c.cooperative.require_auth();
+        new_buyer.require_auth();
+
+        c.buyer = new_buyer;
+        Self::save(&env, &c);
         Ok(())
     }
 
