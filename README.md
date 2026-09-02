@@ -22,10 +22,12 @@ treat it as orientation, HANDOFF.md as ground truth.
 
 Short version as of this writing: the happy-path state machine
 (`Draft` through `Settled`) is implemented in `contracts/escrow`, including
-real claim/reclaim-with-expiry semantics for both advance tranches — 24
-tests passing, deployed and exercised twice on Stellar testnet (both the
-claim path and the reclaim-after-expiry path proven live, plus the
-`settle`-blocks-until-resolved guard). Cancellation/dispute paths, the
+real claim/reclaim-with-expiry semantics for both advance tranches and
+mutual cancellation (`cancel`, buyer- and cooperative-co-signed) — 30
+tests passing, deployed and exercised on Stellar testnet three times (the
+claim path, the reclaim-after-expiry path, the `settle`-blocks-until-
+resolved guard, and `cancel` with two genuinely different signers all
+proven live, not just in `cargo test`). Buyer default/dispute paths, the
 allocation ledger, and NGN/oracle conversion are not yet built — all
 tracked in HANDOFF.md's "next steps," matching
 [`ROADMAP.md`, Phase 0 Track B](https://github.com/agrisettle/harvestlock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
