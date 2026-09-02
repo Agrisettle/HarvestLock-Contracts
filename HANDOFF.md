@@ -59,52 +59,92 @@ One contract, `contracts/escrow`, crate name `harvestlock-escrow`. One
 `Commitment` per contract instance, matching PRD §4.8's "one instance per
 commitment."
 
-The **happy-path state machine is fully implemented and covered by tests**,
-and advance tranches now use **real claimable-balance-equivalent semantics**
-(claim within a window, reclaim after it lapses) — this was the top item in
-last session's "next steps" and is no longer a gap:
+The state machine, now with **two-phase funding** and the **buyer-default /
+seller-non-delivery forfeiture paths** — this was the top item in last
+session's "what's deliberately NOT implemented" and is no longer a gap:
 
 ```
 Draft --lock()--> Locked --release_advance_1()--> Advance1Released
       --mark_checkpoint()--> CheckpointPassed --release_advance_2()--> Advance2Released
+      --ready_for_delivery()--> ReadyForDelivery --fund_remainder()--> (still ReadyForDelivery)
       --confirm_delivery()--> Delivered --settle()--> Settled
 ```
 
-- `initialize` — validates `total_amount > 0`, `advance1_bps + advance2_bps <= 10_000`, and `claim_window_secs > 0`; requires buyer auth; sets `Draft`.
-- `lock` — requires buyer auth, pulls `total_amount` of the token into the contract, sets `Locked`.
-- `release_advance_1` / `release_advance_2` — **open** a tranche's claim window (set a deadline, advance the status). Move **no funds**. Not auth-gated — see "Design decisions."
-- `claim_advance_1` / `claim_advance_2` — **cooperative-auth-gated.** Pays the tranche's bps amount to the cooperative, only if called within the window and not already claimed or expired.
-- `reclaim_advance_1` / `reclaim_advance_2` — **buyer-auth-gated.** Returns the tranche's bps amount to the buyer, only if called after the window has passed and not already claimed or expired.
-- `mark_checkpoint` / `confirm_delivery` — warehouse-operator-auth-gated attestations, unchanged from before.
-- `settle` — **requires both tranches already resolved** (each claimed or expired) or returns `Error::TrancheUnresolved`. Once that holds, pays the cooperative the contract's entire remaining balance. See "Design decisions" for why the resolve-first requirement exists — it's the result of catching a real fairness bug during this session's audit, not an arbitrary constraint.
-- `cancel` — **mutual unwind** (PRD §7): requires **both** buyer and cooperative auth in the same call. Reachable from `Draft` through `Advance2Released`, not from `Delivered` onward. Pays the contract's current balance back to the buyer (whatever's already been claimed stays with the cooperative — no clawback), sets `Cancelled`.
-- `reassign_buyer` — **buyer-position assignability** (PRD §4.8): requires **three** signatures — outgoing buyer, cooperative, incoming buyer. Same reachable-state range as `cancel`. Rewrites `buyer`; moves no funds, a novation not a trade. The third signature (the incoming buyer's) isn't literally named in the PRD line this implements — added anyway so the current buyer and cooperative can't saddle a third party with the position without that party agreeing to take it on.
-- `get_status` / `get_commitment` — read-only accessors; `get_commitment` now also exposes each tranche's deadline/claimed/expired fields.
+`lock` no longer escrows the full `total_amount` — it escrows only the
+**deposit** (`advance1_bps + advance2_bps` of the total). The remainder is
+escrowed later via `fund_remainder`, once the cooperative calls
+`ready_for_delivery` to signal they're setting out. This isn't a bug fix
+over the earlier one-shot-escrow design, it's a deliberate redesign: it's
+what makes a buyer's default a clean, contract-enforceable deadline
+(`expire_remainder_window`) instead of something that has to be asserted by
+a person. Two new deadline-gated, uncontested-by-construction terminal
+paths came with it:
 
-Tests (`src/test.rs`, **34 tests, all passing, zero warnings**) cover, beyond
-the prior session's happy-path/ordering/bps-validation set: opening a
-tranche moves no funds; claiming within the window pays the right amount;
-claiming before opening, twice, or after the window fails with the specific
-right error each time; the exact-boundary case (claiming in the same second
-as the deadline still succeeds — the guard is `>`, not `>=`); reclaiming
-before the window passes fails; reclaiming after it passes returns funds to
-the buyer; reclaiming twice fails; claiming after the buyer already
-reclaimed fails, and vice versa; `settle` is blocked with
-`TrancheUnresolved` if either tranche is untouched, verified for both
-tranches independently; a full happy path where one tranche is claimed and
-the other is deliberately left to expire and get reclaimed still sums
-`buyer_balance + cooperative_balance == total_amount` exactly; a zero-bps
-tranche still requires explicit resolution before `settle` (documented as
-intentional, not a bug — see below); `cancel` from `Draft` (nothing to
-return), from `Locked` (full refund), and after a partial claim (claimed
-share stays with the cooperative, remainder returns to the buyer); `cancel`
-rejected after delivery is confirmed and rejected a second time once
-already cancelled; an auth-trace check confirming `cancel` genuinely
-requires *both* parties, not just one; `reassign_buyer` actually updates
-the buyer field, rejected after delivery, and — the functional proof, not
-just a field check — reclaim rights genuinely transfer to the new buyer
-(the old buyer gets nothing on a subsequent reclaim); an auth-trace check
-confirming all *three* parties are required on `reassign_buyer`.
+- `ready_for_delivery` — **cooperative-auth-gated.** `Advance2Released` ->
+  `ReadyForDelivery`. Opens the remainder-payment window
+  (`remainder_window_secs` from now).
+- `fund_remainder` — **buyer-auth-gated.** Escrows `total_amount - deposit`,
+  if called within the window `ready_for_delivery` opened. Rejects with
+  `RemainderWindowPassed` after the deadline — no late cure, that's what
+  `expire_remainder_window` is for.
+- `expire_remainder_window` — **permissionless** (deliberately — the outcome
+  doesn't depend on who calls it, only on whether the deadline passed
+  unfunded, same reasoning `reclaim_tranche` would use if it weren't already
+  scoped to the buyer specifically). Sweeps the contract's current balance
+  to the cooperative, sets `Status::Defaulted`. **This is the buyer-default
+  path** — per this session's product decision, buyer default carries an
+  immediate off-chain permanent bar (see `api/` once that lands), not a
+  graduated strike system.
+- `reclaim_on_nondelivery` — **buyer-auth-gated.** Once `delivery_deadline`
+  (an absolute deadline set at `initialize`, independent of the remainder
+  window) passes with `confirm_delivery` never having run, returns the
+  contract's current balance to the buyer, sets `Status::Forfeited` — a
+  deliberately distinct status from `Defaulted`, not a reuse of it, since
+  the two represent opposite parties' failure. **This is the seller-
+  non-delivery path** — per this session's product decision, this one *does*
+  carry a graduated 3-strike system before a cooperative is barred, unlike
+  the buyer's immediate bar (again, `api/`-side, once built).
+- `confirm_delivery`'s guard changed from `Advance2Released` to
+  `ReadyForDelivery` **and** `remainder_funded == true` — delivery can't be
+  confirmed while the buyer still owes money on the deal. New error
+  `RemainderNotFunded` covers the latter half of that guard.
+- `cancel` and `reassign_buyer`'s reachable-state range both extended to
+  include `ReadyForDelivery` — mutual unwind and buyer-position transfer
+  are both still sensible even after the remainder's been funded, same
+  balance-based-refund/no-money-moves mechanics as before, no new logic
+  needed in either function itself.
+
+Full function list, everything not already covered above unchanged from
+last session: `initialize` (now also takes `remainder_window_secs` and
+`delivery_window_secs`, both `> 0`-validated the same way
+`claim_window_secs` is), `release_advance_1`/`_2`, `claim_advance_1`/`_2`,
+`reclaim_advance_1`/`_2`, `mark_checkpoint`, `settle`, `get_status`,
+`get_commitment`.
+
+Tests (`src/test.rs`, **58 tests, all passing, zero clippy warnings** beyond
+the inherent, unavoidable `too_many_arguments` on `initialize` — one field
+per commitment property) cover, beyond last session's set: `lock` escrows
+only the deposit, not the full total; `ready_for_delivery` opens the window
+and is cooperative-gated; `fund_remainder` transfers exactly the remainder,
+rejects before `ReadyForDelivery`, rejects a second call, rejects after the
+window passes, requires buyer auth; **the buyer-default path** —
+`expire_remainder_window` correctly sweeps the contract's *current* balance
+(not a naive full-total assumption) to the cooperative and sets `Defaulted`,
+rejects before the deadline, rejects if already funded, and — a dedicated
+test — genuinely has no auth requirement at all; **the seller-non-delivery
+path** — `reclaim_on_nondelivery` returns the current balance to the buyer
+and sets `Forfeited`, works from every pre-`Delivered` state including
+`ReadyForDelivery` with the remainder already funded, rejects before the
+deadline, rejects from `Draft` (nothing at risk) and after `Delivered`
+(wrong path — `settle` applies then), requires buyer auth;
+`confirm_delivery` rejects both before `ReadyForDelivery` and before the
+remainder is funded, as two independently-tested guards; every existing
+happy-path/cancel/reassign test updated to route through
+`ready_for_delivery`/`fund_remainder` and re-verified against the new
+balance shape (a real gotcha caught three times over: forgetting that an
+already-claimed tranche stays with the cooperative through `cancel`/
+`reclaim_on_nondelivery` — those only ever return the contract's *current*
+balance, never claw back what already left).
 
 **Run it**: `cd contracts/escrow && cargo test`
 
@@ -189,7 +229,43 @@ wanted) fails every deploy with `Error(Storage, MissingValue)` /
 "Wasm does not exist" — confusing the first time, obvious once you
 know what it means.
 
-**All four deployed/uploaded instances are validation artifacts, not
+**Deployment 5** (this session, 2 Sept 2026) — WASM hash
+`3351e0de0edc918130fb2f88973b90cc717307a789bb0b7ee0802c50f3bd6832`
+(22,048 bytes optimized, 19 exported functions — `ready_for_delivery`,
+`fund_remainder`, `expire_remainder_window`, `reclaim_on_nondelivery` are
+the four new ones). Uploaded via `stellar contract upload`. Three fresh
+instances deployed and walked through real testnet transactions to prove
+all three of the new terminal outcomes, each confirmed by a fresh
+`get_status`/`get_commitment` read, not assumed from submission success:
+
+1. **Happy path with two-phase funding** — `CB5MR3IYQ6R4QTFMTXTBFG4WSCZTJ3QTND6GMBSASGORPQSD3VKYCTCW`,
+   1,000,000,000 stroops, 15%/20% split. `lock` moved exactly 350,000,000
+   (the deposit, not the full total). `claim_advance_1`/`claim_advance_2`
+   paid 150,000,000 + 200,000,000. `ready_for_delivery` then
+   `fund_remainder` moved the remaining 650,000,000. `confirm_delivery`
+   then `settle` swept that 650,000,000 to the cooperative. Final tally:
+   cooperative received 150M + 200M + 650M = 1,000,000,000 exactly, buyer
+   and contract both at 0, status `Settled`.
+2. **Buyer-default path** — `CA3AB4QXJ5ZZ4SIIH3VHI7C37MDWBUQSZECT64XBVHPDQI473BJK4G52`,
+   10%/20% split, a deliberately short 15-second `remainder_window_secs`
+   (demo-only, same reasoning as Deployment 2's short `claim_window_secs`).
+   `claim_advance_1` paid 100,000,000; advance 2's 200,000,000 was
+   deliberately left unclaimed. `ready_for_delivery` opened the window; the
+   buyer never called `fund_remainder`. After the window passed (waited
+   real time), `expire_remainder_window` — called by the **deployer
+   account, neither the buyer nor the cooperative** — swept the contract's
+   remaining 200,000,000 to the cooperative and set `Defaulted`. Proves
+   both the sweep amount (the actual unclaimed balance, not a naive
+   full-total assumption) and the genuinely-permissionless auth shape in
+   one transaction.
+3. **Seller-non-delivery path** — `CCOVWDEWTQPI57OCUUHGSIFSMAUQWJOX5SVZI2J5KFYDRVGNDVTFXSNQ`,
+   15%/15% split, a deliberately short 15-second `delivery_window_secs`.
+   `lock` moved the 300,000,000 deposit; the cooperative then never took
+   another action at all. After the delivery deadline passed (waited real
+   time), the buyer's `reclaim_on_nondelivery` returned the full
+   300,000,000 and set `Forfeited`.
+
+**All five deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -199,12 +275,15 @@ state.
 Don't assume these are oversights — each one is a scoping decision, listed
 so nobody "fixes" them without knowing what they're trading off.
 
-1. **No dispute or default paths.** `Status::Defaulted` and
-   `Status::Disputed` exist in the enum (so downstream code can match on
-   them) but no function transitions into either. Buyer-default forfeiture
-   and side-selling forfeiture (PRD §7) are unbuilt. **Mutual cancellation
-   is now built** (`cancel`, see above) — this item used to cover all three,
-   it no longer does.
+1. **No dispute path.** `Status::Disputed` exists in the enum (so
+   downstream code can match on it) but no function transitions into it —
+   arbitrating a *contested* fault claim needs a mechanism this contract
+   doesn't have an answer for. **Buyer-default forfeiture and seller-
+   non-delivery forfeiture are now both built** (`expire_remainder_window`
+   and `reclaim_on_nondelivery`, see above) — both are *uncontested*,
+   deadline-triggered cases only, which is why they didn't need to wait on
+   a dispute mechanism. **Mutual cancellation is also built** (`cancel`,
+   see above) — this item used to cover all three, it no longer does.
 2. **No shortfall/grade adjustment at delivery.** `confirm_delivery` is a
    boolean gate. It doesn't read a warehouse receipt's quantity or grade,
    and doesn't apply the PRD §7 adjustment schedule to the settlement
@@ -297,6 +376,43 @@ so nobody "fixes" them without knowing what they're trading off.
   on overflow (a trap, not a graceful `Error::InvalidBps`), while
   `saturating_add` guarantees the comparison against 10,000 always
   executes and rejects cleanly.
+- **Why `lock` only escrows the deposit, not the full `total_amount`**:
+  this is what makes buyer default a *deadline*, not something requiring a
+  person to assert fault. If `lock` still pulled everything upfront, there
+  would be no clean on-chain signal that the buyer failed to pay the
+  remainder — the money would already be there. Splitting funding into two
+  phases (deposit at `lock`, remainder at `fund_remainder`) turns "did the
+  buyer pay the remainder in time" into the same kind of deadline check
+  `claim_tranche`/`reclaim_tranche` already use, rather than needing new
+  machinery.
+- **Why `expire_remainder_window` is permissionless but `reclaim_on_nondelivery`
+  is buyer-gated**, even though both are "deadline passed, sweep the
+  balance" in shape: the *destination* differs. `expire_remainder_window`
+  always pays the cooperative — a fixed party, so the outcome doesn't
+  depend on who calls it, same reasoning that would apply to
+  `reclaim_tranche` if it weren't already scoped to the buyer specifically.
+  `reclaim_on_nondelivery` pays whoever calls it their own reclaim right
+  (the buyer, specifically, since only the buyer's `require_auth()` is
+  checked) — gating it prevents a third party's call from being confused
+  for the buyer's own decision to reclaim.
+- **Why `Defaulted` and `Forfeited` are two separate status variants, not
+  one shared "commitment failed" status**: they represent opposite
+  parties' failure — a buyer not paying vs. a cooperative not delivering —
+  and this session's product decision treats the two very differently
+  off-chain (buyer default is an immediate permanent bar; cooperative
+  forfeiture is a 3-strike system before a bar). Collapsing them into one
+  status would make an already-settled commitment's on-chain history
+  ambiguous about who actually failed, forcing the off-chain reputation
+  system to infer fault from *which function* fired instead of just
+  reading `status`.
+- **Why `confirm_delivery`'s guard changed to require `remainder_funded`,
+  not just the right status**: without it, a cooperative could confirm
+  delivery — and therefore eventually `settle` — while the buyer still
+  owed the remainder, since `ReadyForDelivery` alone doesn't imply the
+  remainder arrived. The two are checked as separate guards (wrong status
+  vs. status-right-but-unfunded) so the specific `RemainderNotFunded`
+  error tells a caller exactly which precondition failed, rather than a
+  generic `InvalidState` covering both.
 
 ## Next steps, in priority order
 
@@ -318,17 +434,19 @@ item that used to be #1 here is done; everything shifts up by one.
    consent.~~ **Done** — `reassign_buyer`, see above. Went one signer
    further than "with cooperative consent" alone implies; see its doc
    comment for why.
-4. **Regression tests for the remaining edge cases** (Week 7-8) — partial
-   delivery, over-delivery, buyer default, side-selling forfeiture. Mutual
-   cancellation is now done (see `cancel`, above) — this item used to
-   include it, it no longer does. None of the rest have corresponding
-   contract logic yet, so this step includes writing the logic, not just
-   the tests.
+4. ~~**Regression tests for the remaining edge cases** (Week 7-8) — partial
+   delivery, over-delivery, buyer default, side-selling forfeiture.~~
+   **Buyer default and seller-non-delivery are now done** — see
+   `expire_remainder_window`/`reclaim_on_nondelivery` above, 58/58 unit
+   tests, three-scenario live testnet verification. **Partial delivery and
+   over-delivery are still open** — both depend on the same real-attestation
+   work as item 2 below (a boolean `confirm_delivery` has no concept of
+   "partial").
 5. **Decide the `claim_window_secs` minimum question** (see "What's
    deliberately NOT implemented," item 5) — doesn't have to block the
    items above, but shouldn't be forgotten either.
 
-~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, four
+~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, five
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~
 **Done, a previous session** — see "Verified on testnet" above for the
 live proof, including the negative case (`settle` correctly rejected
@@ -337,7 +455,11 @@ on-chain before resolution). ~~Mutual cancellation (`cancel`).~~ **Done**
 run via the `api/` repo's SDK layer. ~~Assignability (`reassign_buyer`).~~
 **Done** — 34/34 unit tests, plus a genuine three-signer live-testnet
 run, including a functional proof (reclaim rights actually transfer, not
-just the field). See "Verified on testnet" above for both.
+just the field). ~~Buyer default / seller-non-delivery forfeiture, two-phase
+funding.~~ **Done** — 58/58 unit tests, three separate live-testnet
+scenarios (happy path, buyer-default sweep by an unrelated third-party
+signer, seller-non-delivery reclaim). See "Verified on testnet" above for
+all of it.
 
 ## If you're an AI agent picking this up cold
 
@@ -349,7 +471,26 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 2 Sept 2026 — added `reassign_buyer` (buyer-position
+*Last updated: 2 Sept 2026 (later same day) — two-phase funding plus the
+buyer-default / seller-non-delivery forfeiture paths, per this session's
+product decisions on default thresholds and penalty severity. `lock` now
+escrows only the deposit; `ready_for_delivery` + `fund_remainder` handle
+the remainder; `expire_remainder_window` (permissionless, sweeps to
+cooperative, immediate-bar buyer default) and `reclaim_on_nondelivery`
+(buyer-gated, 3-strike-eligible seller forfeiture) are the two new
+terminal, uncontested-by-construction outcomes — deliberately distinct
+`Status::Defaulted`/`Status::Forfeited` variants, not a shared one, since
+they represent opposite parties' failure. `confirm_delivery` re-gated to
+require the remainder funded. `cancel`/`reassign_buyer` extended to reach
+`ReadyForDelivery`. 58/58 unit tests (24 new), rebuilt and reuploaded
+(deployment 5, new WASM hash), verified live in three separate real-time
+scenarios: the full happy path through two-phase funding, a buyer default
+triggered by a genuinely unrelated third-party signer (proving the
+permissionless design), and a seller-non-delivery reclaim. Reputation/
+strikes tracking, the appeals process, and the site's Roles &
+Responsibilities disclosure are all `api/`/`site/`-side follow-on work,
+not part of this contract.
+Prior entry: added `reassign_buyer` (buyer-position
 assignability, PRD §4.8): three-signer-consented (outgoing buyer,
 cooperative, incoming buyer — one more than the PRD line alone names),
 same reachable-state range as `cancel`. 34/34 unit tests passing (4
@@ -360,7 +501,7 @@ transfer to the new buyer, not just the field. Same session also fixed
 a real process gap: bumping `ESCROW_WASM_HASH` locally isn't the same
 as the build being on testnet — `stellar contract upload` still has to
 happen, or every deploy fails with "Wasm does not exist."
-Prior entry: added `cancel` (mutual unwind, PRD §7):
+Before that: added `cancel` (mutual unwind, PRD §7):
 buyer+cooperative co-signed, reachable Draft through Advance2Released,
 balance-based refund to the buyer. 30/30 unit tests passing (6 new),
 rebuilt and redeployed to testnet (deployment 3, new WASM hash), and

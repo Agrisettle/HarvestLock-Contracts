@@ -80,6 +80,12 @@
                 },
                 {
                   "u64": "604800"
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "10368000"
                 }
               ]
             }
@@ -113,7 +119,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                     },
                     {
-                      "i128": "1000000"
+                      "i128": "350000"
                     }
                   ]
                 }
@@ -398,6 +404,38 @@
                           },
                           {
                             "key": {
+                              "symbol": "delivery_deadline"
+                            },
+                            "val": {
+                              "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "remainder_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "remainder_funded"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "remainder_window_secs"
+                            },
+                            "val": {
+                              "u64": "604800"
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "status"
                             },
                             "val": {
@@ -469,7 +507,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "150000"
+                      "i128": "800000"
                     }
                   },
                   {
@@ -521,7 +559,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "850000"
+                      "i128": "200000"
                     }
                   },
                   {

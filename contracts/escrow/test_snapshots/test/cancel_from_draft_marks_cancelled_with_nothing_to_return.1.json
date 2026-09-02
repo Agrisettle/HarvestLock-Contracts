@@ -80,6 +80,12 @@
                 },
                 {
                   "u64": "604800"
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "10368000"
                 }
               ]
             }
@@ -370,6 +376,38 @@
                             },
                             "val": {
                               "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "delivery_deadline"
+                            },
+                            "val": {
+                              "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "remainder_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "remainder_funded"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "remainder_window_secs"
+                            },
+                            "val": {
+                              "u64": "604800"
                             }
                           },
                           {

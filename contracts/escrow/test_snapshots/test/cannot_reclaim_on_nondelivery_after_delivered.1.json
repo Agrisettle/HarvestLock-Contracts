@@ -243,16 +243,12 @@
         }
       ]
     ],
-    [],
-    [],
-    [],
-    [],
     []
   ],
   "ledger": {
     "protocol_version": 27,
     "sequence_number": 0,
-    "timestamp": 0,
+    "timestamp": 10368001,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -640,7 +636,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "Settled"
+                                  "symbol": "Delivered"
                                 }
                               ]
                             }
@@ -758,7 +754,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "1000000"
+                      "i128": "350000"
                     }
                   },
                   {
@@ -810,7 +806,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "0"
+                      "i128": "650000"
                     }
                   },
                   {
