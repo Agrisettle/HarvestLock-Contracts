@@ -4,9 +4,9 @@ Soroban escrow contract (Rust) for [HarvestLock](https://github.com/agrisettle/h
 — one instance per commitment. Implements the state machine from the PRD, §4.8:
 
 ```
-Draft → Locked → Advance1_Released → Checkpoint_Passed → Advance2_Released → Delivered → Settled
-                 ↓                    ↓                    ↓
-             Cancelled            Defaulted            Disputed
+Draft → Locked → Advance1_Released → Checkpoint_Passed → Advance2_Released → ReadyForDelivery → Delivered → Settled
+                 ↓                    ↓                    ↓                  ↓
+             Cancelled            Defaulted            Disputed          Forfeited
 ```
 
 Split into its own repo so the contract has its own audit trail, its own
@@ -20,16 +20,24 @@ maintained source of truth for exactly what's implemented, what's
 deliberately not, and why. This README won't be kept as precisely in sync;
 treat it as orientation, HANDOFF.md as ground truth.
 
-Short version as of this writing: the happy-path state machine
-(`Draft` through `Settled`) is implemented in `contracts/escrow`, including
-real claim/reclaim-with-expiry semantics for both advance tranches, mutual
-cancellation (`cancel`, buyer- and cooperative-co-signed), and buyer-
-position assignability (`reassign_buyer`, three-signer-consented) — 34
-tests passing, deployed and exercised on Stellar testnet four times (the
-claim path, the reclaim-after-expiry path, the `settle`-blocks-until-
-resolved guard, `cancel` with two genuinely different signers, and
-`reassign_buyer` with three, all proven live, not just in `cargo test`).
-Buyer default/dispute paths, the allocation ledger, and NGN/oracle
+Short version as of this writing: the state machine (`Draft` through
+`Settled`) is implemented in `contracts/escrow`, including real
+claim/reclaim-with-expiry semantics for both advance tranches, mutual
+cancellation (`cancel`, buyer- and cooperative-co-signed), buyer-position
+assignability (`reassign_buyer`, three-signer-consented), and **two-phase
+funding with buyer-default / seller-non-delivery forfeiture**: `lock` now
+escrows only the deposit, the remainder is escrowed separately via
+`fund_remainder` once the cooperative calls `ready_for_delivery`, and two
+deadline-triggered terminal paths — `expire_remainder_window` (buyer
+default, permissionless, sweeps to the cooperative) and
+`reclaim_on_nondelivery` (seller non-delivery, buyer-gated, returns escrow
+to the buyer) — cover the uncontested failure cases. 58 tests passing,
+deployed and exercised on Stellar testnet five times, most recently three
+separate live scenarios proving the two-phase-funding happy path, the
+buyer-default sweep (triggered by a genuinely unrelated third-party
+signer, proving it's truly permissionless), and the seller-non-delivery
+reclaim, all proven live, not just in `cargo test`. A contested dispute
+path (`Status::Disputed`), the allocation ledger, and NGN/oracle
 conversion are not yet built — all tracked in HANDOFF.md's "next steps,"
 matching
 [`ROADMAP.md`, Phase 0 Track B](https://github.com/agrisettle/harvestlock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
