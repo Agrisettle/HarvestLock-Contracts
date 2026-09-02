@@ -78,9 +78,10 @@ Draft --lock()--> Locked --release_advance_1()--> Advance1Released
 - `mark_checkpoint` / `confirm_delivery` — warehouse-operator-auth-gated attestations, unchanged from before.
 - `settle` — **requires both tranches already resolved** (each claimed or expired) or returns `Error::TrancheUnresolved`. Once that holds, pays the cooperative the contract's entire remaining balance. See "Design decisions" for why the resolve-first requirement exists — it's the result of catching a real fairness bug during this session's audit, not an arbitrary constraint.
 - `cancel` — **mutual unwind** (PRD §7): requires **both** buyer and cooperative auth in the same call. Reachable from `Draft` through `Advance2Released`, not from `Delivered` onward. Pays the contract's current balance back to the buyer (whatever's already been claimed stays with the cooperative — no clawback), sets `Cancelled`.
+- `reassign_buyer` — **buyer-position assignability** (PRD §4.8): requires **three** signatures — outgoing buyer, cooperative, incoming buyer. Same reachable-state range as `cancel`. Rewrites `buyer`; moves no funds, a novation not a trade. The third signature (the incoming buyer's) isn't literally named in the PRD line this implements — added anyway so the current buyer and cooperative can't saddle a third party with the position without that party agreeing to take it on.
 - `get_status` / `get_commitment` — read-only accessors; `get_commitment` now also exposes each tranche's deadline/claimed/expired fields.
 
-Tests (`src/test.rs`, **30 tests, all passing, zero warnings**) cover, beyond
+Tests (`src/test.rs`, **34 tests, all passing, zero warnings**) cover, beyond
 the prior session's happy-path/ordering/bps-validation set: opening a
 tranche moves no funds; claiming within the window pays the right amount;
 claiming before opening, twice, or after the window fails with the specific
@@ -99,7 +100,11 @@ return), from `Locked` (full refund), and after a partial claim (claimed
 share stays with the cooperative, remainder returns to the buyer); `cancel`
 rejected after delivery is confirmed and rejected a second time once
 already cancelled; an auth-trace check confirming `cancel` genuinely
-requires *both* parties, not just one.
+requires *both* parties, not just one; `reassign_buyer` actually updates
+the buyer field, rejected after delivery, and — the functional proof, not
+just a field check — reclaim rights genuinely transfer to the new buyer
+(the old buyer gets nothing on a subsequent reclaim); an auth-trace check
+confirming all *three* parties are required on `reassign_buyer`.
 
 **Run it**: `cd contracts/escrow && cargo test`
 
@@ -162,7 +167,29 @@ third gotcha about unfunded accounts, is in `api/test/helpers.ts`'s doc
 comment — read that before trying to hand-verify a multi-party call
 again, from the CLI or otherwise.
 
-**All three deployed instances are validation artifacts, not
+**Deployment 4** (this session, 2 Sept 2026) — WASM hash
+`667e4a50c8ad9af081bf2c8a5be9d34069a45e5d582753cc665346455a1096b5`
+(16,130 bytes optimized, 15 exported functions — `reassign_buyer` is the
+new one). Uploaded via `stellar contract upload` (not `deploy` this
+time — the `api/` repo's own tests deploy fresh instances from this
+hash as needed, so no standalone contract address to record here).
+`reassign_buyer` verified live with three genuinely different,
+freshly-funded signers via `api/test/stellar.test.ts` — buyer field
+confirmed changed via a fresh `get_commitment` read, not assumed from
+a successful submission alone.
+
+One real process gap this surfaced: bumping `ESCROW_WASM_HASH` in
+`api/.env` to a new build's hash is **not** the same as that build
+actually being on testnet. `stellar contract build` only compiles
+locally; `deployContractInstance`'s `createCustomContract` op
+references a wasm hash that has to already be uploaded, and it doesn't
+upload anything itself. Forgetting the `stellar contract upload` step
+(or the `deploy` step, if a standalone reference instance is also
+wanted) fails every deploy with `Error(Storage, MissingValue)` /
+"Wasm does not exist" — confusing the first time, obvious once you
+know what it means.
+
+**All four deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -287,8 +314,10 @@ item that used to be #1 here is done; everything shifts up by one.
    the boolean `confirm_delivery` with something that takes delivered
    quantity/grade and applies PRD §7's adjustment schedule, plus the
    oracle staleness bound from §16.3.
-3. **Assignability** (Week 6-7) — buyer position transfer with cooperative
-   consent.
+3. ~~**Assignability** (Week 6-7) — buyer position transfer with cooperative
+   consent.~~ **Done** — `reassign_buyer`, see above. Went one signer
+   further than "with cooperative consent" alone implies; see its doc
+   comment for why.
 4. **Regression tests for the remaining edge cases** (Week 7-8) — partial
    delivery, over-delivery, buyer default, side-selling forfeiture. Mutual
    cancellation is now done (see `cancel`, above) — this item used to
@@ -299,13 +328,16 @@ item that used to be #1 here is done; everything shifts up by one.
    deliberately NOT implemented," item 5) — doesn't have to block the
    items above, but shouldn't be forgotten either.
 
-~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, three
+~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, four
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~
 **Done, a previous session** — see "Verified on testnet" above for the
 live proof, including the negative case (`settle` correctly rejected
-on-chain before resolution). ~~Mutual cancellation (`cancel`).~~ **Done,
-this session** — 30/30 unit tests plus a genuine two-signer live-testnet
-run via the `api/` repo's SDK layer. See "Verified on testnet" above.
+on-chain before resolution). ~~Mutual cancellation (`cancel`).~~ **Done**
+— 30/30 unit tests at the time, plus a genuine two-signer live-testnet
+run via the `api/` repo's SDK layer. ~~Assignability (`reassign_buyer`).~~
+**Done** — 34/34 unit tests, plus a genuine three-signer live-testnet
+run, including a functional proof (reclaim rights actually transfer, not
+just the field). See "Verified on testnet" above for both.
 
 ## If you're an AI agent picking this up cold
 
@@ -317,7 +349,18 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 1 Sept 2026 — added `cancel` (mutual unwind, PRD §7):
+*Last updated: 2 Sept 2026 — added `reassign_buyer` (buyer-position
+assignability, PRD §4.8): three-signer-consented (outgoing buyer,
+cooperative, incoming buyer — one more than the PRD line alone names),
+same reachable-state range as `cancel`. 34/34 unit tests passing (4
+new), rebuilt and reuploaded to testnet (deployment 4, new WASM hash),
+verified live with three genuinely different signers via the `api/`
+repo's SDK layer, including a functional proof that reclaim rights
+transfer to the new buyer, not just the field. Same session also fixed
+a real process gap: bumping `ESCROW_WASM_HASH` locally isn't the same
+as the build being on testnet — `stellar contract upload` still has to
+happen, or every deploy fails with "Wasm does not exist."
+Prior entry: added `cancel` (mutual unwind, PRD §7):
 buyer+cooperative co-signed, reachable Draft through Advance2Released,
 balance-based refund to the buyer. 30/30 unit tests passing (6 new),
 rebuilt and redeployed to testnet (deployment 3, new WASM hash), and
@@ -325,7 +368,7 @@ rebuilt and redeployed to testnet (deployment 3, new WASM hash), and
 authorized signers via the `api/` repo's SDK layer — see "Verified on
 testnet" for what it took to get a real multi-party Soroban auth call
 working (two false starts, both look-alikes for the right answer).
-Prior entry: claimable-balance-with-expiry semantics for both
+Before that: claimable-balance-with-expiry semantics for both
 advance tranches, a real fairness bug in `settle` caught and fixed
 during self-audit, reentrancy-hardened transfer ordering, 24 passing
 tests at the time. Update the date/context here when you next touch
