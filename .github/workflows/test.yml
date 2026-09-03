@@ -52,14 +52,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-wasm-
 
-      # stellar-cli's dependency tree pulls in libdbus-sys (for keyring
-      # support), which needs the system dbus-1 dev headers to compile --
-      # not present on ubuntu-latest by default. Without this, `cargo
-      # install --locked stellar-cli` fails at build time with "The
-      # system library `dbus-1` ... was not found", which broke this job
-      # silently for two prior runs (2 Sept 2026) before being noticed.
-      - name: Install dbus dev headers (stellar-cli build dependency)
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      # stellar-cli's dependency tree needs two system dev libraries to
+      # compile from source, neither present on ubuntu-latest by default:
+      # libdbus-sys (keyring support) needs dbus-1, and hidapi (hardware
+      # wallet/Ledger support) needs libudev. Discovered one at a time --
+      # dbus-1 broke this job silently for two prior runs (2 Sept 2026)
+      # before being noticed and fixed; libudev surfaced immediately after
+      # as the *next* missing dependency once dbus-1 was fixed, same
+      # failure shape, different library.
+      - name: Install stellar-cli's native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
 
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli
