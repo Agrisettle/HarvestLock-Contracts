@@ -265,7 +265,44 @@ all three of the new terminal outcomes, each confirmed by a fresh
    time), the buyer's `reclaim_on_nondelivery` returned the full
    300,000,000 and set `Forfeited`.
 
-**All five deployed/uploaded instances are validation artifacts, not
+**Deployment 6** (3 Sept 2026) — WASM hash
+`f935d469a6714a0c00075dab1fb26dd4a309d85cc4e321be1256d3be1ff28c8f`
+(25,370 bytes optimized, still 19 exported functions — no new functions
+this time, `initialize` and `confirm_delivery` changed signature
+instead). Uploaded via `stellar contract upload`. Implements the PRD §7
+shortfall/grade adjustment schedule `confirm_delivery`'s doc comment had
+flagged as unbuilt since Deployment 5: `initialize` now takes
+`contracted_quantity: u32` and a pre-agreed `grade_price_bps: Vec<u32>`
+table (grade -> price multiplier in bps, "pre-agreed" meaning fixed at
+initialize, never renegotiated at settlement); `confirm_delivery` takes
+`delivered_quantity`/`grade_index` and computes `settlement_bps` (the
+combined quantity x grade multiplier, capped at 10_000 — over-delivery
+isn't paid extra in v1); `settle` now pays the cooperative only what's
+still owed against `settlement_bps` (already-claimed advances are never
+clawed back, matching "advance not clawed back" in the PRD's
+partial-delivery row) and refunds the rest of the remainder to the buyer
+as a shortfall credit — a real behavior change from Deployment 5's
+"sweep the entire balance to the cooperative," not just an additive
+feature. 67/67 unit tests (9 new). One fresh instance deployed and
+walked through a real testnet transaction proving the exact math, not
+just the state transition:
+
+1. **Partial delivery + grade adjustment together** —
+   `CBDDWE4CKHAAFZPNNUVZRCHKAJQ3F2PMQA547LMPPM6ULRZJ6AKAHXAQ`, 100,000,000
+   stroops, 15%/20% advance split, `contracted_quantity: 1000`,
+   `grade_price_bps: [10000, 9000, 7500]`. Walked to `ReadyForDelivery`
+   with both advances claimed (15,000,000 + 20,000,000 to the
+   cooperative) and the 65,000,000 remainder funded. `confirm_delivery`
+   called with `delivered_quantity: 500` (50%) and `grade_index: 1`
+   (90%) — `get_commitment` confirmed `settlement_bps: 4500` (50% x 90%)
+   before `settle` ran. `settle`'s actual on-chain transfer events:
+   10,000,000 to the cooperative, 55,000,000 back to the buyer — exactly
+   `adjusted_total (45,000,000) - already_claimed (35,000,000)` to the
+   cooperative, and the rest of the remainder refunded, matching the
+   hand-computed expectation before the call was ever made, not fit to
+   the result afterward.
+
+**All six deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -284,10 +321,15 @@ so nobody "fixes" them without knowing what they're trading off.
    deadline-triggered cases only, which is why they didn't need to wait on
    a dispute mechanism. **Mutual cancellation is also built** (`cancel`,
    see above) — this item used to cover all three, it no longer does.
-2. **No shortfall/grade adjustment at delivery.** `confirm_delivery` is a
-   boolean gate. It doesn't read a warehouse receipt's quantity or grade,
-   and doesn't apply the PRD §7 adjustment schedule to the settlement
-   amount.
+2. ~~No shortfall/grade adjustment at delivery.~~ **Built** (Deployment 6,
+   3 Sept 2026, see above): `confirm_delivery` takes `delivered_quantity`/
+   `grade_index`, computes `settlement_bps` against the pre-agreed
+   `grade_price_bps` table, and `settle` pays out against it. What's
+   still not here: the warehouse operator's attestation is trusted
+   as-is — there's no separate receipt-hash/signature artifact beyond
+   the `require_auth()` call itself, and grade/quantity disputes are
+   explicitly off-chain (the operator's own appeals process, per the
+   PRD's edge-case table) — this contract doesn't arbitrate them.
 3. **No NGN/oracle conversion.** `total_amount` is treated as already being
    in the settlement asset. PRD §4.2's NGN-denomination-with-stablecoin-
    settlement design, and §16.3's oracle staleness bound, aren't here.
@@ -426,25 +468,31 @@ item that used to be #1 here is done; everything shifts up by one.
    first time (per-contract salt, never a bare hash of a phone number),
    since retrofitting it after real data exists would be a migration, not
    a refactor.
-2. **Settlement logic against a real attestation** (Week 5-6) — replace
+2. ~~**Settlement logic against a real attestation** (Week 5-6) — replace
    the boolean `confirm_delivery` with something that takes delivered
    quantity/grade and applies PRD §7's adjustment schedule, plus the
-   oracle staleness bound from §16.3.
+   oracle staleness bound from §16.3.~~ **The quantity/grade half is
+   done** (Deployment 6, 3 Sept 2026) — see above. **The oracle staleness
+   bound (§16.3) is still open**, and stays open until NGN/oracle work
+   starts at all (item 3 below) — nothing to bound yet.
 3. ~~**Assignability** (Week 6-7) — buyer position transfer with cooperative
    consent.~~ **Done** — `reassign_buyer`, see above. Went one signer
    further than "with cooperative consent" alone implies; see its doc
    comment for why.
 4. ~~**Regression tests for the remaining edge cases** (Week 7-8) — partial
    delivery, over-delivery, buyer default, side-selling forfeiture.~~
-   **Buyer default and seller-non-delivery are now done** — see
-   `expire_remainder_window`/`reclaim_on_nondelivery` above, 58/58 unit
-   tests, three-scenario live testnet verification. **Partial delivery and
-   over-delivery are still open** — both depend on the same real-attestation
-   work as item 2 below (a boolean `confirm_delivery` has no concept of
-   "partial").
+   **All done now** — buyer default and seller-non-delivery via
+   `expire_remainder_window`/`reclaim_on_nondelivery` (58/58 unit tests,
+   three-scenario live testnet verification); partial delivery and
+   over-delivery via `confirm_delivery`'s `settlement_bps` math
+   (Deployment 6, 9 new unit tests, live-verified — see above).
 5. **Decide the `claim_window_secs` minimum question** (see "What's
    deliberately NOT implemented," item 5) — doesn't have to block the
    items above, but shouldn't be forgotten either.
+6. **NGN/oracle conversion** (PRD §4.2/§16.3) — the one "must have" v1
+   feature from the PRD's feature list with genuinely nothing built yet.
+   Now the top remaining settlement-logic item, alongside the allocation
+   ledger.
 
 ~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, five
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~

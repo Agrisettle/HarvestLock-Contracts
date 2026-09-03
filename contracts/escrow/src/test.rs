@@ -7,6 +7,14 @@ use soroban_sdk::Env;
 const WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days, arbitrary but realistic
 const REMAINDER_WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days — matches the app-level default
 const DELIVERY_WINDOW: u64 = 120 * 24 * 60 * 60; // 120 days — matches the app-level default
+const CONTRACTED_QUANTITY: u32 = 1_000; // arbitrary "kg" units, same framing as total_amount's stroops-equivalent
+/// Full price at grade 0, then two discounted tiers — a plausible
+/// pre-agreed grade schedule for tests that don't care about the exact
+/// numbers, just that a schedule exists.
+const GRADE_PRICE_BPS: [u32; 3] = [10_000, 9_000, 7_500];
+/// The grade index tests default to unless they're specifically exercising
+/// grade adjustment — index 0 is `GRADE_PRICE_BPS`'s full-price tier.
+const FULL_PRICE_GRADE: u32 = 0;
 
 fn create_token<'a>(
     env: &Env,
@@ -63,6 +71,8 @@ fn setup_with_window(advance1_bps: u32, advance2_bps: u32, window: u64) -> Setup
         &window,
         &REMAINDER_WINDOW,
         &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
     );
 
     Setup {
@@ -127,6 +137,8 @@ fn cannot_initialize_twice() {
         &WINDOW,
         &REMAINDER_WINDOW,
         &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&s.env, GRADE_PRICE_BPS),
     );
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
@@ -155,6 +167,8 @@ fn zero_claim_window_rejected_at_initialize() {
         &0,
         &REMAINDER_WINDOW,
         &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
 }
@@ -183,6 +197,8 @@ fn zero_remainder_window_rejected_at_initialize() {
         &WINDOW,
         &0,
         &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
 }
@@ -211,6 +227,8 @@ fn zero_delivery_window_rejected_at_initialize() {
         &WINDOW,
         &REMAINDER_WINDOW,
         &0,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
 }
@@ -239,6 +257,8 @@ fn advance_bps_over_10000_rejected_at_initialize() {
         &WINDOW,
         &REMAINDER_WINDOW,
         &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
     );
     assert_eq!(result, Err(Ok(Error::InvalidBps)));
 }
@@ -695,7 +715,7 @@ fn cannot_reclaim_on_nondelivery_after_delivered() {
     let s = setup(1_500, 2_000);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     advance_time(&s, DELIVERY_WINDOW + 1);
 
     let result = s.contract.try_reclaim_on_nondelivery();
@@ -725,7 +745,7 @@ fn cannot_confirm_delivery_before_ready_for_delivery() {
     s.contract.release_advance_2();
     s.contract.claim_advance_2();
 
-    let result = s.contract.try_confirm_delivery();
+    let result = s.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_eq!(result, Err(Ok(Error::InvalidState)));
 }
 
@@ -740,7 +760,7 @@ fn cannot_confirm_delivery_before_remainder_funded() {
     s.contract.claim_advance_2();
     s.contract.ready_for_delivery();
 
-    let result = s.contract.try_confirm_delivery();
+    let result = s.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_eq!(result, Err(Ok(Error::RemainderNotFunded)));
 }
 
@@ -757,7 +777,7 @@ fn settle_blocked_if_advance_1_never_resolved() {
     s.contract.claim_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_settle();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
@@ -774,7 +794,7 @@ fn settle_blocked_if_advance_2_never_resolved() {
     // deliberately never claim or reclaim advance 2
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_settle();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
@@ -807,7 +827,7 @@ fn full_happy_path_both_tranches_claimed_pays_out_exactly_total_amount() {
     s.contract.claim_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     assert_eq!(s.contract.get_status(), Status::Settled);
@@ -830,7 +850,7 @@ fn full_happy_path_advance_1_reclaimed_advance_2_claimed_still_sums_correctly() 
     s.contract.claim_advance_2(); // this one claimed normally
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
@@ -862,7 +882,7 @@ fn zero_advance_bps_still_requires_explicit_resolution_before_settle() {
     s.contract.release_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder(); // with 0/0 bps, this funds the entire total_amount
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let blocked = s.contract.try_settle();
     assert_eq!(blocked, Err(Ok(Error::TrancheUnresolved)));
@@ -873,6 +893,225 @@ fn zero_advance_bps_still_requires_explicit_resolution_before_settle() {
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
+}
+
+// ---------- shortfall/grade adjustment (PRD §7) ----------
+
+#[test]
+fn initialize_rejects_zero_contracted_quantity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &1_000,
+        &1_000,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &0,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidQuantity)));
+}
+
+#[test]
+fn initialize_rejects_empty_grade_schedule() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &1_000,
+        &1_000,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::new(&env),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidGradeSchedule)));
+}
+
+#[test]
+fn initialize_rejects_a_grade_priced_over_10000_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &1_000,
+        &1_000,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, [10_000, 10_001]),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidGradeSchedule)));
+}
+
+#[test]
+fn confirm_delivery_rejects_an_out_of_range_grade_index() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+
+    // GRADE_PRICE_BPS has 3 entries (indices 0-2) -- 3 is out of range.
+    let result = s.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &3);
+    assert_eq!(result, Err(Ok(Error::InvalidGradeIndex)));
+}
+
+#[test]
+fn confirm_delivery_records_quantity_grade_and_settlement_bps() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+
+    let half_quantity = CONTRACTED_QUANTITY / 2;
+    s.contract.confirm_delivery(&half_quantity, &1); // grade 1 = 9_000 bps
+
+    let c = s.contract.get_commitment();
+    assert_eq!(c.delivered_quantity, half_quantity);
+    assert_eq!(c.grade_index, 1);
+    // 50% quantity * 90% grade = 45% combined.
+    assert_eq!(c.settlement_bps, 4_500);
+}
+
+#[test]
+fn partial_delivery_pays_cooperative_proportionally_and_refunds_the_shortfall_to_buyer() {
+    // 50% of contracted quantity delivered, full-price grade: settle should
+    // pay the cooperative half the remainder and refund the other half to
+    // the buyer -- "pre-agreed proportional adjustment; advance not clawed
+    // back" (PRD §7's partial-delivery row).
+    let s = setup(1_500, 2_000); // 35% deposit, 65% remainder
+    s.contract.lock();
+    advance_to_remainder_funded(&s); // both tranches claimed normally
+
+    let half_quantity = CONTRACTED_QUANTITY / 2;
+    s.contract.confirm_delivery(&half_quantity, &FULL_PRICE_GRADE);
+    s.contract.settle();
+
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    let advance2_amount = s.total_amount * 2_000 / 10_000;
+    let remainder = s.total_amount - advance1_amount - advance2_amount;
+    let adjusted_total = s.total_amount * 5_000 / 10_000; // 50% of contract value
+    let owed_from_remainder = adjusted_total - advance1_amount - advance2_amount;
+
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    // The advance stays with the cooperative regardless -- not clawed back.
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        advance1_amount + advance2_amount + owed_from_remainder
+    );
+    assert_eq!(s.token.balance(&s.buyer), remainder - owed_from_remainder);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+    // Nothing created or destroyed.
+    assert_eq!(
+        s.token.balance(&s.buyer) + s.token.balance(&s.cooperative),
+        s.total_amount
+    );
+}
+
+#[test]
+fn grade_adjustment_alone_reduces_the_cooperative_payout() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &1); // full quantity, grade 1 = 9_000 bps
+    s.contract.settle();
+
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    let advance2_amount = s.total_amount * 2_000 / 10_000;
+    let remainder = s.total_amount - advance1_amount - advance2_amount;
+    let adjusted_total = s.total_amount * 9_000 / 10_000;
+    let owed_from_remainder = adjusted_total - advance1_amount - advance2_amount;
+
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        advance1_amount + advance2_amount + owed_from_remainder
+    );
+    assert_eq!(s.token.balance(&s.buyer), remainder - owed_from_remainder);
+}
+
+#[test]
+fn over_delivery_does_not_pay_more_than_the_full_contract_value() {
+    // Delivering more than contracted doesn't earn extra on-chain -- the
+    // PRD's over-delivery handling (buyer right of first refusal, excess
+    // "otherwise released to cooperative") is a physical/commercial
+    // matter, not something this contract's settlement math rewards.
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+
+    let double_quantity = CONTRACTED_QUANTITY * 2;
+    s.contract.confirm_delivery(&double_quantity, &FULL_PRICE_GRADE);
+    s.contract.settle();
+
+    assert_eq!(s.contract.get_commitment().settlement_bps, 10_000);
+    assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
+    assert_eq!(s.token.balance(&s.buyer), 0);
+}
+
+#[test]
+fn severe_shortfall_does_not_claw_back_advances_already_claimed() {
+    // Total crop failure after confirm_delivery somehow still runs (e.g.
+    // partial salvage at 0 quantity would be a Forfeited path in practice,
+    // but the settlement math itself must still hold if this state is ever
+    // reached): the cooperative keeps both already-claimed advances in
+    // full, the entire remainder refunds to the buyer, nothing goes
+    // negative.
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+
+    s.contract.confirm_delivery(&0, &FULL_PRICE_GRADE); // zero delivered
+    s.contract.settle();
+
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    let advance2_amount = s.total_amount * 2_000 / 10_000;
+    let remainder = s.total_amount - advance1_amount - advance2_amount;
+
+    assert_eq!(s.contract.get_commitment().settlement_bps, 0);
+    assert_eq!(s.token.balance(&s.cooperative), advance1_amount + advance2_amount);
+    assert_eq!(s.token.balance(&s.buyer), remainder);
 }
 
 // ---------- auth gating ----------
@@ -887,7 +1126,7 @@ fn confirm_delivery_requires_warehouse_operator() {
     // signer (everything auths successfully in that mode) — what it does
     // confirm is that the call path genuinely requires an auth to exist at
     // all, by checking the recorded auth trace names the warehouse address.
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     let auths = s.env.auths();
     let touched_warehouse = auths.iter().any(|(addr, _)| *addr == s.warehouse);
     assert!(
@@ -969,7 +1208,7 @@ fn cannot_cancel_after_delivery_confirmed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_cancel();
     assert_eq!(result, Err(Ok(Error::InvalidState)));
@@ -1058,7 +1297,7 @@ fn cannot_reassign_buyer_after_delivery_confirmed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     let new_buyer = Address::generate(&s.env);
 
     let result = s.contract.try_reassign_buyer(&new_buyer);

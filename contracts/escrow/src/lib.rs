@@ -37,7 +37,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, Vec};
 
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -93,6 +93,15 @@ pub enum Error {
     /// hasn't funded the remainder yet.
     RemainderNotFunded = 16,
     DeliveryDeadlineNotPassed = 17,
+    /// `contracted_quantity` was zero at `initialize`.
+    InvalidQuantity = 18,
+    /// `grade_price_bps` was empty, or contained an entry over 10_000
+    /// (a grade worth more than the pre-agreed full unit price) at
+    /// `initialize`.
+    InvalidGradeSchedule = 19,
+    /// `confirm_delivery`'s `grade_index` didn't land inside
+    /// `grade_price_bps`.
+    InvalidGradeIndex = 20,
 }
 
 #[contracttype]
@@ -158,6 +167,35 @@ pub struct Commitment {
     /// 0 = not yet opened. Set by `ready_for_delivery`.
     pub remainder_deadline: u64,
     pub remainder_funded: bool,
+
+    /// The quantity (caller-defined unit, e.g. kg) the buyer is
+    /// contracting for. Set at `initialize`, never changes. The
+    /// denominator for `confirm_delivery`'s proportional shortfall
+    /// adjustment (PRD §7).
+    pub contracted_quantity: u32,
+    /// Pre-agreed grade -> price-multiplier table, in basis points of
+    /// `total_amount`'s implied unit price (10_000 = full price), set at
+    /// `initialize` and never changed — "pre-agreed," per the PRD, means
+    /// agreed before delivery, not decided at settlement time. Ordered by
+    /// the caller; `confirm_delivery`'s `grade_index` selects an entry.
+    /// Each entry must be <= 10_000 (a grade can't be worth more than the
+    /// full agreed unit price) and there must be at least one entry.
+    pub grade_price_bps: Vec<u32>,
+
+    /// Set by `confirm_delivery`. 0 until then (also a legitimate real
+    /// value — total crop failure — but nothing reads this field before
+    /// `Status::Delivered`, so no separate sentinel is needed).
+    pub delivered_quantity: u32,
+    /// Set by `confirm_delivery` — which `grade_price_bps` entry the
+    /// warehouse operator attested.
+    pub grade_index: u32,
+    /// Set by `confirm_delivery`: the combined quantity x grade
+    /// multiplier, in basis points of `total_amount`, that `settle` pays
+    /// out against. `min(delivered_quantity, contracted_quantity) /
+    /// contracted_quantity * grade_price_bps[grade_index]` — capped at
+    /// 10_000 by construction (over-delivery isn't paid extra in v1; see
+    /// `confirm_delivery`'s doc comment).
+    pub settlement_bps: u32,
 }
 
 #[contract]
@@ -183,6 +221,8 @@ impl EscrowContract {
         claim_window_secs: u64,
         remainder_window_secs: u64,
         delivery_window_secs: u64,
+        contracted_quantity: u32,
+        grade_price_bps: Vec<u32>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Commitment) {
             return Err(Error::AlreadyInitialized);
@@ -195,6 +235,12 @@ impl EscrowContract {
         }
         if claim_window_secs == 0 || remainder_window_secs == 0 || delivery_window_secs == 0 {
             return Err(Error::InvalidWindow);
+        }
+        if contracted_quantity == 0 {
+            return Err(Error::InvalidQuantity);
+        }
+        if grade_price_bps.is_empty() || grade_price_bps.iter().any(|bps| bps > 10_000) {
+            return Err(Error::InvalidGradeSchedule);
         }
         buyer.require_auth();
 
@@ -220,6 +266,11 @@ impl EscrowContract {
             advance2_expired: false,
             remainder_deadline: 0,
             remainder_funded: false,
+            contracted_quantity,
+            grade_price_bps,
+            delivered_quantity: 0,
+            grade_index: 0,
+            settlement_bps: 0,
         };
         env.storage()
             .instance()
@@ -454,10 +505,16 @@ impl EscrowContract {
     /// be funded — delivery shouldn't be confirmable while the buyer
     /// still owes money on the deal.
     ///
-    /// This is a bare boolean gate for now — it does not yet read a
-    /// warehouse receipt's quantity/grade or apply the PRD §7 shortfall
-    /// adjustment schedule. See HANDOFF.md.
-    pub fn confirm_delivery(env: Env) -> Result<(), Error> {
+    /// Applies the PRD §7 shortfall/grade adjustment schedule: `delivered_quantity`
+    /// is compared against `contracted_quantity` (proportional, capped at
+    /// 100% — over-delivery isn't paid extra in v1, matching "excess
+    /// otherwise released to cooperative" off-chain), `grade_index` selects
+    /// an entry from the pre-agreed `grade_price_bps` table, and the two
+    /// multiply together into `settlement_bps`, which `settle` pays out
+    /// against. The warehouse operator's attestation is authoritative here
+    /// — a grade or quantity dispute is the operator's own appeals
+    /// process, not a HarvestLock dispute (PRD's edge-case table).
+    pub fn confirm_delivery(env: Env, delivered_quantity: u32, grade_index: u32) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         if c.status != Status::ReadyForDelivery {
             return Err(Error::InvalidState);
@@ -465,17 +522,38 @@ impl EscrowContract {
         if !c.remainder_funded {
             return Err(Error::RemainderNotFunded);
         }
+        let Some(grade_bps) = c.grade_price_bps.get(grade_index) else {
+            return Err(Error::InvalidGradeIndex);
+        };
         c.warehouse_operator.require_auth();
+
+        let quantity_bps = (delivered_quantity.min(c.contracted_quantity) as i128 * 10_000
+            / c.contracted_quantity as i128) as u32;
+        c.delivered_quantity = delivered_quantity;
+        c.grade_index = grade_index;
+        c.settlement_bps = (quantity_bps as i128 * grade_bps as i128 / 10_000) as u32;
         c.status = Status::Delivered;
         Self::save(&env, &c);
         Ok(())
     }
 
-    /// Delivered -> Settled. Pays the cooperative the contract's *entire*
-    /// remaining token balance — not a recomputed bps figure, so it's
-    /// automatically correct regardless of the exact claim/reclaim history
-    /// (and regardless of the deposit/remainder split, both of which are
-    /// already sitting in the contract's balance by this point).
+    /// Delivered -> Settled. Splits the contract's remaining token balance
+    /// (the funded remainder — advances already left the contract via
+    /// `claim_tranche`/`reclaim_tranche` by this point) between the
+    /// cooperative and a shortfall refund to the buyer, per
+    /// `confirm_delivery`'s `settlement_bps`.
+    ///
+    /// "Advance not clawed back" (PRD §7, partial delivery): whatever the
+    /// cooperative already claimed via `claim_advance_1`/`claim_advance_2`
+    /// stays theirs regardless of the final `settlement_bps` — this only
+    /// adjusts the *remainder* payment. `adjusted_total = total_amount *
+    /// settlement_bps / 10_000` is the full contract value the delivery
+    /// actually earned; subtracting what the cooperative already claimed
+    /// gives what's still owed to them from the remainder (floored at
+    /// zero, since claimed advances are never clawed back even if a severe
+    /// shortfall means they technically over-earned already). Whatever of
+    /// the remainder balance isn't owed goes back to the buyer as a
+    /// shortfall refund.
     ///
     /// **Requires both advance tranches already resolved** (each either
     /// claimed or expired) before it will run. This was *not* the first
@@ -503,14 +581,32 @@ impl EscrowContract {
             return Err(Error::TrancheUnresolved);
         }
 
+        let adjusted_total = Self::bps_amount(c.total_amount, c.settlement_bps);
+        let claimed_by_coop = (if c.advance1_claimed {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_claimed {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        });
+        let owed_from_remainder = (adjusted_total - claimed_by_coop).max(0);
+
         // Effects before interaction — see `lock`'s comment for why.
         c.status = Status::Settled;
         Self::save(&env, &c);
 
         let token_client = token::Client::new(&env, &c.token);
-        let balance = token_client.balance(&env.current_contract_address());
-        if balance > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
+        let remainder_balance = token_client.balance(&env.current_contract_address());
+        let coop_payment = owed_from_remainder.min(remainder_balance);
+        let buyer_refund = remainder_balance - coop_payment;
+
+        if coop_payment > 0 {
+            token_client.transfer(&env.current_contract_address(), &c.cooperative, &coop_payment);
+        }
+        if buyer_refund > 0 {
+            token_client.transfer(&env.current_contract_address(), &c.buyer, &buyer_refund);
         }
         Ok(())
     }

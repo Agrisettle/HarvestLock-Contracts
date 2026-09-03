@@ -86,6 +86,22 @@
                 },
                 {
                   "u64": "10368000"
+                },
+                {
+                  "u32": 1000
+                },
+                {
+                  "vec": [
+                    {
+                      "u32": 10000
+                    },
+                    {
+                      "u32": 9000
+                    },
+                    {
+                      "u32": 7500
+                    }
+                  ]
                 }
               ]
             }
@@ -236,7 +252,14 @@
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
               "function_name": "confirm_delivery",
-              "args": []
+              "args": [
+                {
+                  "u32": 1000
+                },
+                {
+                  "u32": 0
+                }
+              ]
             }
           },
           "sub_invocations": []
@@ -587,6 +610,14 @@
                           },
                           {
                             "key": {
+                              "symbol": "contracted_quantity"
+                            },
+                            "val": {
+                              "u32": 1000
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "cooperative"
                             },
                             "val": {
@@ -603,10 +634,44 @@
                           },
                           {
                             "key": {
+                              "symbol": "delivered_quantity"
+                            },
+                            "val": {
+                              "u32": 1000
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "delivery_deadline"
                             },
                             "val": {
                               "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "grade_index"
+                            },
+                            "val": {
+                              "u32": 0
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "grade_price_bps"
+                            },
+                            "val": {
+                              "vec": [
+                                {
+                                  "u32": 10000
+                                },
+                                {
+                                  "u32": 9000
+                                },
+                                {
+                                  "u32": 7500
+                                }
+                              ]
                             }
                           },
                           {
@@ -631,6 +696,14 @@
                             },
                             "val": {
                               "u64": "604800"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "settlement_bps"
+                            },
+                            "val": {
+                              "u32": 10000
                             }
                           },
                           {
