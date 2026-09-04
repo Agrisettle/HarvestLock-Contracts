@@ -302,7 +302,43 @@ just the state transition:
    hand-computed expectation before the call was ever made, not fit to
    the result afterward.
 
-**All six deployed/uploaded instances are validation artifacts, not
+**Deployment 7** (4 Sept 2026) — WASM hash
+`9f1843c9c9c299182d307f7d9a25bfe1b7558ff2f8313daf0aa233aa2adb014e`
+(28,767 bytes optimized, 21 exported functions — `set_allocation`,
+`get_allocation` are the two new ones). Uploaded via `stellar contract
+upload`. Implements the PRD §4.8/§16.1 allocation ledger — the last
+"must have" v1 feature from the PRD's own feature list with nothing
+built for it before this: `set_allocation(members: Vec<AllocationMember>)`
+records each member farmer's entitlement as a **per-member salted
+hash** plus a `share_bps`, cooperative-gated, one-time, callable only
+from `Draft` (before `lock`). Deliberately **not required** before
+`lock` — a solo-farmer commitment with no cooperative pooling shouldn't
+be forced through a step that doesn't apply to it; see the function's
+own doc comment. **Record-only in v1**, not a behavior change to
+`settle`: PRD §4.9 already states the v1 default explicitly
+("Transparent allocation... payment settles to the cooperative wallet")
+— so unlike the shortfall/grade work, this genuinely was additive, no
+existing test needed updating. The salt-scheme decision TASKS.md
+flagged as compliance-load-bearing: per-*member* (not just per-contract)
+random salts, hashed off-chain (API's Postgres) — the on-chain entry is
+never a bare phone-number hash, and deleting the off-chain salt+phone
+row (NDPA s.34 erasure) makes the on-chain hash permanently unlinkable
+to a real person, since brute-forcing a random salt is infeasible
+regardless of phone-number keyspace size. 76/76 unit tests (9 new).
+One fresh instance deployed and walked through real testnet
+transactions:
+
+1. **Allocation ledger record + read-back** —
+   `CBRZPZPXBYW2QHGU5KOFWG27AS4YM7EQLULOALYAE3VGJ7BMZTZLKARZ`.
+   `set_allocation` called with two members (6,000/4,000 bps split);
+   `get_allocation` read back the exact same two entries. A second
+   `set_allocation` call correctly rejected on-chain with
+   `Error(Contract, #21)` (`AllocationAlreadySet`). `lock` then ran
+   successfully with the allocation already set, confirming the two
+   features compose — `Status::Locked` confirmed via a fresh
+   `get_status` read.
+
+**All seven deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -333,10 +369,13 @@ so nobody "fixes" them without knowing what they're trading off.
 3. **No NGN/oracle conversion.** `total_amount` is treated as already being
    in the settlement asset. PRD §4.2's NGN-denomination-with-stablecoin-
    settlement design, and §16.3's oracle staleness bound, aren't here.
-4. **No allocation ledger.** PRD §4.8's per-member salted-hash allocation
-   (and the NDPA-driven off-chain identity map from §16.1) don't exist in
-   this contract at all yet. This is a separate, substantial piece of work,
-   and is now the **top priority** in "Next steps."
+4. ~~No allocation ledger.~~ **Built** (Deployment 7, 4 Sept 2026, see
+   above): `set_allocation`/`get_allocation`, per-member salted hashes,
+   record-only (PRD §4.9 Rung 1, the v1 default, not a deferred
+   decision). What's still not here: pro-rated on-chain payout (Rung 2+)
+   — `settle` still pays the cooperative a lump sum — and the off-chain
+   identity map itself (the API's Postgres side, not this contract's
+   job; see `api/HANDOFF.md`).
 5. **Still no minimum (or maximum) enforced on `claim_window_secs` at the
    contract level** — this remains deliberate, not an oversight. The
    `api/` repo now enforces a 1 hour floor / 90 day ceiling before it will
@@ -461,13 +500,14 @@ so nobody "fixes" them without knowing what they're trading off.
 Matches `ROADMAP.md` (main repo) Phase 0 Track B — the claimable-balance
 item that used to be #1 here is done; everything shifts up by one.
 
-1. **Allocation ledger** (Week 4-5) — salted-hash member entries, decided
-   per-contract-instance. Genuinely new surface, not an extension of what
-   exists. This is also the piece most directly tied to the NDPA
-   compliance finding in PRD §16.1 — get the salting scheme right the
-   first time (per-contract salt, never a bare hash of a phone number),
-   since retrofitting it after real data exists would be a migration, not
-   a refactor.
+1. ~~**Allocation ledger** (Week 4-5) — salted-hash member entries, decided
+   per-contract-instance.~~ **Done, contract side** (Deployment 7, 4 Sept
+   2026, see above) — per-*member* salts (stronger than the per-contract
+   floor PRD §16.1 asked for), record-only settlement (PRD §4.9's own v1
+   default). **The off-chain identity map (API's Postgres, the actual
+   NDPA-erasability half) is the next item** — this contract only stores
+   the hash, the salt+phone-number mapping that makes it erasable has to
+   live off-chain.
 2. ~~**Settlement logic against a real attestation** (Week 5-6) — replace
    the boolean `confirm_delivery` with something that takes delivered
    quantity/grade and applies PRD §7's adjustment schedule, plus the

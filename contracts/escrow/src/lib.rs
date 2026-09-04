@@ -34,10 +34,18 @@
 //! tranches must be resolved (claimed or expired) before `settle` will
 //! run — see `settle`'s doc comment for why that's required rather than
 //! `settle` inferring an outcome for whatever's left unresolved.
+//!
+//! `set_allocation` records each member farmer's entitlement share as a
+//! salted hash — PRD's allocation ledger, record-only in v1 (Transparency
+//! Ladder Rung 1, PRD §4.9's own stated default): `settle` doesn't
+//! pro-rate a payout across members, it stays a lump sum to the
+//! cooperative wallet, with the ledger providing on-chain transparency
+//! into what each member is owed off-chain. See its doc comment for the
+//! NDPA-erasability reasoning behind the salted-hash design.
 
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec};
 
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,11 +110,44 @@ pub enum Error {
     /// `confirm_delivery`'s `grade_index` didn't land inside
     /// `grade_price_bps`.
     InvalidGradeIndex = 20,
+    /// `set_allocation` called a second time — the allocation ledger is
+    /// one-time and immutable once recorded.
+    AllocationAlreadySet = 21,
+    /// `set_allocation`'s `members` was empty, or the sum of every
+    /// entry's `share_bps` exceeded 10_000.
+    InvalidAllocation = 22,
+    /// `get_allocation` called before `set_allocation` ever ran.
+    AllocationNotSet = 23,
 }
 
 #[contracttype]
 pub enum DataKey {
     Commitment,
+    /// Present only once `set_allocation` has run — absence, not an
+    /// empty `Vec`, is how `get_allocation` distinguishes "never set"
+    /// from a (rejected-at-write-time, so never actually reachable)
+    /// empty list.
+    Allocation,
+}
+
+/// One farmer member's recorded share of a commitment, captured by
+/// `set_allocation`. `member_hash` is a per-member salted hash — never a
+/// bare phone number or other PII — computed off-chain (API) as
+/// `HMAC-SHA256(salt, phone_number)` with a fresh random salt per
+/// member. The salt and the phone-number mapping live only in the API's
+/// Postgres, which is what makes this genuinely erasable per NDPA s.34:
+/// delete the off-chain row and this hash becomes permanently
+/// unlinkable to a real person, since the salt is gone and brute-
+/// forcing a random salt is infeasible regardless of how small the
+/// phone-number keyspace is.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AllocationMember {
+    pub member_hash: BytesN<32>,
+    /// Basis points of the commitment's total payout this member is
+    /// entitled to, off-chain. Record-only in v1 — see `set_allocation`'s
+    /// doc comment for why `settle` doesn't pro-rate against this.
+    pub share_bps: u32,
 }
 
 /// Which advance tranche an operation applies to. Not part of the public
@@ -276,6 +317,59 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::Commitment, &commitment);
         Ok(())
+    }
+
+    /// Cooperative-authored record of member farmers' entitlement shares
+    /// — PRD's "member allocation ledger capture at lock-in." **Record-
+    /// only in v1**: `settle` still pays the cooperative wallet a lump
+    /// sum; this doesn't pro-rate an on-chain payout across members. That
+    /// matches PRD §4.9's own stated v1 default (Transparency Ladder
+    /// Rung 1 — "Payment settles to the cooperative wallet. Each
+    /// member's entitlement is on chain and readable; members receive an
+    /// SMS stating their share") — not an open question this contract
+    /// deferred, but the documented default. Pro-rated on-chain payout
+    /// (Rung 2+) would need real design work (N token transfers instead
+    /// of one, rounding-remainder handling) and isn't built.
+    ///
+    /// One-time and immutable once set — no amend function exists.
+    /// Deliberately **not** required before `lock`: a solo-farmer
+    /// commitment with no cooperative pooling shouldn't be forced through
+    /// a ledger step that doesn't apply to it, and gating `lock` on this
+    /// would be a real behavior change affecting every existing
+    /// commitment shape, not a decision this session is making
+    /// unilaterally. Cooperative-gated, not buyer-consented — this is the
+    /// cooperative's own membership data, not a term the buyer negotiates.
+    pub fn set_allocation(env: Env, members: Vec<AllocationMember>) -> Result<(), Error> {
+        let c = Self::load(&env)?;
+        if c.status != Status::Draft {
+            return Err(Error::InvalidState);
+        }
+        if env.storage().instance().has(&DataKey::Allocation) {
+            return Err(Error::AllocationAlreadySet);
+        }
+        if members.is_empty() {
+            return Err(Error::InvalidAllocation);
+        }
+        let mut total_bps: u32 = 0;
+        for m in members.iter() {
+            total_bps = total_bps.saturating_add(m.share_bps);
+        }
+        if total_bps > 10_000 {
+            return Err(Error::InvalidAllocation);
+        }
+        c.cooperative.require_auth();
+
+        env.storage().instance().set(&DataKey::Allocation, &members);
+        Ok(())
+    }
+
+    /// The recorded allocation ledger, if `set_allocation` has run.
+    pub fn get_allocation(env: Env) -> Result<Vec<AllocationMember>, Error> {
+        let _ = Self::load(&env)?; // NotInitialized if the commitment itself doesn't exist
+        env.storage()
+            .instance()
+            .get(&DataKey::Allocation)
+            .ok_or(Error::AllocationNotSet)
     }
 
     /// Draft -> Locked. Pulls the buyer's **deposit** into the contract —

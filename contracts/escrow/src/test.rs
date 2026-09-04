@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, BytesN as _, Ledger as _};
 use soroban_sdk::Env;
 
 const WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days, arbitrary but realistic
@@ -278,6 +278,117 @@ fn lock_transfers_only_the_deposit_not_the_full_total() {
     assert_eq!(s.contract.get_status(), Status::Locked);
     assert_eq!(s.token.balance(&s.buyer), s.total_amount - deposit);
     assert_eq!(s.token.balance(&s.contract.address), deposit);
+}
+
+// ---------- allocation ledger (record-only, PRD §4.9 Rung 1) ----------
+
+fn member(env: &Env, share_bps: u32) -> AllocationMember {
+    AllocationMember {
+        member_hash: BytesN::random(env),
+        share_bps,
+    }
+}
+
+#[test]
+fn set_allocation_records_the_member_list() {
+    let s = setup(1_500, 1_500);
+    let members = Vec::from_array(
+        &s.env,
+        [member(&s.env, 6_000), member(&s.env, 4_000)],
+    );
+
+    s.contract.set_allocation(&members);
+
+    let stored = s.contract.get_allocation();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.get(0).unwrap().share_bps, 6_000);
+    assert_eq!(stored.get(1).unwrap().share_bps, 4_000);
+}
+
+#[test]
+fn get_allocation_before_set_allocation_fails() {
+    let s = setup(1_500, 1_500);
+    let result = s.contract.try_get_allocation();
+    assert_eq!(result, Err(Ok(Error::AllocationNotSet)));
+}
+
+#[test]
+fn cannot_set_allocation_twice() {
+    let s = setup(1_500, 1_500);
+    let members = Vec::from_array(&s.env, [member(&s.env, 10_000)]);
+    s.contract.set_allocation(&members);
+
+    let again = Vec::from_array(&s.env, [member(&s.env, 5_000)]);
+    let result = s.contract.try_set_allocation(&again);
+    assert_eq!(result, Err(Ok(Error::AllocationAlreadySet)));
+}
+
+#[test]
+fn cannot_set_allocation_with_an_empty_member_list() {
+    let s = setup(1_500, 1_500);
+    let empty: Vec<AllocationMember> = Vec::new(&s.env);
+    let result = s.contract.try_set_allocation(&empty);
+    assert_eq!(result, Err(Ok(Error::InvalidAllocation)));
+}
+
+#[test]
+fn cannot_set_allocation_with_shares_summing_over_10000_bps() {
+    let s = setup(1_500, 1_500);
+    let members = Vec::from_array(
+        &s.env,
+        [member(&s.env, 6_000), member(&s.env, 5_000)],
+    );
+    let result = s.contract.try_set_allocation(&members);
+    assert_eq!(result, Err(Ok(Error::InvalidAllocation)));
+}
+
+#[test]
+fn allocation_shares_summing_to_under_10000_bps_is_allowed() {
+    // Not every member has to be enumerated -- an incomplete or
+    // under-100% ledger is still valid (e.g. recorded before the full
+    // membership list is finalized). Only over 100% is rejected, since
+    // that can never be a coherent entitlement split.
+    let s = setup(1_500, 1_500);
+    let members = Vec::from_array(&s.env, [member(&s.env, 3_000)]);
+    s.contract.set_allocation(&members);
+    assert_eq!(s.contract.get_allocation().len(), 1);
+}
+
+#[test]
+fn cannot_set_allocation_after_lock() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let members = Vec::from_array(&s.env, [member(&s.env, 10_000)]);
+    let result = s.contract.try_set_allocation(&members);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn lock_does_not_require_an_allocation_to_have_been_set() {
+    // Deliberately optional -- see set_allocation's doc comment. A
+    // solo-farmer commitment with no cooperative pooling should still be
+    // lockable without ever calling set_allocation.
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    assert_eq!(s.contract.get_status(), Status::Locked);
+}
+
+#[test]
+fn set_allocation_requires_cooperative_auth() {
+    let s = setup(1_500, 1_500);
+    let members = Vec::from_array(&s.env, [member(&s.env, 10_000)]);
+
+    // mock_all_auths() means this can't check *rejection* of a wrong
+    // signer -- see confirm_delivery_requires_warehouse_operator's
+    // comment. What it confirms is that the call path genuinely requires
+    // the cooperative's auth to exist at all.
+    s.contract.set_allocation(&members);
+    let auths = s.env.auths();
+    let touched_cooperative = auths.iter().any(|(addr, _)| *addr == s.cooperative);
+    assert!(
+        touched_cooperative,
+        "expected cooperative auth on set_allocation"
+    );
 }
 
 // ---------- opening a tranche moves no funds ----------
