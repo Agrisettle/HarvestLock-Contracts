@@ -42,10 +42,34 @@
 //! cooperative wallet, with the ledger providing on-chain transparency
 //! into what each member is owed off-chain. See its doc comment for the
 //! NDPA-erasability reasoning behind the salted-hash design.
+//!
+//! `oracle_rate` reads a live FX rate from a [Reflector](https://reflector.network)
+//! SEP-40 oracle (`reflector.rs`), with a caller-configured staleness
+//! bound (PRD §16.3) — a stale or missing quote is a hard error, never a
+//! silently-old number. `initialize`'s `oracle_config` is `Option`al:
+//! `None` for a plain deal that needs no conversion, `Some` for a deal
+//! denominated in a currency the settlement token doesn't natively track
+//! (PRD §4.2's NGN-unit-of-account design). **This is a read primitive
+//! only** — it does not yet feed into `settle`'s payout math. PRD §4.2
+//! names three different options for who bears FX risk between lock-in
+//! and settlement, explicitly "decided with pilot partners rather than
+//! assumed"; wiring a specific one into `settle` before that
+//! conversation happens would be choosing on their behalf. What this
+//! session *did* resolve, empirically rather than by assumption:
+//! Reflector's live testnet fiat-rate oracle does not currently quote
+//! NGN at all (verified via a real `stellar contract invoke ... --
+//! assets` call — see `reflector.rs` and `HANDOFF.md`) — the same
+//! category of gap PRD §4.4 already named for commodity prices, just
+//! discovered here for the currency-conversion half too.
 
 #![no_std]
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec};
+mod reflector;
+
+use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec,
+};
 
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -118,6 +142,23 @@ pub enum Error {
     InvalidAllocation = 22,
     /// `get_allocation` called before `set_allocation` ever ran.
     AllocationNotSet = 23,
+    /// `initialize`'s `oracle_config` was `Some` with `max_age_secs == 0`
+    /// — a zero staleness bound would reject every real quote, which is
+    /// never what a caller actually wants (that's what leaving
+    /// `oracle_config` as `None` is for).
+    InvalidOracleConfig = 24,
+    /// `oracle_rate` called but `initialize` never set an `oracle_config`
+    /// for this commitment.
+    OracleNotConfigured = 25,
+    /// The configured Reflector oracle returned `None` for
+    /// `oracle_config.price_asset` — it doesn't quote that asset at all
+    /// (call the oracle's own `assets()` to check what it does quote).
+    OraclePriceUnavailable = 26,
+    /// The most recent quote is older than `oracle_config.max_age_secs`
+    /// allows (PRD §16.3's staleness bound) — refused rather than
+    /// returned, since a caller silently getting a too-old rate is worse
+    /// than getting no rate at all.
+    OracleStale = 27,
 }
 
 #[contracttype]
@@ -128,6 +169,49 @@ pub enum DataKey {
     /// from a (rejected-at-write-time, so never actually reachable)
     /// empty list.
     Allocation,
+    /// Present only when `initialize`'s `oracle_config` was `Some` —
+    /// absence means this commitment needs no currency conversion.
+    OracleConfig,
+}
+
+/// Which Reflector oracle instance and asset symbol `oracle_rate` reads
+/// from, and how old a quote it will accept. Set once, at `initialize`
+/// — see the module doc's "This is a read primitive only" note for why
+/// this doesn't (yet) change what `settle` pays out.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OracleConfig {
+    /// The Reflector oracle contract to call — e.g. the testnet
+    /// "Fiat exchange rates" instance, `CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W`
+    /// (see `reflector.rs`).
+    pub oracle_contract: Address,
+    /// The asset symbol to quote against that oracle's `base()` — e.g.
+    /// `NGN`. Always queried as `ReflectorAsset::Other`, since this
+    /// contract's use case is fiat/FX symbols, not Stellar-native assets.
+    pub price_asset: Symbol,
+    /// Maximum age, in seconds, a quote may have and still be accepted —
+    /// PRD §16.3's oracle staleness bound. Must be > 0.
+    pub max_age_secs: u64,
+}
+
+/// A live rate read from the configured Reflector oracle, returned by
+/// `oracle_rate`. Mirrors Reflector's own `PriceData` shape (see
+/// `reflector.rs`) rather than reusing that type directly, since this is
+/// this contract's own public interface, not a re-export of Reflector's.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OracleRate {
+    /// `price / 10^decimals` is the actual rate, where `decimals` comes
+    /// from the oracle contract's own `decimals()` (14, for Reflector's
+    /// fiat exchange rate oracle as of this writing) — not duplicated
+    /// into `OracleConfig`, since it's a property of the oracle, not of
+    /// this commitment, and callers can read it directly off the oracle
+    /// contract if they need it.
+    pub price: i128,
+    /// The ledger timestamp the oracle recorded this quote at — already
+    /// checked against `max_age_secs` by the time this is returned, but
+    /// surfaced anyway so a caller can display "as of" freshness.
+    pub timestamp: u64,
 }
 
 /// One farmer member's recorded share of a commitment, captured by
@@ -264,6 +348,9 @@ impl EscrowContract {
         delivery_window_secs: u64,
         contracted_quantity: u32,
         grade_price_bps: Vec<u32>,
+        // Some if this deal needs the oracle_rate conversion path — see
+        // the module doc. None for a plain deal.
+        oracle_config: Option<OracleConfig>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Commitment) {
             return Err(Error::AlreadyInitialized);
@@ -282,6 +369,11 @@ impl EscrowContract {
         }
         if grade_price_bps.is_empty() || grade_price_bps.iter().any(|bps| bps > 10_000) {
             return Err(Error::InvalidGradeSchedule);
+        }
+        if let Some(oc) = &oracle_config {
+            if oc.max_age_secs == 0 {
+                return Err(Error::InvalidOracleConfig);
+            }
         }
         buyer.require_auth();
 
@@ -316,7 +408,48 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Commitment, &commitment);
+        if let Some(oc) = oracle_config {
+            env.storage().instance().set(&DataKey::OracleConfig, &oc);
+        }
         Ok(())
+    }
+
+    /// The configured oracle, if `initialize` set one.
+    pub fn get_oracle_config(env: Env) -> Result<Option<OracleConfig>, Error> {
+        let _ = Self::load(&env)?; // NotInitialized if the commitment itself doesn't exist
+        Ok(env.storage().instance().get(&DataKey::OracleConfig))
+    }
+
+    /// Reads the current rate for this commitment's configured oracle
+    /// asset, enforcing the staleness bound — see the module doc's
+    /// "read primitive only" note for what this does and doesn't do yet.
+    ///
+    /// Callable in any status, including after `Settled`: this is a pure
+    /// read against Reflector's own stored history, not a state
+    /// transition, so there's no reason to gate it by commitment status.
+    pub fn oracle_rate(env: Env) -> Result<OracleRate, Error> {
+        let _ = Self::load(&env)?;
+        let config: OracleConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleConfig)
+            .ok_or(Error::OracleNotConfigured)?;
+
+        let client = ReflectorPulseClient::new(&env, &config.oracle_contract);
+        let quote = client
+            .lastprice(&ReflectorAsset::Other(config.price_asset))
+            .ok_or(Error::OraclePriceUnavailable)?;
+
+        let now = env.ledger().timestamp();
+        let age = now.saturating_sub(quote.timestamp);
+        if age > config.max_age_secs {
+            return Err(Error::OracleStale);
+        }
+
+        Ok(OracleRate {
+            price: quote.price,
+            timestamp: quote.timestamp,
+        })
     }
 
     /// Cooperative-authored record of member farmers' entitlement shares
@@ -661,8 +794,13 @@ impl EscrowContract {
     /// first means every stroop's destination is always decided by an
     /// actual `claim`/`reclaim` call, never inferred by `settle`.
     ///
-    /// No NGN/oracle conversion yet (PRD §4.2) — the full `total_amount`
-    /// is treated as already being in the settlement asset.
+    /// Still no oracle conversion in the payout math itself (PRD §4.2) —
+    /// the full `total_amount` is treated as already being in the
+    /// settlement asset, even on a commitment with an `oracle_config`
+    /// set. `oracle_rate` exists as a read primitive (see module doc);
+    /// deciding which of PRD §4.2's FX-risk-allocation options actually
+    /// consumes it here is explicitly a pilot-partner decision, not one
+    /// this session makes unilaterally.
     pub fn settle(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         if c.status != Status::Delivered {

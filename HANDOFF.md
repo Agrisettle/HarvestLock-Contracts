@@ -338,7 +338,64 @@ transactions:
    features compose — `Status::Locked` confirmed via a fresh
    `get_status` read.
 
-**All seven deployed/uploaded instances are validation artifacts, not
+**Deployment 8** (5 Sept 2026) — WASM hash
+`5322b601fc6ea29e4edfaac260573347d6b47672ecaeb5e13e7cbd75ff0afcab`
+(33,488 bytes optimized, 23 exported functions — `oracle_rate`,
+`get_oracle_config` are the two new ones). Uploaded via `stellar
+contract upload`. Builds PRD §16.3's oracle staleness bound, the item
+TASKS.md and this file's own "Next steps" both named as the last
+genuinely-unbuilt "must have" from the PRD's feature list: `initialize`
+gained an `Option<OracleConfig>` (oracle contract address + price
+asset symbol + max quote age), and `oracle_rate()` calls the configured
+[Reflector](https://reflector.network) SEP-40 oracle's `lastprice`,
+rejecting with `OracleStale` if the quote is older than the configured
+bound, `OraclePriceUnavailable` if the oracle doesn't quote that asset
+at all, `OracleNotConfigured` if `initialize` never set one. **Read
+primitive only** — doesn't change `settle`'s payout math yet; see the
+module doc in `lib.rs` for why that's a deliberate stopping point, not
+an oversight. 86/86 unit tests (10 new, against a local mock oracle
+contract — see `test.rs`'s `mock_oracle` module).
+
+Before writing any of this, spent real effort confirming Reflector's
+actual interface and address rather than assuming one: fetched the
+official Stellar docs' oracle-providers page and the
+`reflector-network/reflector-contract` repo's own README (its
+published client interface is copied near-verbatim into `reflector.rs`
+— Reflector doesn't publish a crate, and cross-contract calls match on
+XDR wire shape, not Rust type identity, so this doesn't need to be a
+dependency). That surfaced a real, load-bearing finding, not an
+assumption: **Reflector's live testnet "Fiat exchange rates" oracle
+(`CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W`) does not
+quote NGN.** Confirmed by actually calling it —
+`stellar contract invoke --id CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W --source-account deployer --network testnet --send=no -- assets`
+returned `EUR, GBP, CHF, CAD, MXN, ARS, BRL, THB, XAU` against a `USD`
+base at 14 decimals — no NGN entry at all. This is the same category
+of gap PRD §4.4 already named for commodity prices ("no on-chain
+oracle" for farm-gate prices), just discovered here for the
+currency-conversion half of §4.2 too, which PRD §4.3's own table had
+listed Reflector against as if the FX-reference half were already
+solved.
+
+Live-verified on testnet anyway, using a currency Reflector *does*
+quote to prove the mechanism itself, with `NGN` left as the intended
+production symbol (this activates automatically the day Reflector adds
+it — no code change needed, just a different `price_asset` string at
+`initialize`):
+
+1. **Live cross-contract oracle read** —
+   `CCUDE3MMW5JGK4QM3CA5PGW23KCYEIXFJ46754LKIWNJR4OKACU6HMA4`,
+   initialized with `oracle_config` pointing at the real Reflector fiat
+   oracle above, `price_asset: "GBP"`, `max_age_secs: 3600`. `oracle_rate`
+   returned `{"price":"135300006985028","timestamp":1788560400}` —
+   135300006985028 / 10^14 = **1.353 USD per GBP**, a realistic live FX
+   rate, not a fixture — read back from a real cross-contract call this
+   contract made to Reflector's actual deployed testnet oracle, at a
+   timestamp 4m19s before the call (well inside Reflector's own 5-minute
+   update resolution and comfortably under the 3600s bound configured).
+   `get_oracle_config` read back the exact stored config afterward,
+   confirming `initialize`'s `Option` correctly persisted it.
+
+**All eight deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -366,9 +423,21 @@ so nobody "fixes" them without knowing what they're trading off.
    the `require_auth()` call itself, and grade/quantity disputes are
    explicitly off-chain (the operator's own appeals process, per the
    PRD's edge-case table) — this contract doesn't arbitrate them.
-3. **No NGN/oracle conversion.** `total_amount` is treated as already being
-   in the settlement asset. PRD §4.2's NGN-denomination-with-stablecoin-
-   settlement design, and §16.3's oracle staleness bound, aren't here.
+3. ~~No NGN/oracle conversion.~~ **The staleness-bound read half is
+   built** (Deployment 8, 5 Sept 2026, see above): `oracle_rate()` reads
+   a live Reflector SEP-40 quote and enforces PRD §16.3's staleness
+   bound. **`total_amount` still isn't converted anywhere** — `settle`
+   still treats it as already being in the settlement asset, on every
+   commitment, oracle-configured or not. That's deliberate, not a gap in
+   this pass: PRD §4.2 names three different options for who bears FX
+   risk between lock-in and settlement, explicitly "decided with pilot
+   partners rather than assumed," and picking one to wire into `settle`
+   would be answering on their behalf. Also still open, but for a
+   different reason: **Reflector's live testnet fiat oracle doesn't
+   quote NGN at all** (verified via a real `assets()` call, see
+   Deployment 8) — the actual currency this PRD section is about has no
+   real feed to convert against yet, on top of the settlement-design
+   question above.
 4. ~~No allocation ledger.~~ **Built** (Deployment 7, 4 Sept 2026, see
    above): `set_allocation`/`get_allocation`, per-member salted hashes,
    record-only (PRD §4.9 Rung 1, the v1 default, not a deferred
@@ -529,10 +598,17 @@ item that used to be #1 here is done; everything shifts up by one.
 5. **Decide the `claim_window_secs` minimum question** (see "What's
    deliberately NOT implemented," item 5) — doesn't have to block the
    items above, but shouldn't be forgotten either.
-6. **NGN/oracle conversion** (PRD §4.2/§16.3) — the one "must have" v1
-   feature from the PRD's feature list with genuinely nothing built yet.
-   Now the top remaining settlement-logic item, alongside the allocation
-   ledger.
+6. ~~**NGN/oracle conversion** (PRD §4.2/§16.3)~~ — **the staleness-bound
+   read half is done** (Deployment 8, 5 Sept 2026, see above):
+   `oracle_rate()`/`get_oracle_config()`, live-verified against the real
+   Reflector testnet oracle. What's still open, and why it's staying
+   open rather than being pushed further unilaterally: (a) wiring a
+   specific rate into `settle`'s payout math means picking one of PRD
+   §4.2's three FX-risk-allocation options, which the PRD itself says to
+   decide with pilot partners, not assume; (b) Reflector's real testnet
+   fiat oracle doesn't quote NGN at all yet (confirmed live, not
+   assumed) — the actual currency this feature is for has no feed to
+   convert against, independent of the settlement-design question.
 
 ~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, five
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~

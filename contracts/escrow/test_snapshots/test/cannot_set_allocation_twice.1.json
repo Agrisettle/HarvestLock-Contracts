@@ -102,7 +102,8 @@
                       "u32": 7500
                     }
                   ]
-                }
+                },
+                "void"
               ]
             }
           },
@@ -128,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "5f307c281a2c90869a6b7ad32e5a9c3f065d42d7688897aeef2e0ae618705f4a"
+                            "bytes": "54a1768c8dd123613fc66472b3b7fcf8c2ded44f629f93c979df80fb24eaf994"
                           }
                         },
                         {
@@ -295,7 +296,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "5f307c281a2c90869a6b7ad32e5a9c3f065d42d7688897aeef2e0ae618705f4a"
+                                  "bytes": "54a1768c8dd123613fc66472b3b7fcf8c2ded44f629f93c979df80fb24eaf994"
                                 }
                               },
                               {

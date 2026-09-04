@@ -73,6 +73,7 @@ fn setup_with_window(advance1_bps: u32, advance2_bps: u32, window: u64) -> Setup
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
     );
 
     Setup {
@@ -139,6 +140,7 @@ fn cannot_initialize_twice() {
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&s.env, GRADE_PRICE_BPS),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
@@ -169,6 +171,7 @@ fn zero_claim_window_rejected_at_initialize() {
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
 }
@@ -199,6 +202,7 @@ fn zero_remainder_window_rejected_at_initialize() {
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
 }
@@ -229,6 +233,7 @@ fn zero_delivery_window_rejected_at_initialize() {
         &0,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
 }
@@ -259,6 +264,7 @@ fn advance_bps_over_10000_rejected_at_initialize() {
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidBps)));
 }
@@ -389,6 +395,265 @@ fn set_allocation_requires_cooperative_auth() {
         touched_cooperative,
         "expected cooperative auth on set_allocation"
     );
+}
+
+// ---------- oracle_rate (PRD §16.3 staleness bound) ----------
+//
+// A local stand-in contract, not the real Reflector — `Env::default()`'s
+// simulated ledger can't reach the live testnet oracle this contract
+// actually integrates with (see reflector.rs's doc comment for the real
+// address, and HANDOFF.md for the live testnet call that verified its
+// interface and asset list). Cross-contract calls in Soroban match on
+// XDR wire shape, not Rust type identity, so an independently-defined
+// `Asset`/`PriceData` pair with the same shape as reflector.rs's is
+// indistinguishable, from `oracle_rate`'s perspective, from the genuine
+// Reflector contract.
+mod mock_oracle {
+    use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Asset {
+        Stellar(Address),
+        Other(Symbol),
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct PriceData {
+        pub price: i128,
+        pub timestamp: u64,
+    }
+
+    #[contract]
+    pub struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        /// Test-only setup hook — the real Reflector contract has no such
+        /// function; its price history comes from node consensus instead.
+        pub fn set_price(env: Env, price: i128, timestamp: u64) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("price"), &(price, timestamp));
+        }
+
+        /// `None` until `set_price` has run, matching Reflector's own
+        /// "doesn't quote this asset" case (`OraclePriceUnavailable`).
+        pub fn lastprice(env: Env, _asset: Asset) -> Option<PriceData> {
+            env.storage()
+                .instance()
+                .get::<_, (i128, u64)>(&symbol_short!("price"))
+                .map(|(price, timestamp)| PriceData { price, timestamp })
+        }
+    }
+}
+
+/// A commitment initialized with an `oracle_config` pointing at a fresh
+/// `mock_oracle::MockOracle` instance, `price` already set at the current
+/// ledger timestamp. Returns the setup plus the oracle client so tests
+/// can call `set_price` again to simulate a stale or updated quote.
+fn setup_with_oracle(max_age_secs: u64) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, token, token_admin_client) = create_token(&env, &token_admin);
+    let total_amount: i128 = 1_000_000;
+    token_admin_client.mint(&buyer, &total_amount);
+
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+    let oracle = mock_oracle::MockOracleClient::new(&env, &oracle_id);
+    oracle.set_price(&175_000_000_000_000i128, &env.ledger().timestamp());
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+    contract.initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &total_amount,
+        &1_500,
+        &1_500,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &Some(OracleConfig {
+            oracle_contract: oracle_id,
+            price_asset: Symbol::new(&env, "NGN"),
+            max_age_secs,
+        }),
+    );
+
+    (
+        Setup {
+            env,
+            contract,
+            token,
+            buyer,
+            cooperative,
+            warehouse,
+            total_amount,
+        },
+        oracle,
+    )
+}
+
+#[test]
+fn oracle_rate_returns_the_configured_oracles_fresh_quote() {
+    let (s, _oracle) = setup_with_oracle(3_600);
+    let rate = s.contract.oracle_rate();
+    assert_eq!(rate.price, 175_000_000_000_000);
+    assert_eq!(rate.timestamp, s.env.ledger().timestamp());
+}
+
+#[test]
+fn get_oracle_config_reflects_what_initialize_set() {
+    let (s, _oracle) = setup_with_oracle(3_600);
+    let config = s.contract.get_oracle_config();
+    assert!(config.is_some());
+    assert_eq!(config.unwrap().price_asset, Symbol::new(&s.env, "NGN"));
+}
+
+#[test]
+fn get_oracle_config_is_none_when_initialize_never_set_one() {
+    // The plain setup() helper passes None -- every other test in this
+    // file relies on that, implicitly proving oracle_config is genuinely
+    // optional. This test just makes it explicit.
+    let s = setup(1_500, 1_500);
+    assert_eq!(s.contract.get_oracle_config(), None);
+}
+
+#[test]
+fn oracle_rate_fails_when_no_oracle_configured() {
+    let s = setup(1_500, 1_500);
+    let result = s.contract.try_oracle_rate();
+    assert_eq!(result, Err(Ok(Error::OracleNotConfigured)));
+}
+
+#[test]
+fn oracle_rate_fails_when_the_oracle_has_never_quoted_this_asset() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    // Never called: the oracle has no price on record at all yet.
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+    contract.initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &1_500,
+        &1_500,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &Some(OracleConfig {
+            oracle_contract: oracle_id,
+            price_asset: Symbol::new(&env, "NGN"),
+            max_age_secs: 3_600,
+        }),
+    );
+
+    let result = contract.try_oracle_rate();
+    assert_eq!(result, Err(Ok(Error::OraclePriceUnavailable)));
+}
+
+#[test]
+fn oracle_rate_rejects_a_quote_older_than_max_age_secs() {
+    let (s, _oracle) = setup_with_oracle(3_600);
+    advance_time(&s, 3_601);
+    let result = s.contract.try_oracle_rate();
+    assert_eq!(result, Err(Ok(Error::OracleStale)));
+}
+
+#[test]
+fn oracle_rate_accepts_a_quote_exactly_at_the_staleness_boundary() {
+    // age > max_age_secs is rejected, so age == max_age_secs (not yet
+    // over the bound) must still be accepted -- an off-by-one check.
+    let (s, _oracle) = setup_with_oracle(3_600);
+    advance_time(&s, 3_600);
+    let rate = s.contract.oracle_rate();
+    assert_eq!(rate.price, 175_000_000_000_000);
+}
+
+#[test]
+fn oracle_rate_reflects_a_refreshed_quote() {
+    let (s, oracle) = setup_with_oracle(3_600);
+    advance_time(&s, 60);
+    oracle.set_price(&176_500_000_000_000i128, &s.env.ledger().timestamp());
+
+    let rate = s.contract.oracle_rate();
+    assert_eq!(rate.price, 176_500_000_000_000);
+    assert_eq!(rate.timestamp, s.env.ledger().timestamp());
+}
+
+#[test]
+fn initialize_rejects_a_zero_max_age_secs_oracle_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &1_500,
+        &1_500,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &Some(OracleConfig {
+            oracle_contract: oracle_id,
+            price_asset: Symbol::new(&env, "NGN"),
+            max_age_secs: 0,
+        }),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
+}
+
+#[test]
+fn oracle_rate_is_callable_after_settlement() {
+    // A pure read against Reflector's own history, not a state
+    // transition -- there's no reason to gate it by commitment status.
+    let (s, _oracle) = setup_with_oracle(3_600);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract.settle();
+
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    let rate = s.contract.oracle_rate();
+    assert_eq!(rate.price, 175_000_000_000_000);
 }
 
 // ---------- opening a tranche moves no funds ----------
@@ -1034,6 +1299,7 @@ fn initialize_rejects_zero_contracted_quantity() {
         &DELIVERY_WINDOW,
         &0,
         &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidQuantity)));
 }
@@ -1064,6 +1330,7 @@ fn initialize_rejects_empty_grade_schedule() {
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::new(&env),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidGradeSchedule)));
 }
@@ -1094,6 +1361,7 @@ fn initialize_rejects_a_grade_priced_over_10000_bps() {
         &DELIVERY_WINDOW,
         &CONTRACTED_QUANTITY,
         &Vec::from_array(&env, [10_000, 10_001]),
+        &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidGradeSchedule)));
 }

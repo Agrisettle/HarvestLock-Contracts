@@ -57,10 +57,13 @@ to the buyer as a shortfall credit — already-claimed advances are never
 clawed back), and the PRD §4.8/§16.1 allocation ledger (`set_allocation`
 records each member farmer's entitlement as a per-member salted hash
 plus a share, cooperative-gated, record-only for v1 per PRD §4.9's own
-stated default). 76 tests passing, deployed and exercised on Stellar
-testnet seven times. A contested dispute path (`Status::Disputed`) and
-NGN/oracle conversion are not yet built — all
-tracked in HANDOFF.md's "next steps," matching
+stated default), and a live-verified [Reflector](https://reflector.network)
+oracle read for PRD §16.3's staleness bound (`oracle_rate` enforces a
+configurable max quote age against the real Reflector testnet oracle —
+not yet wired into settlement math, see HANDOFF.md). 86 tests passing,
+deployed and exercised on Stellar testnet eight times. A contested
+dispute path (`Status::Disputed`) and full NGN-denominated settlement
+are not yet built — all tracked in HANDOFF.md's "next steps," matching
 [`ROADMAP.md`, Phase 0 Track B](https://github.com/Agrisettle/HarvestLock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
 in the main repo (this repo doesn't keep its own separate roadmap —
 one plan, one place, to avoid the two drifting apart).
