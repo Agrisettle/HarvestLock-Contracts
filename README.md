@@ -91,6 +91,8 @@ broken.
 - **Security**: [`SECURITY.md`](./SECURITY.md) — report vulnerabilities privately, especially anything in this contract
 - **Org**: [Agrisettle](https://github.com/Agrisettle)
 
+<a href="https://github.com/Agrisettle"><img src="./docs/wordmark-agrisettle.png" alt="Agrisettle" width="360" /></a>
+
 ## License
 
 Apache-2.0 — see [`LICENSE`](./LICENSE).
