@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "68d6dce4d866ca8b6460231b8f711286ddbd77b007edf64eb39690a8c86496d3"
+                            "bytes": "d786c56aadf4f7d0869f37eeb309d1238cf9c76da79200740e10781b72e2484b"
                           }
                         },
                         {
@@ -295,7 +295,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "68d6dce4d866ca8b6460231b8f711286ddbd77b007edf64eb39690a8c86496d3"
+                                  "bytes": "d786c56aadf4f7d0869f37eeb309d1238cf9c76da79200740e10781b72e2484b"
                                 }
                               },
                               {
@@ -439,6 +439,26 @@
                             },
                             "val": {
                               "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "dispute_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "dispute_pre_status"
+                            },
+                            "val": {
+                              "vec": [
+                                {
+                                  "symbol": "Draft"
+                                }
+                              ]
                             }
                           },
                           {

@@ -20,11 +20,20 @@
 //! `cancel` is a mutual-consent unwind (PRD §7) reachable from any state
 //! up through `ReadyForDelivery` — see its doc comment. `reassign_buyer`
 //! (PRD §4.8) transfers the buyer position, three-party-consented, over
-//! the same range. `Disputed` still exists in the `Status` enum because
-//! the PRD's state machine names it, but no function transitions into it
-//! yet — arbitrating a *contested* fault claim needs a mechanism this
-//! contract doesn't have an answer for; `Defaulted` and `Forfeited` below
-//! cover the *uncontested*, deadline-triggered cases only.
+//! the same range. `Defaulted` and `Forfeited` cover the *uncontested*,
+//! deadline-triggered failure cases only.
+//!
+//! `flag_dispute` (PRD's must-have "dispute flagging with defined
+//! escalation") lets any one of the three named parties freeze a
+//! commitment into `Disputed` from `Locked` through `Delivered`, which
+//! blocks every other state-changing call for free (none of them ever
+//! accept `Disputed` as a required status). `resolve_dispute` (unanimous
+//! three-party consent) or `expire_dispute_window` (permissionless, once
+//! `dispute_deadline` passes) both restore the exact pre-dispute status —
+//! this still isn't arbitration of *who was right*, just a bounded pause,
+//! same non-goal as before; see `flag_dispute`'s own doc comment for the
+//! full reasoning and its one known limitation (other deadlines on the
+//! commitment don't pause while a dispute is open).
 //!
 //! Advance tranches use claimable-balance-equivalent semantics, built
 //! natively in this contract rather than via classic Stellar
@@ -202,6 +211,15 @@ pub enum Error {
     FxShortfallWindowPassed = 33,
     /// `expire_fx_shortfall_window` called before the deadline.
     FxShortfallWindowNotPassed = 34,
+    /// `flag_dispute`'s `flagger` argument wasn't the buyer, cooperative,
+    /// or warehouse operator — only a named party to the deal can flag
+    /// one, not an arbitrary third address.
+    NotAParty = 35,
+    /// `resolve_dispute`/`expire_dispute_window` called before
+    /// `dispute_deadline` passed (the latter only) — or, for either
+    /// call, while `status` isn't `Disputed` at all (covered by the same
+    /// `InvalidState` every other status-gated call already uses).
+    DisputeWindowNotPassed = 36,
 }
 
 #[contracttype]
@@ -399,6 +417,21 @@ pub struct Commitment {
     /// yet another `initialize` parameter for a second deadline serving
     /// the same "give the buyer a fair chance to act" purpose.
     pub fx_shortfall_deadline: u64,
+
+    /// Set by `flag_dispute`, the status to restore on `resolve_dispute`
+    /// or `expire_dispute_window`. `Status::Draft` whenever `status`
+    /// isn't `Disputed` — a safe "unset" sentinel, not a real possible
+    /// value, since `flag_dispute` never accepts `Draft` as a status to
+    /// dispute *from*. (Not `Option<Status>`: the `contracttype` macro's
+    /// generated `ScVal` conversion doesn't satisfy the blanket `Option`
+    /// impl for a unit-variant-only enum like `Status`, unlike a struct
+    /// such as `OracleConfig` — confirmed by trying it first.)
+    pub dispute_pre_status: Status,
+    /// 0 whenever `status` isn't `Disputed`. Reuses `remainder_window_secs`
+    /// as the window length, same reasoning as `fx_shortfall_deadline`
+    /// above — see `flag_dispute`'s doc comment for why a dispute freeze
+    /// needs a bound at all.
+    pub dispute_deadline: u64,
 }
 
 #[contract]
@@ -487,6 +520,8 @@ impl EscrowContract {
             fx_shortfall_amount: 0,
             fx_shortfall_funded: false,
             fx_shortfall_deadline: 0,
+            dispute_pre_status: Status::Draft,
+            dispute_deadline: 0,
         };
         env.storage()
             .instance()
@@ -1189,6 +1224,115 @@ impl EscrowContract {
         new_buyer.require_auth();
 
         c.buyer = new_buyer;
+        Self::save(&env, &c);
+        Ok(())
+    }
+
+    /// Dispute flagging (PRD's must-have "dispute flagging with defined
+    /// escalation"). Any **one** of the three named parties — `flagger`
+    /// must equal `buyer`, `cooperative`, or `warehouse_operator` — can
+    /// freeze the commitment by moving it to `Status::Disputed`, which
+    /// blocks every other state-changing call by construction: every one
+    /// of them matches a specific required status (or set of statuses)
+    /// and `Disputed` is never among them.
+    ///
+    /// This contract still doesn't arbitrate *what* the dispute is about
+    /// — see the module doc's explanation of why that's a deliberate
+    /// non-goal, not an oversight. What this buys is the "flagging" half
+    /// only: a unilateral pause, so a contested situation doesn't let
+    /// some other deadline-triggered function (e.g. `settle`,
+    /// `expire_remainder_window`) run to a conclusion while it's being
+    /// sorted out off-chain. Reachable from any state with funds already
+    /// at stake or a claim outstanding (`Locked` through `Delivered`) —
+    /// not `Draft` (nothing escrowed yet to freeze) and not any terminal
+    /// status or `Disputed` itself.
+    ///
+    /// **Known limitation, not fixed here**: freezing `status` does not
+    /// pause any other *absolute* deadline already ticking on this
+    /// commitment (an advance's claim deadline, `remainder_deadline`,
+    /// `delivery_deadline`, `fx_shortfall_deadline`). If one of those
+    /// passes while a dispute is open, the corresponding
+    /// `claim_*`/`expire_*`/`reclaim_*` becomes immediately callable the
+    /// moment the dispute resolves or its own window lapses, even though
+    /// no one could act on it during the freeze. Shifting every other
+    /// deadline by the dispute's duration would close this cleanly but
+    /// is real added complexity for a mechanism nobody has used yet —
+    /// left open on purpose, same bias against building ahead of real
+    /// usage this project applies elsewhere; revisit if a real dispute
+    /// ever actually collides with another deadline this way.
+    pub fn flag_dispute(env: Env, flagger: Address) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        match c.status {
+            Status::Locked
+            | Status::Advance1Released
+            | Status::CheckpointPassed
+            | Status::Advance2Released
+            | Status::ReadyForDelivery
+            | Status::Delivered => {}
+            _ => return Err(Error::InvalidState),
+        }
+        if flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator {
+            return Err(Error::NotAParty);
+        }
+        flagger.require_auth();
+
+        c.dispute_pre_status = c.status;
+        c.dispute_deadline = env.ledger().timestamp() + c.remainder_window_secs;
+        c.status = Status::Disputed;
+        Self::save(&env, &c);
+        Ok(())
+    }
+
+    /// Resolves a dispute by unanimous consent — **all three** named
+    /// parties' auth, not a majority or any single one, since resuming
+    /// is the mirror of `flag_dispute`'s unilateral freeze and shouldn't
+    /// itself be unilateral. Restores `status` to exactly whatever it
+    /// was the moment `flag_dispute` ran — this contract doesn't decide,
+    /// or let the parties redirect it to, a *different* outcome (e.g.
+    /// straight to `Cancelled`) from inside this call; that would be
+    /// arbitration by another name. If the parties' off-chain resolution
+    /// is "unwind the deal," they call the existing `cancel()` next,
+    /// same as they would have without ever disputing.
+    pub fn resolve_dispute(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if c.status != Status::Disputed {
+            return Err(Error::InvalidState);
+        }
+        c.buyer.require_auth();
+        c.cooperative.require_auth();
+        c.warehouse_operator.require_auth();
+
+        c.status = c.dispute_pre_status;
+        c.dispute_pre_status = Status::Draft;
+        c.dispute_deadline = 0;
+        Self::save(&env, &c);
+        Ok(())
+    }
+
+    /// The dispute-side escape hatch, same shape as
+    /// `expire_remainder_window`/`expire_fx_shortfall_window`:
+    /// permissionless, deadline-gated. If the three parties can't reach
+    /// the unanimous consent `resolve_dispute` requires before
+    /// `dispute_deadline`, this does **not** guess who was at fault —
+    /// consistent with `flag_dispute`'s doc comment, this contract still
+    /// isn't arbitrating anything. It just restores the pre-dispute
+    /// status, exactly like `resolve_dispute` would, so the freeze can't
+    /// become permanent by one party simply refusing to ever consent.
+    /// Whatever normal deadline-triggered mechanism would otherwise have
+    /// applied (`expire_remainder_window`, `reclaim_on_nondelivery`,
+    /// etc.) is free to run again from there.
+    pub fn expire_dispute_window(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if c.status != Status::Disputed {
+            return Err(Error::InvalidState);
+        }
+        if env.ledger().timestamp() <= c.dispute_deadline {
+            return Err(Error::DisputeWindowNotPassed);
+        }
+
+        c.status = c.dispute_pre_status;
+        c.dispute_pre_status = Status::Draft;
+        c.dispute_deadline = 0;
         Self::save(&env, &c);
         Ok(())
     }

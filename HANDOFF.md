@@ -445,7 +445,53 @@ success. The whole point of option (b), proven with real testnet
 transfers: the cooperative received the deal's actual current-rate
 value, not the stale amount `total_amount` alone would have paid out.
 
-**All nine deployed/uploaded instances are validation artifacts, not
+**Deployment 10** (6 Sept 2026) — WASM hash
+`21a4bb2efb129d0252d32b575f2ca595259b1c2fe841d2d0554dc02c44aca580`
+(47,171 bytes optimized, 29 exported functions — `flag_dispute`,
+`resolve_dispute`, `expire_dispute_window` are the three new ones).
+Closes the "no dispute path" item below — PRD's must-have "dispute
+flagging with defined escalation." Any one of the three named parties
+(`flagger` must equal `buyer`, `cooperative`, or `warehouse_operator`)
+can freeze a commitment into `Status::Disputed` from `Locked` through
+`Delivered`, which blocks every other state-changing call for free
+(none of them ever accept `Disputed` as a required status). This still
+isn't arbitration — see `flag_dispute`'s doc comment for why deciding
+*who was right* remains an explicit non-goal, same as before.
+`resolve_dispute` (unanimous three-party auth) or `expire_dispute_window`
+(permissionless, once `dispute_deadline` passes — reuses
+`remainder_window_secs` as the window, same reasoning as
+`fx_shortfall_deadline`) both restore the *exact* pre-dispute status,
+recorded in a new `dispute_pre_status` field (`Status::Draft` doubles
+as the "unset" sentinel, since `flag_dispute` never accepts `Draft` as
+a status to dispute from — not `Option<Status>`, which the
+`contracttype` macro's `ScVal` conversion doesn't support for a
+unit-variant-only enum like `Status`, confirmed by trying it first and
+hitting a real compile error). One documented, deliberate limitation:
+freezing `status` doesn't pause any other absolute deadline already
+ticking on the commitment — see `flag_dispute`'s doc comment, and the
+`dispute_does_not_pause_an_already_ticking_deadline_known_limitation`
+test that proves it rather than just asserting it in prose. 17 new
+contract unit tests (120/120 total).
+
+Live-verified on real testnet
+(`CCHQLA3LZXWXWJJR75TWFM4POBPA673VIWJX4YWSAHUZEWUSXSF6HJBO`, native XLM
+as the settlement token, `remainder_window_secs: 120` for a fast real
+timeout): `lock` (300,000 native-stroop deposit, a real transfer, not a
+fixture), cooperative called `flag_dispute` — status genuinely flipped
+to `Disputed`, and a subsequent `release_advance_1` call was rejected
+live (`InvalidState`), proving the freeze is real, not just a label.
+Waited out the real 120-second `dispute_deadline`, then the deployer
+account (not a party to the commitment at all) called
+`expire_dispute_window` successfully — status restored to exactly
+`Locked`, `dispute_pre_status` cleared back to `Draft`, with zero
+authorization from any of the three named parties. `resolve_dispute`'s
+three-party path was verified live too, through the `api/` repo's
+staged multi-party HTTP layer (see its own HANDOFF.md) rather than raw
+`stellar-cli` — no CLI flag exists here for co-signing three separate
+Soroban auth entries in one invocation, and this project already built
+exactly that mechanism for `reassign_buyer`.
+
+**All ten deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -455,15 +501,23 @@ state.
 Don't assume these are oversights — each one is a scoping decision, listed
 so nobody "fixes" them without knowing what they're trading off.
 
-1. **No dispute path.** `Status::Disputed` exists in the enum (so
-   downstream code can match on it) but no function transitions into it —
-   arbitrating a *contested* fault claim needs a mechanism this contract
-   doesn't have an answer for. **Buyer-default forfeiture and seller-
-   non-delivery forfeiture are now both built** (`expire_remainder_window`
-   and `reclaim_on_nondelivery`, see above) — both are *uncontested*,
-   deadline-triggered cases only, which is why they didn't need to wait on
-   a dispute mechanism. **Mutual cancellation is also built** (`cancel`,
-   see above) — this item used to cover all three, it no longer does.
+1. ~~No dispute path.~~ **Built** (Deployment 10, 6 Sept 2026, see
+   above): `flag_dispute`/`resolve_dispute`/`expire_dispute_window`
+   implement PRD's must-have "dispute flagging with defined escalation"
+   — a bounded, unilateral freeze plus unanimous-or-timeout resume.
+   **Still true, on purpose**: this still doesn't arbitrate *who was
+   right* about anything — the PRD is explicit that grade/quantity
+   disputes are the warehouse operator's own appeals process, not a
+   HarvestLock dispute, and this contract has no mechanism to decide a
+   contested fault claim any other way either. What changed is only
+   that a contested situation can now pause the state machine instead
+   of letting some other deadline-triggered function run to a
+   conclusion while it's being sorted out off-chain. Buyer-default
+   forfeiture and seller-non-delivery forfeiture (`expire_remainder_window`
+   and `reclaim_on_nondelivery`) and mutual cancellation (`cancel`) were
+   all built earlier and separately — they're *uncontested*,
+   deadline-triggered (or mutually-agreed) cases that never needed to
+   wait on a dispute mechanism to begin with.
 2. ~~No shortfall/grade adjustment at delivery.~~ **Built** (Deployment 6,
    3 Sept 2026, see above): `confirm_delivery` takes `delivered_quantity`/
    `grade_index`, computes `settlement_bps` against the pre-agreed
@@ -688,6 +742,12 @@ item that used to be #1 here is done; everything shifts up by one.
    (confirmed live, not assumed) — the actual currency this feature is
    for has no feed to convert against. Not this contract's problem to
    solve; activates automatically the day Reflector adds it.
+7. ~~**Dispute path** (PRD's must-have "dispute flagging with defined
+   escalation")~~ — **done** (Deployment 10, 6 Sept 2026, see above):
+   `flag_dispute`/`resolve_dispute`/`expire_dispute_window`. Still not
+   arbitration of who's at fault — a bounded pause only, by explicit
+   design; see the "What's deliberately NOT implemented" entry above for
+   why that stays true on purpose.
 
 ~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, five
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~
@@ -714,7 +774,19 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 2 Sept 2026 (later same day) — two-phase funding plus the
+*Last updated: 6 Sept 2026 (later same day) — dispute flagging with
+defined escalation (PRD must-have), Deployment 10:
+`flag_dispute`/`resolve_dispute`/`expire_dispute_window`. Closes the
+"no dispute path" item that's existed since the very first version of
+this file — still not arbitration of who's at fault, just a bounded
+freeze (unilateral to open, unanimous or timed-out to close), by
+explicit, documented design. 17 new unit tests (120/120 total),
+live-verified on real testnet: `flag_dispute` and `expire_dispute_window`
+directly via `stellar-cli`, `resolve_dispute`'s three-party path via the
+`api/` repo's staged multi-party HTTP layer. See "Verified on testnet"
+above for the full walk.
+
+Prior entry (2 Sept 2026, later same day) — two-phase funding plus the
 buyer-default / seller-non-delivery forfeiture paths, per this session's
 product decisions on default thresholds and penalty severity. `lock` now
 escrows only the deposit; `ready_for_delivery` + `fund_remainder` handle

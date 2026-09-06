@@ -63,12 +63,16 @@ enforces a configurable max quote age (the staleness bound), and
 `resolve_fx_shortfall`/`fund_fx_shortfall`/`expire_fx_shortfall_window`
 wire option (b) — buyer tops up or is refunded at settlement — into
 `settle`'s actual payout math, live-verified with a genuine cross-rate
-top-up on real testnet (see HANDOFF.md's Deployment 9). 103 tests
-passing, deployed and exercised on Stellar testnet nine times. A
-contested dispute path (`Status::Disputed`) is not yet built, and
-Reflector's real testnet oracle doesn't quote NGN yet (confirmed live,
-not assumed — GBP proves the mechanism instead) — both tracked in
-HANDOFF.md's "next steps," matching
+top-up on real testnet (see HANDOFF.md's Deployment 9). PRD's must-have
+"dispute flagging with defined escalation" is also built:
+`flag_dispute`/`resolve_dispute`/`expire_dispute_window` (Deployment 10)
+let any one of the three named parties freeze a commitment and either
+unanimous consent or a timeout resume it — still not arbitration of
+who's at fault, a bounded pause only, by explicit design (see
+HANDOFF.md). 120 tests passing, deployed and exercised on Stellar
+testnet ten times. Reflector's real testnet oracle doesn't quote NGN
+yet (confirmed live, not assumed — GBP proves the mechanism instead) —
+tracked in HANDOFF.md's "next steps," matching
 [`ROADMAP.md`, Phase 0 Track B](https://github.com/Agrisettle/HarvestLock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
 in the main repo (this repo doesn't keep its own separate roadmap —
 one plan, one place, to avoid the two drifting apart).

@@ -726,6 +726,26 @@
                           },
                           {
                             "key": {
+                              "symbol": "dispute_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "dispute_pre_status"
+                            },
+                            "val": {
+                              "vec": [
+                                {
+                                  "symbol": "Draft"
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "fx_adjusted_total"
                             },
                             "val": {

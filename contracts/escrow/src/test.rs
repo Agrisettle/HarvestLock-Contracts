@@ -1969,3 +1969,227 @@ fn reassign_buyer_requires_current_buyer_cooperative_and_new_buyer_auth() {
     assert!(touched(&s.cooperative), "expected the cooperative's auth");
     assert!(touched(&new_buyer), "expected the incoming buyer's auth");
 }
+
+// ---------- disputes ----------
+
+#[test]
+fn flag_dispute_by_buyer_moves_to_disputed_and_records_pre_status() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    s.contract.flag_dispute(&s.buyer);
+
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Locked);
+}
+
+#[test]
+fn flag_dispute_by_cooperative_works() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    s.contract.flag_dispute(&s.cooperative);
+
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+}
+
+#[test]
+fn flag_dispute_by_warehouse_operator_works() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    s.contract.flag_dispute(&s.warehouse);
+
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+}
+
+#[test]
+fn flag_dispute_rejects_a_non_party() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let stranger = Address::generate(&s.env);
+
+    let result = s.contract.try_flag_dispute(&stranger);
+    assert_eq!(result, Err(Ok(Error::NotAParty)));
+}
+
+#[test]
+fn flag_dispute_rejects_from_draft() {
+    let s = setup(1_500, 1_500);
+
+    let result = s.contract.try_flag_dispute(&s.buyer);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn flag_dispute_rejects_after_settlement() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract.settle();
+
+    let result = s.contract.try_flag_dispute(&s.buyer);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn flag_dispute_rejects_a_second_flag() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.flag_dispute(&s.buyer);
+
+    let result = s.contract.try_flag_dispute(&s.cooperative);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn flag_dispute_reaches_from_delivered_too() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    s.contract.flag_dispute(&s.cooperative);
+
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Delivered);
+}
+
+#[test]
+fn flag_dispute_freezes_every_other_state_changing_call() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.flag_dispute(&s.buyer);
+
+    assert_eq!(s.contract.try_release_advance_1(), Err(Ok(Error::InvalidState)));
+    assert_eq!(s.contract.try_cancel(), Err(Ok(Error::InvalidState)));
+    assert_eq!(
+        s.contract.try_reassign_buyer(&Address::generate(&s.env)),
+        Err(Ok(Error::InvalidState))
+    );
+}
+
+#[test]
+fn resolve_dispute_restores_the_exact_pre_dispute_status() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.flag_dispute(&s.cooperative);
+
+    s.contract.resolve_dispute();
+
+    assert_eq!(s.contract.get_status(), Status::Advance1Released);
+    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Draft);
+}
+
+#[test]
+fn resolve_dispute_allows_normal_flow_to_continue_afterward() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.flag_dispute(&s.buyer);
+    s.contract.resolve_dispute();
+
+    // Proves the freeze genuinely lifted, not just that the status field
+    // flipped back -- a real subsequent call succeeds.
+    s.contract.release_advance_1();
+    assert_eq!(s.contract.get_status(), Status::Advance1Released);
+}
+
+#[test]
+fn resolve_dispute_requires_all_three_parties_auth() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.flag_dispute(&s.buyer);
+
+    // mock_all_auths() means this can't check *rejection* of a missing
+    // signer -- see reassign_buyer_requires_current_buyer_cooperative_and_new_buyer_auth's
+    // comment. What it confirms is that all three parties' auth genuinely
+    // appears in the trace, not just the flagger's.
+    s.contract.resolve_dispute();
+    let auths = s.env.auths();
+    let touched = |addr: &Address| auths.iter().any(|(a, _)| a == addr);
+    assert!(touched(&s.buyer), "expected the buyer's auth");
+    assert!(touched(&s.cooperative), "expected the cooperative's auth");
+    assert!(touched(&s.warehouse), "expected the warehouse operator's auth");
+}
+
+#[test]
+fn resolve_dispute_rejects_when_not_disputed() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    let result = s.contract.try_resolve_dispute();
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn expire_dispute_window_rejects_before_the_deadline() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.flag_dispute(&s.buyer);
+
+    let result = s.contract.try_expire_dispute_window();
+    assert_eq!(result, Err(Ok(Error::DisputeWindowNotPassed)));
+}
+
+#[test]
+fn expire_dispute_window_restores_pre_dispute_status_after_the_deadline() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.flag_dispute(&s.warehouse);
+    advance_time(&s, REMAINDER_WINDOW + 1);
+
+    s.contract.expire_dispute_window();
+
+    assert_eq!(s.contract.get_status(), Status::Advance1Released);
+    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Draft);
+}
+
+#[test]
+fn expire_dispute_window_is_permissionless() {
+    // No require_auth() at all on this path -- see
+    // expire_remainder_window_is_permissionless's comment for why
+    // mock_all_auths() still lets this assertion mean something: the
+    // auth trace should name none of the three parties, since only they
+    // (or the flagger, already recorded before this call) would appear
+    // if some require_auth() were secretly present and mock-satisfied.
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.flag_dispute(&s.buyer);
+    advance_time(&s, REMAINDER_WINDOW + 1);
+
+    s.contract.expire_dispute_window();
+    assert_eq!(s.contract.get_status(), Status::Locked);
+
+    let auths = s.env.auths();
+    assert!(
+        !auths.iter().any(|(a, _)| *a == s.cooperative || *a == s.warehouse),
+        "expire_dispute_window should not require any party's auth"
+    );
+}
+
+#[test]
+fn dispute_does_not_pause_an_already_ticking_deadline_known_limitation() {
+    // Documents flag_dispute's own doc comment: freezing status doesn't
+    // pause other absolute deadlines. Here the advance-1 claim window is
+    // opened, then a dispute is flagged and outlives that window --
+    // resolving the dispute immediately makes reclaim_advance_1 callable,
+    // even though the claim window "passed" while nobody could act.
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.flag_dispute(&s.buyer);
+    advance_time(&s, WINDOW + 1); // outlives both the claim window and (since REMAINDER_WINDOW == WINDOW here) the dispute window
+
+    s.contract.expire_dispute_window();
+
+    assert_eq!(s.contract.get_status(), Status::Advance1Released);
+    // The claim window's own deadline already passed during the freeze --
+    // reclaim is immediately available, not "reset" by having been frozen.
+    s.contract.reclaim_advance_1();
+    let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    assert_eq!(s.token.balance(&s.buyer), s.total_amount - deposit + advance1_amount);
+}

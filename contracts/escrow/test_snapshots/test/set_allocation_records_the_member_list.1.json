@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "f524f11c348f26ebc304a375b12b21eb38a947fee86487a8733ad60cd065ff8c"
+                            "bytes": "93c0f59e4a64d23ba22f231291a81c914792a27c1590f4c32e161697d71e6f65"
                           }
                         },
                         {
@@ -149,7 +149,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "ba4ed31760ec9d32685371f1d943dd2978d24840d458057f592a7c2873254812"
+                            "bytes": "4ae895e2bd3e3c2a080ca0021ccc7fed88acad7ed0c6ba8ab2d063b45622f21d"
                           }
                         },
                         {
@@ -316,7 +316,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "f524f11c348f26ebc304a375b12b21eb38a947fee86487a8733ad60cd065ff8c"
+                                  "bytes": "93c0f59e4a64d23ba22f231291a81c914792a27c1590f4c32e161697d71e6f65"
                                 }
                               },
                               {
@@ -336,7 +336,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "ba4ed31760ec9d32685371f1d943dd2978d24840d458057f592a7c2873254812"
+                                  "bytes": "4ae895e2bd3e3c2a080ca0021ccc7fed88acad7ed0c6ba8ab2d063b45622f21d"
                                 }
                               },
                               {
@@ -480,6 +480,26 @@
                             },
                             "val": {
                               "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "dispute_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "dispute_pre_status"
+                            },
+                            "val": {
+                              "vec": [
+                                {
+                                  "symbol": "Draft"
+                                }
+                              ]
                             }
                           },
                           {
