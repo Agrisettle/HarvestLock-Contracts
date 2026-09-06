@@ -86,6 +86,14 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "denominated_amount"
+                      },
+                      "val": {
+                        "i128": "500000"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "max_age_secs"
                       },
                       "val": {
@@ -360,6 +368,46 @@
                           },
                           {
                             "key": {
+                              "symbol": "fx_adjusted_total"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_resolved"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_amount"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_funded"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "grade_index"
                             },
                             "val": {
@@ -465,6 +513,14 @@
                       },
                       "val": {
                         "map": [
+                          {
+                            "key": {
+                              "symbol": "denominated_amount"
+                            },
+                            "val": {
+                              "i128": "500000"
+                            }
+                          },
                           {
                             "key": {
                               "symbol": "max_age_secs"

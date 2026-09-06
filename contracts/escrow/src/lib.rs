@@ -49,18 +49,37 @@
 //! silently-old number. `initialize`'s `oracle_config` is `Option`al:
 //! `None` for a plain deal that needs no conversion, `Some` for a deal
 //! denominated in a currency the settlement token doesn't natively track
-//! (PRD §4.2's NGN-unit-of-account design). **This is a read primitive
-//! only** — it does not yet feed into `settle`'s payout math. PRD §4.2
-//! names three different options for who bears FX risk between lock-in
-//! and settlement, explicitly "decided with pilot partners rather than
-//! assumed"; wiring a specific one into `settle` before that
-//! conversation happens would be choosing on their behalf. What this
-//! session *did* resolve, empirically rather than by assumption:
-//! Reflector's live testnet fiat-rate oracle does not currently quote
-//! NGN at all (verified via a real `stellar contract invoke ... --
-//! assets` call — see `reflector.rs` and `HANDOFF.md`) — the same
-//! category of gap PRD §4.4 already named for commodity prices, just
-//! discovered here for the currency-conversion half too.
+//! (PRD §4.2's NGN-unit-of-account design). Reflector's live testnet
+//! fiat-rate oracle does not currently quote NGN at all (verified via a
+//! real `stellar contract invoke ... -- assets` call — see
+//! `reflector.rs`) — the same category of gap PRD §4.4 already named
+//! for commodity prices, just discovered here for the currency-
+//! conversion half too; `price_asset` works with anything Reflector
+//! does quote today (this session's tests use GBP), and activates for
+//! NGN the day Reflector adds it, no code change needed.
+//!
+//! **PRD §4.2's option (b) — buyer tops up or is refunded at
+//! settlement — is now wired in**, a product decision made explicitly
+//! rather than assumed (the PRD names three options and leaves the
+//! choice to pilot partners). `resolve_fx_shortfall` — permissionless,
+//! reachable once `Delivered` with both advance tranches already
+//! resolved, so the comparison uses final, settled figures rather than
+//! a snapshot that could still change — reads a fresh oracle rate,
+//! converts `oracle_config.denominated_amount` (the deal's true value
+//! in `price_asset`, adjusted by `confirm_delivery`'s `settlement_bps`)
+//! into the settlement token, and compares it against what's actually
+//! escrowed. A shortfall (the settlement currency strengthened enough
+//! since funding that the escrowed amount no longer covers the
+//! obligation) has to be paid in by the buyer via `fund_fx_shortfall`
+//! before `settle` will run; missing that deadline is
+//! `expire_fx_shortfall_window`, which reuses `Status::Defaulted` —
+//! the *same* immediate-permanent-bar consequence
+//! `expire_remainder_window`'s buyer-default already carries, by
+//! product decision, not by accident, and for free at the API layer
+//! since the existing reputation machinery already reacts to any fresh
+//! transition into `Defaulted`. One-time and computed exactly once per
+//! commitment: re-resolving later against a different rate would let
+//! either side game the number by choosing when to call it.
 
 #![no_std]
 
@@ -159,6 +178,30 @@ pub enum Error {
     /// returned, since a caller silently getting a too-old rate is worse
     /// than getting no rate at all.
     OracleStale = 27,
+    /// `resolve_fx_shortfall` called a second time — one-time and
+    /// immutable, same reasoning as `set_allocation`: re-resolving later
+    /// against a different rate would let either side game the number
+    /// by choosing when to call it.
+    FxAlreadyResolved = 28,
+    /// `fund_fx_shortfall`/`expire_fx_shortfall_window`/`settle` called
+    /// before `resolve_fx_shortfall` has run for an oracle-configured
+    /// commitment.
+    FxNotResolved = 29,
+    /// `settle` called while a resolved FX shortfall is still unfunded.
+    FxShortfallUnfunded = 30,
+    /// `fund_fx_shortfall`/`expire_fx_shortfall_window` called but
+    /// `resolve_fx_shortfall` found no shortfall at all (the escrowed
+    /// amount already covered the fresh-rate-converted obligation) —
+    /// there's nothing to fund or expire.
+    NoFxShortfall = 31,
+    /// `fund_fx_shortfall` called a second time.
+    FxShortfallAlreadyFunded = 32,
+    /// `fund_fx_shortfall` called after `fx_shortfall_deadline` passed —
+    /// too late to cure, `expire_fx_shortfall_window` is the only path
+    /// left from here.
+    FxShortfallWindowPassed = 33,
+    /// `expire_fx_shortfall_window` called before the deadline.
+    FxShortfallWindowNotPassed = 34,
 }
 
 #[contracttype]
@@ -174,10 +217,10 @@ pub enum DataKey {
     OracleConfig,
 }
 
-/// Which Reflector oracle instance and asset symbol `oracle_rate` reads
-/// from, and how old a quote it will accept. Set once, at `initialize`
-/// — see the module doc's "This is a read primitive only" note for why
-/// this doesn't (yet) change what `settle` pays out.
+/// Which Reflector oracle instance and asset symbol `oracle_rate` and
+/// `resolve_fx_shortfall` read from, how old a quote they'll accept, and
+/// what the deal is actually worth in that currency. Set once, at
+/// `initialize`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OracleConfig {
@@ -192,6 +235,19 @@ pub struct OracleConfig {
     /// Maximum age, in seconds, a quote may have and still be accepted —
     /// PRD §16.3's oracle staleness bound. Must be > 0.
     pub max_age_secs: u64,
+    /// The deal's true value in `price_asset`, in the same "smallest
+    /// unit, 7 decimal places" convention `total_amount` already uses
+    /// for the settlement token (so e.g. 1 NGN == 10_000_000 units here,
+    /// matching how 1 XLM == 10_000_000 stroops) — **not** the same
+    /// number as `total_amount`, which is `denominated_amount`'s value
+    /// *at whatever rate happened to hold when the deal was funded*.
+    /// `resolve_fx_shortfall` reprices this at a fresh rate; the gap
+    /// between that and what's actually escrowed is PRD §4.2's FX risk,
+    /// make concrete. Using the same 7-decimal convention on both sides
+    /// of the multiplication is what lets `resolve_fx_shortfall`'s
+    /// conversion formula skip a separate unit-normalization step — see
+    /// its doc comment for the worked example.
+    pub denominated_amount: i128,
 }
 
 /// A live rate read from the configured Reflector oracle, returned by
@@ -321,6 +377,28 @@ pub struct Commitment {
     /// 10_000 by construction (over-delivery isn't paid extra in v1; see
     /// `confirm_delivery`'s doc comment).
     pub settlement_bps: u32,
+
+    /// Set by `resolve_fx_shortfall`, only meaningful when `oracle_config`
+    /// is `Some`. `settle` uses this instead of re-deriving from
+    /// `total_amount` whenever an oracle is configured — see
+    /// `resolve_fx_shortfall`'s doc comment.
+    pub fx_resolved: bool,
+    /// `oracle_config.denominated_amount`, adjusted by `settlement_bps`
+    /// and converted to the settlement token at the fresh rate
+    /// `resolve_fx_shortfall` read. 0 until resolved (also what it'd be
+    /// for a total write-off, which is why `fx_resolved` is the actual
+    /// "has this run" signal, not this field being nonzero).
+    pub fx_adjusted_total: i128,
+    /// How much more the buyer owes beyond what's already escrowed, per
+    /// `resolve_fx_shortfall`'s comparison. 0 means no top-up needed —
+    /// `settle` can run without waiting on `fund_fx_shortfall` at all.
+    pub fx_shortfall_amount: i128,
+    pub fx_shortfall_funded: bool,
+    /// 0 if `fx_shortfall_amount` is 0 (no deadline needed). Reuses
+    /// `remainder_window_secs` as the window length rather than adding
+    /// yet another `initialize` parameter for a second deadline serving
+    /// the same "give the buyer a fair chance to act" purpose.
+    pub fx_shortfall_deadline: u64,
 }
 
 #[contract]
@@ -404,6 +482,11 @@ impl EscrowContract {
             delivered_quantity: 0,
             grade_index: 0,
             settlement_bps: 0,
+            fx_resolved: false,
+            fx_adjusted_total: 0,
+            fx_shortfall_amount: 0,
+            fx_shortfall_funded: false,
+            fx_shortfall_deadline: 0,
         };
         env.storage()
             .instance()
@@ -421,12 +504,9 @@ impl EscrowContract {
     }
 
     /// Reads the current rate for this commitment's configured oracle
-    /// asset, enforcing the staleness bound — see the module doc's
-    /// "read primitive only" note for what this does and doesn't do yet.
-    ///
-    /// Callable in any status, including after `Settled`: this is a pure
-    /// read against Reflector's own stored history, not a state
-    /// transition, so there's no reason to gate it by commitment status.
+    /// asset, enforcing the staleness bound. A pure read against
+    /// Reflector's own stored history, not a state transition — callable
+    /// in any status, including after `Settled`.
     pub fn oracle_rate(env: Env) -> Result<OracleRate, Error> {
         let _ = Self::load(&env)?;
         let config: OracleConfig = env
@@ -434,10 +514,19 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::OracleConfig)
             .ok_or(Error::OracleNotConfigured)?;
+        Self::read_oracle_rate(&env, &config)
+    }
 
-        let client = ReflectorPulseClient::new(&env, &config.oracle_contract);
+    /// Shared by the public `oracle_rate` wrapper above and
+    /// `resolve_fx_shortfall` below, so the actual Reflector-calling and
+    /// staleness-checking logic exists exactly once. Takes `&OracleConfig`
+    /// rather than re-reading storage, since `resolve_fx_shortfall`
+    /// already has its own copy in hand and needs the rest of it
+    /// (`denominated_amount`) right after this call.
+    fn read_oracle_rate(env: &Env, config: &OracleConfig) -> Result<OracleRate, Error> {
+        let client = ReflectorPulseClient::new(env, &config.oracle_contract);
         let quote = client
-            .lastprice(&ReflectorAsset::Other(config.price_asset))
+            .lastprice(&ReflectorAsset::Other(config.price_asset.clone()))
             .ok_or(Error::OraclePriceUnavailable)?;
 
         let now = env.ledger().timestamp();
@@ -794,13 +883,16 @@ impl EscrowContract {
     /// first means every stroop's destination is always decided by an
     /// actual `claim`/`reclaim` call, never inferred by `settle`.
     ///
-    /// Still no oracle conversion in the payout math itself (PRD §4.2) —
-    /// the full `total_amount` is treated as already being in the
-    /// settlement asset, even on a commitment with an `oracle_config`
-    /// set. `oracle_rate` exists as a read primitive (see module doc);
-    /// deciding which of PRD §4.2's FX-risk-allocation options actually
-    /// consumes it here is explicitly a pilot-partner decision, not one
-    /// this session makes unilaterally.
+    /// **Oracle-configured commitments** (PRD §4.2, option (b)): once
+    /// `resolve_fx_shortfall` has run, `adjusted_total` below uses its
+    /// fresh-rate-converted `fx_adjusted_total` instead of re-deriving
+    /// from `total_amount` — see that function's doc comment for the
+    /// conversion itself. `settle` refuses to run at all until
+    /// `resolve_fx_shortfall` has resolved (`FxNotResolved`) and any
+    /// shortfall it found has actually been paid in
+    /// (`FxShortfallUnfunded`) — same "explicit resolution required,
+    /// never inferred" principle the tranche-resolution requirement
+    /// above already established for this function.
     pub fn settle(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         if c.status != Status::Delivered {
@@ -812,8 +904,21 @@ impl EscrowContract {
         if !c.advance2_claimed && !c.advance2_expired {
             return Err(Error::TrancheUnresolved);
         }
+        let has_oracle = env.storage().instance().has(&DataKey::OracleConfig);
+        if has_oracle {
+            if !c.fx_resolved {
+                return Err(Error::FxNotResolved);
+            }
+            if c.fx_shortfall_amount > 0 && !c.fx_shortfall_funded {
+                return Err(Error::FxShortfallUnfunded);
+            }
+        }
 
-        let adjusted_total = Self::bps_amount(c.total_amount, c.settlement_bps);
+        let adjusted_total = if has_oracle {
+            c.fx_adjusted_total
+        } else {
+            Self::bps_amount(c.total_amount, c.settlement_bps)
+        };
         let claimed_by_coop = (if c.advance1_claimed {
             Self::bps_amount(c.total_amount, c.advance1_bps)
         } else {
@@ -839,6 +944,163 @@ impl EscrowContract {
         }
         if buyer_refund > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &buyer_refund);
+        }
+        Ok(())
+    }
+
+    /// PRD §4.2 option (b), the actual conversion step: reads a fresh
+    /// oracle rate, reprices `oracle_config.denominated_amount` (adjusted
+    /// by `settlement_bps`, same shortfall/grade math `settle` itself
+    /// uses) into the settlement token, and compares that against what's
+    /// actually escrowed. Whatever gap remains — the buyer's FX risk,
+    /// made concrete — becomes `fx_shortfall_amount` for `fund_fx_shortfall`
+    /// to collect.
+    ///
+    /// Worked example, using this session's live-tested numbers: a deal
+    /// worth 1,000,000 NGN (`denominated_amount = 10_000_000_000_000` at
+    /// the 7-decimal convention), fully delivered at full grade
+    /// (`settlement_bps = 10_000`), Reflector quoting `price =
+    /// 66_700_000_000` at `decimals = 14` (≈1 NGN = 0.000667 USD, i.e.
+    /// ≈1,500 NGN/USD): `ngn_owed = 10_000_000_000_000` (unchanged, full
+    /// bps), `fx_adjusted_total = 10_000_000_000_000 * 66_700_000_000 /
+    /// 10^14 = 6_670_000_000` — 667 USDC, matching ₦1,000,000 at
+    /// ≈1,500 NGN/USD by hand. If `total_amount` had been funded
+    /// assuming a slightly better rate, escrow might hold only
+    /// 6_500_000_000 (650 USDC) — a genuine 17 USDC shortfall the buyer
+    /// now owes, exactly the FX-risk gap PRD §4.2 names.
+    ///
+    /// Requires both tranches already resolved (same guard `settle`
+    /// itself has) before reading `claimed_by_coop` — computing this
+    /// against a still-open tranche would use figures that could still
+    /// change by the time `settle` actually runs. Permissionless, same
+    /// reasoning as `release_advance_*`: this only computes and records
+    /// a number, it doesn't move funds or grant anyone anything they
+    /// weren't already entitled to. One-time (`FxAlreadyResolved`) —
+    /// see the module doc for why re-resolving isn't allowed.
+    pub fn resolve_fx_shortfall(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if !c.advance1_claimed && !c.advance1_expired {
+            return Err(Error::TrancheUnresolved);
+        }
+        if !c.advance2_claimed && !c.advance2_expired {
+            return Err(Error::TrancheUnresolved);
+        }
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        let oracle_config: OracleConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleConfig)
+            .ok_or(Error::OracleNotConfigured)?;
+
+        let rate = Self::read_oracle_rate(&env, &oracle_config)?;
+        let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+
+        let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
+        let fx_adjusted_total = ngn_owed * rate.price / 10i128.pow(decimals);
+
+        let claimed_by_coop = (if c.advance1_claimed {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_claimed {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        });
+        let owed_from_remainder = (fx_adjusted_total - claimed_by_coop).max(0);
+        let available_balance = token::Client::new(&env, &c.token).balance(&env.current_contract_address());
+        let shortfall = (owed_from_remainder - available_balance).max(0);
+
+        c.fx_adjusted_total = fx_adjusted_total;
+        c.fx_resolved = true;
+        c.fx_shortfall_amount = shortfall;
+        if shortfall > 0 {
+            c.fx_shortfall_funded = false;
+            c.fx_shortfall_deadline = env.ledger().timestamp() + c.remainder_window_secs;
+        } else {
+            // Nothing owed -- trivially "funded" so settle()'s guard
+            // (`fx_shortfall_amount > 0 && !fx_shortfall_funded`) reads
+            // naturally without a separate "or amount is zero" branch.
+            c.fx_shortfall_funded = true;
+        }
+        Self::save(&env, &c);
+        Ok(())
+    }
+
+    /// Buyer pays in the shortfall `resolve_fx_shortfall` computed.
+    /// Buyer-gated, matching `fund_remainder`'s own reasoning: this is
+    /// new money the buyer specifically owes, not a mechanical step
+    /// anyone could trigger.
+    pub fn fund_fx_shortfall(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if !c.fx_resolved {
+            return Err(Error::FxNotResolved);
+        }
+        if c.fx_shortfall_amount == 0 {
+            return Err(Error::NoFxShortfall);
+        }
+        if c.fx_shortfall_funded {
+            return Err(Error::FxShortfallAlreadyFunded);
+        }
+        if env.ledger().timestamp() > c.fx_shortfall_deadline {
+            return Err(Error::FxShortfallWindowPassed);
+        }
+        c.buyer.require_auth();
+
+        let amount = c.fx_shortfall_amount;
+        // Effects before interaction — see `lock`'s comment for why.
+        c.fx_shortfall_funded = true;
+        Self::save(&env, &c);
+
+        token::Client::new(&env, &c.token).transfer(&c.buyer, env.current_contract_address(), &amount);
+        Ok(())
+    }
+
+    /// The FX-shortfall buyer-default path: `fx_shortfall_deadline`
+    /// passed with the top-up never funded. Sweeps whatever's currently
+    /// escrowed to the cooperative and sets `Status::Defaulted` — the
+    /// *same* status `expire_remainder_window`'s buyer-default already
+    /// uses, by explicit product decision (see module doc), which means
+    /// the API's existing reputation consequence (immediate permanent
+    /// bar) applies here with no changes needed there at all.
+    ///
+    /// Permissionless, same reasoning as `expire_remainder_window`: the
+    /// outcome doesn't depend on who calls it, only on whether the
+    /// deadline has passed.
+    pub fn expire_fx_shortfall_window(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if !c.fx_resolved {
+            return Err(Error::FxNotResolved);
+        }
+        if c.fx_shortfall_amount == 0 {
+            return Err(Error::NoFxShortfall);
+        }
+        if c.fx_shortfall_funded {
+            return Err(Error::FxShortfallAlreadyFunded);
+        }
+        if env.ledger().timestamp() <= c.fx_shortfall_deadline {
+            return Err(Error::FxShortfallWindowNotPassed);
+        }
+
+        // Effects before interaction — see `lock`'s comment for why.
+        c.status = Status::Defaulted;
+        Self::save(&env, &c);
+
+        let token_client = token::Client::new(&env, &c.token);
+        let balance = token_client.balance(&env.current_contract_address());
+        if balance > 0 {
+            token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
         }
         Ok(())
     }

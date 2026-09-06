@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "eb8bc79e097e63b9b8781df69f149f1d21cf5f4d1bdbc48fe4d638ab62ec1922"
+                            "bytes": "f524f11c348f26ebc304a375b12b21eb38a947fee86487a8733ad60cd065ff8c"
                           }
                         },
                         {
@@ -149,7 +149,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "4a4f39aedd310a633753e19af802710eb1d34b8af49701ab7033cbf0101865fc"
+                            "bytes": "ba4ed31760ec9d32685371f1d943dd2978d24840d458057f592a7c2873254812"
                           }
                         },
                         {
@@ -316,7 +316,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "eb8bc79e097e63b9b8781df69f149f1d21cf5f4d1bdbc48fe4d638ab62ec1922"
+                                  "bytes": "f524f11c348f26ebc304a375b12b21eb38a947fee86487a8733ad60cd065ff8c"
                                 }
                               },
                               {
@@ -336,7 +336,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "4a4f39aedd310a633753e19af802710eb1d34b8af49701ab7033cbf0101865fc"
+                                  "bytes": "ba4ed31760ec9d32685371f1d943dd2978d24840d458057f592a7c2873254812"
                                 }
                               },
                               {
@@ -480,6 +480,46 @@
                             },
                             "val": {
                               "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_adjusted_total"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_resolved"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_amount"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_funded"
+                            },
+                            "val": {
+                              "bool": false
                             }
                           },
                           {

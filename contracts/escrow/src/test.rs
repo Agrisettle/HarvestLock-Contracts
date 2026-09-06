@@ -446,6 +446,14 @@ mod mock_oracle {
                 .get::<_, (i128, u64)>(&symbol_short!("price"))
                 .map(|(price, timestamp)| PriceData { price, timestamp })
         }
+
+        /// Hardcoded to match Reflector's real fiat-exchange-rate oracle
+        /// (verified live, see `reflector.rs`) -- `resolve_fx_shortfall`
+        /// calls this to scale `lastprice`'s raw integer back into an
+        /// actual rate, same as the real oracle requires.
+        pub fn decimals(_env: Env) -> u32 {
+            14
+        }
     }
 }
 
@@ -453,7 +461,19 @@ mod mock_oracle {
 /// `mock_oracle::MockOracle` instance, `price` already set at the current
 /// ledger timestamp. Returns the setup plus the oracle client so tests
 /// can call `set_price` again to simulate a stale or updated quote.
+/// `denominated_amount` of 500_000 at this fixture's 1.75 rate comes to
+/// an `fx_adjusted_total` of 875_000 -- comfortably under `total_amount`
+/// (1_000_000), so tests using the plain `setup_with_oracle` wrapper
+/// never hit a shortfall; `setup_with_oracle_denomination` lets the FX
+/// shortfall tests below choose a `denominated_amount` that does.
 fn setup_with_oracle(max_age_secs: u64) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
+    setup_with_oracle_denomination(max_age_secs, 500_000)
+}
+
+fn setup_with_oracle_denomination(
+    max_age_secs: u64,
+    denominated_amount: i128,
+) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -463,7 +483,10 @@ fn setup_with_oracle(max_age_secs: u64) -> (Setup<'static>, mock_oracle::MockOra
     let token_admin = Address::generate(&env);
     let (token_address, token, token_admin_client) = create_token(&env, &token_admin);
     let total_amount: i128 = 1_000_000;
-    token_admin_client.mint(&buyer, &total_amount);
+    // Extra headroom beyond total_amount, deliberately -- a shortfall
+    // test needs the buyer able to fund a *second* payment on top of
+    // the deposit + remainder they've already sent.
+    token_admin_client.mint(&buyer, &(total_amount * 3));
 
     let oracle_id = env.register(mock_oracle::MockOracle, ());
     let oracle = mock_oracle::MockOracleClient::new(&env, &oracle_id);
@@ -488,6 +511,7 @@ fn setup_with_oracle(max_age_secs: u64) -> (Setup<'static>, mock_oracle::MockOra
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
             max_age_secs,
+            denominated_amount,
         }),
     );
 
@@ -569,6 +593,7 @@ fn oracle_rate_fails_when_the_oracle_has_never_quoted_this_asset() {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
             max_age_secs: 3_600,
+            denominated_amount: 500_000,
         }),
     );
 
@@ -636,6 +661,7 @@ fn initialize_rejects_a_zero_max_age_secs_oracle_config() {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
             max_age_secs: 0,
+            denominated_amount: 500_000,
         }),
     );
     assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
@@ -649,11 +675,254 @@ fn oracle_rate_is_callable_after_settlement() {
     s.contract.lock();
     advance_to_remainder_funded(&s);
     s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    // Oracle-configured, so settle() now requires resolve_fx_shortfall()
+    // first -- denominated_amount (500_000) at this fixture's price
+    // (1.75) comes to 875_000, comfortably under total_amount (1_000_000),
+    // so this specific fixture never actually has a shortfall to fund.
+    s.contract.resolve_fx_shortfall();
     s.contract.settle();
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     let rate = s.contract.oracle_rate();
     assert_eq!(rate.price, 175_000_000_000_000);
+}
+
+// ---------- FX shortfall (PRD §4.2, option (b): buyer tops up or is
+// refunded at settlement) ----------
+//
+// denominated_amount: 1_000_000 at this fixture's 1.75 rate ->
+// fx_adjusted_total = 1_750_000 at full settlement, comfortably over
+// total_amount (1_000_000) -- a genuine shortfall every test in this
+// section can rely on unless it says otherwise.
+const SHORTFALL_DENOMINATION: i128 = 1_000_000;
+const EXPECTED_FX_ADJUSTED_TOTAL: i128 = 1_750_000;
+const EXPECTED_SHORTFALL: i128 = 750_000; // 1_750_000 - 300_000 claimed - 700_000 remainder
+
+fn advance_to_delivered_with_shortfall(s: &Setup) {
+    s.contract.lock();
+    advance_to_remainder_funded(s);
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+}
+
+#[test]
+fn resolve_fx_shortfall_computes_a_real_shortfall_when_the_currency_strengthened() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+
+    s.contract.resolve_fx_shortfall();
+
+    let c = s.contract.get_commitment();
+    assert!(c.fx_resolved);
+    assert_eq!(c.fx_adjusted_total, EXPECTED_FX_ADJUSTED_TOTAL);
+    assert_eq!(c.fx_shortfall_amount, EXPECTED_SHORTFALL);
+    assert!(!c.fx_shortfall_funded);
+    assert!(c.fx_shortfall_deadline > 0);
+}
+
+#[test]
+fn resolve_fx_shortfall_finds_nothing_owed_when_already_covered() {
+    // The default setup_with_oracle fixture (denominated_amount 500_000)
+    // -- fx_adjusted_total 875_000 is under total_amount 1_000_000.
+    let (s, _oracle) = setup_with_oracle(3_600);
+    advance_to_delivered_with_shortfall(&s);
+
+    s.contract.resolve_fx_shortfall();
+
+    let c = s.contract.get_commitment();
+    assert!(c.fx_resolved);
+    assert_eq!(c.fx_shortfall_amount, 0);
+    // Trivially "funded" -- nothing to pay in, settle() shouldn't wait
+    // on fund_fx_shortfall for a shortfall that doesn't exist.
+    assert!(c.fx_shortfall_funded);
+    assert_eq!(c.fx_shortfall_deadline, 0);
+}
+
+#[test]
+fn cannot_resolve_fx_shortfall_twice() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    let result = s.contract.try_resolve_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::FxAlreadyResolved)));
+}
+
+#[test]
+fn cannot_resolve_fx_shortfall_before_tranches_are_resolved() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    s.contract.lock();
+    // Deliberately not advance_to_remainder_funded's full claim/reclaim
+    // dance -- open both tranches but never resolve either, matching
+    // settle()'s own TrancheUnresolved guard, which resolve_fx_shortfall
+    // shares for the same reason (needs final, settled figures).
+    s.contract.release_advance_1();
+    advance_time(&s, WINDOW + 1);
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    let result = s.contract.try_resolve_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
+}
+
+#[test]
+fn resolve_fx_shortfall_requires_oracle_configured() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    let result = s.contract.try_resolve_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::OracleNotConfigured)));
+}
+
+#[test]
+fn settle_blocked_until_fx_resolved() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+
+    let result = s.contract.try_settle();
+    assert_eq!(result, Err(Ok(Error::FxNotResolved)));
+}
+
+#[test]
+fn settle_blocked_while_fx_shortfall_unfunded() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    let result = s.contract.try_settle();
+    assert_eq!(result, Err(Ok(Error::FxShortfallUnfunded)));
+}
+
+#[test]
+fn settle_proceeds_immediately_when_fx_resolution_found_no_shortfall() {
+    let (s, _oracle) = setup_with_oracle(3_600); // no-shortfall fixture
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    s.contract.settle();
+    assert_eq!(s.contract.get_status(), Status::Settled);
+}
+
+#[test]
+fn fund_fx_shortfall_pays_in_the_shortfall_and_unblocks_settle() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    let buyer_balance_before = s.token.balance(&s.buyer);
+
+    s.contract.fund_fx_shortfall();
+
+    assert_eq!(s.token.balance(&s.buyer), buyer_balance_before - EXPECTED_SHORTFALL);
+    assert!(s.contract.get_commitment().fx_shortfall_funded);
+
+    // No longer blocked.
+    s.contract.settle();
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    // fx_adjusted_total (1_750_000), fully covered now: claimed_by_coop
+    // (300_000, already paid) + this settle's payout should sum to
+    // exactly 1_750_000 -- the whole point of the top-up.
+    assert_eq!(s.token.balance(&s.cooperative), 300_000 + 1_450_000);
+}
+
+#[test]
+fn fund_fx_shortfall_requires_buyer_auth() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    // mock_all_auths() means this can't check *rejection* of a wrong
+    // signer -- see confirm_delivery_requires_warehouse_operator's
+    // comment. What it confirms is the call path genuinely requires the
+    // buyer's auth to exist at all.
+    s.contract.fund_fx_shortfall();
+    let auths = s.env.auths();
+    assert!(auths.iter().any(|(addr, _)| *addr == s.buyer), "expected buyer auth on fund_fx_shortfall");
+}
+
+#[test]
+fn cannot_fund_fx_shortfall_twice() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    s.contract.fund_fx_shortfall();
+
+    let result = s.contract.try_fund_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::FxShortfallAlreadyFunded)));
+}
+
+#[test]
+fn cannot_fund_fx_shortfall_when_none_is_owed() {
+    let (s, _oracle) = setup_with_oracle(3_600); // no-shortfall fixture
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    let result = s.contract.try_fund_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::NoFxShortfall)));
+}
+
+#[test]
+fn cannot_fund_fx_shortfall_before_resolution() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+
+    let result = s.contract.try_fund_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::FxNotResolved)));
+}
+
+#[test]
+fn cannot_fund_fx_shortfall_after_the_window_passes() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    advance_time(&s, REMAINDER_WINDOW + 1);
+
+    let result = s.contract.try_fund_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::FxShortfallWindowPassed)));
+}
+
+#[test]
+fn expire_fx_shortfall_window_sweeps_escrow_to_cooperative_and_defaults_the_buyer() {
+    // No require_auth() at all on this path, same reasoning as
+    // expire_remainder_window_is_permissionless's own test -- the call
+    // succeeding with no buyer/cooperative auth required is the proof.
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    let contract_balance_before = s.token.balance(&s.contract.address);
+    let cooperative_balance_before = s.token.balance(&s.cooperative); // already has the 300_000 claimed pre-delivery
+    advance_time(&s, REMAINDER_WINDOW + 1);
+
+    s.contract.expire_fx_shortfall_window();
+
+    assert_eq!(s.contract.get_status(), Status::Defaulted);
+    assert_eq!(s.token.balance(&s.cooperative), cooperative_balance_before + contract_balance_before);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn cannot_expire_fx_shortfall_window_before_the_deadline() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    let result = s.contract.try_expire_fx_shortfall_window();
+    assert_eq!(result, Err(Ok(Error::FxShortfallWindowNotPassed)));
+}
+
+#[test]
+fn cannot_expire_fx_shortfall_window_once_funded() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    s.contract.fund_fx_shortfall();
+    advance_time(&s, REMAINDER_WINDOW + 1);
+
+    let result = s.contract.try_expire_fx_shortfall_window();
+    assert_eq!(result, Err(Ok(Error::FxShortfallAlreadyFunded)));
 }
 
 // ---------- opening a tranche moves no funds ----------

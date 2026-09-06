@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "54a1768c8dd123613fc66472b3b7fcf8c2ded44f629f93c979df80fb24eaf994"
+                            "bytes": "495fbb2cff2f76b18f356218d81c88f7bf4d61c1fa591e828ccdeffba6f71fce"
                           }
                         },
                         {
@@ -296,7 +296,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "54a1768c8dd123613fc66472b3b7fcf8c2ded44f629f93c979df80fb24eaf994"
+                                  "bytes": "495fbb2cff2f76b18f356218d81c88f7bf4d61c1fa591e828ccdeffba6f71fce"
                                 }
                               },
                               {
@@ -440,6 +440,46 @@
                             },
                             "val": {
                               "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_adjusted_total"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_resolved"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_amount"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_deadline"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_shortfall_funded"
+                            },
+                            "val": {
+                              "bool": false
                             }
                           },
                           {

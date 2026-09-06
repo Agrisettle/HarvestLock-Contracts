@@ -395,7 +395,57 @@ it — no code change needed, just a different `price_asset` string at
    `get_oracle_config` read back the exact stored config afterward,
    confirming `initialize`'s `Option` correctly persisted it.
 
-**All eight deployed/uploaded instances are validation artifacts, not
+**Deployment 9** (6 Sept 2026) — WASM hash
+`7940147db99f8222a0710de46566a479d42dbf0626575d17af16e1698aa045f0`
+(42,175 bytes optimized, 26 exported functions — `resolve_fx_shortfall`,
+`fund_fx_shortfall`, `expire_fx_shortfall_window` are the three new
+ones). Uploaded via `stellar contract upload`. Wires PRD §4.2's option
+(b) — buyer tops up or is refunded at settlement — into `settle`'s
+actual payout math, a product decision made explicitly this session
+(the PRD names three options and leaves the choice to pilot partners;
+this repo doesn't get to assume one). `OracleConfig` gained
+`denominated_amount: i128` (the deal's true value in `price_asset`,
+same 7-decimal convention `total_amount` already uses); `resolve_fx_shortfall`
+— reachable once `Delivered` with both tranches already resolved, so
+the comparison uses final figures, not a snapshot that could still
+change — reads a fresh oracle rate, converts `denominated_amount`
+(adjusted by `confirm_delivery`'s `settlement_bps`) into the settlement
+token, and records the gap against what's actually escrowed as
+`fx_shortfall_amount`. A shortfall has to be paid in via
+`fund_fx_shortfall` before `settle` will run
+(`FxNotResolved`/`FxShortfallUnfunded`); missing that deadline is
+`expire_fx_shortfall_window`, which reuses `Status::Defaulted` — the
+*same* immediate-permanent-bar consequence `expire_remainder_window`'s
+buyer-default already carries, by explicit product decision (asked and
+answered this session, not assumed), and for free at the API layer
+since the existing reputation machinery already reacts to any fresh
+transition into `Defaulted`. 27 new contract unit tests (103/103
+total) against the local mock oracle, including the full resolve →
+shortfall-found → fund → settle chain and its `expire` mirror.
+
+Live-verified on testnet with real numbers, not fixtures — a fresh
+instance (`CBOZLCNHWFHTK24WO7RCDBEWUFV6LWQKZFHJUIOZZRVBMNRTGLXRMKKH`),
+`denominated_amount: 100,000,000`, `total_amount: 100,000,000`,
+oracle_config pointed at the real Reflector fiat oracle (GBP, same
+stand-in reasoning as Deployment 8 — Reflector still doesn't quote
+NGN). Walked through the full lifecycle for real: `lock` (30,000,000
+deposit), both tranches claimed (15,000,000 each), `fund_remainder`
+(70,000,000), `confirm_delivery` at full quantity/grade, then
+`resolve_fx_shortfall` — against the live GBP/USD rate at that exact
+moment (≈1.353), it computed `fx_adjusted_total: 135,300,006` and
+`fx_shortfall_amount: 35,300,006` (135,300,006 - 30,000,000 already
+claimed - 70,000,000 escrowed), matching a hand calculation from the
+same live rate before the call, not fit to the result afterward.
+`fund_fx_shortfall` moved exactly 35,300,006 from the buyer; `settle`
+then paid the cooperative exactly 105,300,006 from the remainder
+balance. Cooperative's total take across all three payments: 15,000,000
++ 15,000,000 + 105,300,006 = **135,300,006 — exactly `fx_adjusted_total`**,
+confirmed via a fresh Horizon balance read, not assumed from submission
+success. The whole point of option (b), proven with real testnet
+transfers: the cooperative received the deal's actual current-rate
+value, not the stale amount `total_amount` alone would have paid out.
+
+**All nine deployed/uploaded instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -423,21 +473,25 @@ so nobody "fixes" them without knowing what they're trading off.
    the `require_auth()` call itself, and grade/quantity disputes are
    explicitly off-chain (the operator's own appeals process, per the
    PRD's edge-case table) — this contract doesn't arbitrate them.
-3. ~~No NGN/oracle conversion.~~ **The staleness-bound read half is
-   built** (Deployment 8, 5 Sept 2026, see above): `oracle_rate()` reads
-   a live Reflector SEP-40 quote and enforces PRD §16.3's staleness
-   bound. **`total_amount` still isn't converted anywhere** — `settle`
-   still treats it as already being in the settlement asset, on every
-   commitment, oracle-configured or not. That's deliberate, not a gap in
-   this pass: PRD §4.2 names three different options for who bears FX
-   risk between lock-in and settlement, explicitly "decided with pilot
-   partners rather than assumed," and picking one to wire into `settle`
-   would be answering on their behalf. Also still open, but for a
-   different reason: **Reflector's live testnet fiat oracle doesn't
-   quote NGN at all** (verified via a real `assets()` call, see
-   Deployment 8) — the actual currency this PRD section is about has no
-   real feed to convert against yet, on top of the settlement-design
-   question above.
+3. ~~No NGN/oracle conversion.~~ **Built** (Deployment 8, 5 Sept 2026 —
+   the staleness-bound read; Deployment 9, 6 Sept 2026 — the actual
+   `settle` payout wiring, see above): `oracle_rate()`/`resolve_fx_shortfall()`
+   read a live Reflector SEP-40 quote enforcing PRD §16.3's staleness
+   bound, and `settle` now pays out against the fresh-rate-converted
+   `denominated_amount` on any oracle-configured commitment — PRD §4.2's
+   option (b), buyer tops up or is refunded, asked and answered
+   explicitly this session rather than assumed. Live-verified on
+   testnet with a genuine top-up: a real GBP/USD rate move meant the
+   cooperative was owed 135,300,006 against an escrowed 100,000,000; the
+   buyer funded the 35,300,006 gap and the cooperative received the
+   full fresh-rate amount, not the stale one. **Still open**:
+   Reflector's live testnet fiat oracle doesn't quote NGN at all
+   (verified via a real `assets()` call, see Deployment 8) — the actual
+   currency this PRD section is about has no real feed to convert
+   against yet. `price_asset` works with anything Reflector does quote
+   today (this session's tests use GBP) and activates for NGN
+   automatically the day Reflector adds it — no code change needed,
+   just a different `price_asset` string at `initialize`.
 4. ~~No allocation ledger.~~ **Built** (Deployment 7, 4 Sept 2026, see
    above): `set_allocation`/`get_allocation`, per-member salted hashes,
    record-only (PRD §4.9 Rung 1, the v1 default, not a deferred
@@ -563,6 +617,34 @@ so nobody "fixes" them without knowing what they're trading off.
   vs. status-right-but-unfunded) so the specific `RemainderNotFunded`
   error tells a caller exactly which precondition failed, rather than a
   generic `InvalidState` covering both.
+- **Why `resolve_fx_shortfall` is its own step, not folded into
+  `confirm_delivery`**: `confirm_delivery` only requires `remainder_funded`,
+  not both advance tranches resolved — claiming/reclaiming an advance can
+  still happen after delivery is confirmed. Computing the FX comparison
+  at `confirm_delivery` time would use a `claimed_by_coop`/escrowed-balance
+  snapshot that could still change before `settle` actually runs, since
+  tranche resolution isn't required yet at that point. Splitting it into
+  its own step, gated on the *same* both-tranches-resolved requirement
+  `settle` itself has, means the numbers it records are already final —
+  the same "explicit resolution required, never inferred from a snapshot"
+  principle `settle`'s own tranche-resolution requirement established
+  first, applied to a second kind of number that can also still move.
+- **Why `resolve_fx_shortfall` is permissionless but `fund_fx_shortfall`
+  is buyer-gated**, even though `expire_fx_shortfall_window` mirrors
+  `expire_remainder_window`'s reasoning exactly: `resolve_fx_shortfall`
+  only computes and records a number — it doesn't move funds or grant
+  anyone anything, same category as `release_advance_*`. `fund_fx_shortfall`
+  moves the buyer's own money specifically, so it needs their auth, same
+  as `fund_remainder`.
+- **Why `expire_fx_shortfall_window` reuses `Status::Defaulted` instead
+  of a new status**: an explicit product decision this session, not an
+  implementation shortcut — asked directly ("what happens if the buyer
+  doesn't fund the shortfall in time?") and answered "same as the
+  existing buyer-default policy." Reusing the status means the API's
+  existing reputation consequence (immediate permanent bar on any fresh
+  transition into `Defaulted`) applies automatically, with zero API
+  changes needed to enforce it consistently with the original
+  `expire_remainder_window` default.
 
 ## Next steps, in priority order
 
@@ -598,17 +680,14 @@ item that used to be #1 here is done; everything shifts up by one.
 5. **Decide the `claim_window_secs` minimum question** (see "What's
    deliberately NOT implemented," item 5) — doesn't have to block the
    items above, but shouldn't be forgotten either.
-6. ~~**NGN/oracle conversion** (PRD §4.2/§16.3)~~ — **the staleness-bound
-   read half is done** (Deployment 8, 5 Sept 2026, see above):
-   `oracle_rate()`/`get_oracle_config()`, live-verified against the real
-   Reflector testnet oracle. What's still open, and why it's staying
-   open rather than being pushed further unilaterally: (a) wiring a
-   specific rate into `settle`'s payout math means picking one of PRD
-   §4.2's three FX-risk-allocation options, which the PRD itself says to
-   decide with pilot partners, not assume; (b) Reflector's real testnet
-   fiat oracle doesn't quote NGN at all yet (confirmed live, not
-   assumed) — the actual currency this feature is for has no feed to
-   convert against, independent of the settlement-design question.
+6. ~~**NGN/oracle conversion** (PRD §4.2/§16.3)~~ — **done** (Deployment
+   8, 5 Sept 2026: the staleness-bound read; Deployment 9, 6 Sept 2026:
+   `settle` payout wiring, PRD §4.2 option (b), see above), live-verified
+   with a genuine cross-rate top-up on real testnet. What's still open:
+   Reflector's real testnet fiat oracle doesn't quote NGN at all yet
+   (confirmed live, not assumed) — the actual currency this feature is
+   for has no feed to convert against. Not this contract's problem to
+   solve; activates automatically the day Reflector adds it.
 
 ~~Deploy to testnet, exercise the happy path end-to-end.~~ **Done, five
 times now.** ~~Claimable-balance-with-expiry for the advance tranches.~~
