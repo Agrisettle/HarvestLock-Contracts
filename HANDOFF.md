@@ -731,9 +731,18 @@ item that used to be #1 here is done; everything shifts up by one.
    three-scenario live testnet verification); partial delivery and
    over-delivery via `confirm_delivery`'s `settlement_bps` math
    (Deployment 6, 9 new unit tests, live-verified — see above).
-5. **Decide the `claim_window_secs` minimum question** (see "What's
-   deliberately NOT implemented," item 5) — doesn't have to block the
-   items above, but shouldn't be forgotten either.
+5. ~~**Decide the `claim_window_secs` minimum question**~~ — **already
+   decided**, this item just never got updated to say so (see "What's
+   deliberately NOT implemented," item 5, for the actual reasoning,
+   which was written the same session as the API-side fix but never
+   echoed back here). The answer: bound it at the API layer (`api/src/
+   server.ts`, 1 hour floor / 90 day ceiling, checked before an
+   `initialize` transaction is even built), leave the contract itself
+   unbounded on purpose — this was never a security boundary, only a
+   business-judgment default, and the contract is the wrong layer for
+   that judgment call since anything invoking `initialize` directly
+   (a different future API, a test, `stellar-cli`) bypasses an
+   API-level check entirely regardless. Nothing left to decide here.
 6. ~~**NGN/oracle conversion** (PRD §4.2/§16.3)~~ — **done** (Deployment
    8, 5 Sept 2026: the staleness-bound read; Deployment 9, 6 Sept 2026:
    `settle` payout wiring, PRD §4.2 option (b), see above), live-verified
