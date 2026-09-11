@@ -96,7 +96,7 @@ broken.
 ## Reference
 
 - **PRD**: [`docs/PRD.md`](https://github.com/Agrisettle/HarvestLock/blob/main/docs/PRD.md) in the `HarvestLock` repo — see §4.8 (contract design), §4.5 (why this can't hold custody keys), §16.3 (oracle staleness and depeg handling the contract must account for)
-- **Contributing**: see [`HarvestLock`](https://github.com/Agrisettle/HarvestLock)'s [`CONTRIBUTING.md`](https://github.com/Agrisettle/HarvestLock/blob/main/CONTRIBUTING.md) — one contribution guide for every repo under this org, not a separate one per repo
+- **Contributing**: [`CONTRIBUTING.md`](./CONTRIBUTING.md) here is a pointer, not a separate guide — see [`HarvestLock`](https://github.com/Agrisettle/HarvestLock)'s [`CONTRIBUTING.md`](https://github.com/Agrisettle/HarvestLock/blob/main/CONTRIBUTING.md) for the real one, shared across every repo under this org
 - **Security**: [`SECURITY.md`](./SECURITY.md) — report vulnerabilities privately, especially anything in this contract
 - **Org**: [Agrisettle](https://github.com/Agrisettle)
 
