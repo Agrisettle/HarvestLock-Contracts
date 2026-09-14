@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Explicit least-privilege token, not relying on the repo/org default
+# (currently "read" too, checked directly -- but shouldn't depend on
+# that staying true). Neither job pushes, comments, or writes
+# anything -- checkout, cargo test, and stellar contract build all
+# only need read access.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: cargo test
