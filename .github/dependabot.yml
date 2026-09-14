@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Workspace root -- covers both Cargo.toml (root) and
+  # contracts/escrow/Cargo.toml (the workspace member) in one entry, same
+  # as how `cargo build`/`cargo test` resolve the workspace from here.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Keeps actions/checkout, the stellar-cli install step, etc. current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
