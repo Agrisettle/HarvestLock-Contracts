@@ -634,10 +634,15 @@ impl EscrowContract {
     /// amount. See module docs for why this changed from earlier versions
     /// of this contract, which escrowed everything here.
     ///
-    /// The buyer must have already approved this contract to transfer at
-    /// least the deposit amount of `token` on their behalf (standard
-    /// SEP-41 token `approve`), or this call fails at the token contract,
-    /// not here.
+    /// No prior SEP-41 `approve()` needed — verified live against real
+    /// testnet, not assumed. Soroban's single-transaction nested-
+    /// authorization model means the buyer's signature on the top-level
+    /// `lock` invocation already covers the nested `token::Client::transfer`
+    /// call's own `require_auth()` below; this differs from the classic
+    /// ERC-20-style approve/transferFrom pattern a reader coming from EVM
+    /// might expect. (An earlier version of this comment claimed approve
+    /// was required — that was never checked against real behavior; this
+    /// replaces it with what was actually verified.)
     pub fn lock(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         if c.status != Status::Draft {
