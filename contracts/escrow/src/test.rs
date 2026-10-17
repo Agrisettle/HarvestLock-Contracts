@@ -298,6 +298,42 @@ fn initialize_allows_buyer_cooperative_and_warehouse_to_be_one_address() {
     assert_eq!(commitment.warehouse_operator, one_principal);
 }
 
+/// `total_amount == 0` is the first guard clause in `initialize`, ahead of
+/// every bps/window/quantity check. The app-level API pre-validates this too,
+/// so what's asserted here is the contract itself refusing it — the API layer
+/// could be bypassed entirely (a direct `stellar contract invoke`, a future
+/// second client) and this must still hold.
+#[test]
+fn zero_total_amount_rejected_at_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &0,
+        &1_000,
+        &1_000,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(Error::ZeroAmount)));
+}
+
 #[test]
 fn zero_claim_window_rejected_at_initialize() {
     let env = Env::default();

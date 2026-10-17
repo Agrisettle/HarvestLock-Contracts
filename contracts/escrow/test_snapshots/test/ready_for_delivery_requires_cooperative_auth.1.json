@@ -987,5 +987,40 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "status_changed"
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Advance2Released"
+                  }
+                ]
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "ReadyForDelivery"
+                  }
+                ]
+              }
+            ],
+            "data": {
+              "map": []
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }
