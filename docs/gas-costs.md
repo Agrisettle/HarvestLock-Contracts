@@ -156,3 +156,34 @@ soroban-cost-estimator estimate --wasm … --id "$A" --fn claim_advance_2 --netw
   earlier by `lock` on the same instances. A nth-claim in a long-lived
   commitment may differ in the rent half; the execution half is state-size
   independent here.
+## WASM Upload vs Instantiation
+
+The deploy flow separates two distinct costs:
+
+| Operation | Description | Cost (stroops) | Notes |
+|-----------|-------------|----------------|-------|
+| **WASM upload** | One-time upload of the compiled `.wasm` to the Soroban network | ~TBD | Paid once per contract version; hash pinned in deployment config |
+| **Instantiation** | Creating a new commitment instance from an already-uploaded WASM hash | ~TBD | Marginal cost per commitment; scales with initial state size |
+
+To reproduce these measurements locally:
+
+```bash
+# Upload cost (no --fn flag — measures pure upload)
+soroban-cost-estimator estimate \
+  --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+
+# Instantiation cost (with --id pointing to the deployed contract address)
+soroban-cost-estimator estimate \
+  --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm \
+  --contract-id <DEPLOYED_CONTRACT_ID> \
+  --fn initialize \
+  --args '["<BUYER>", "<SELLER>", 100000, 5000, 3000, 100, 200, 300, null, []]'
+```
+
+## Reproducibility
+
+WASM builds are verified reproducible in CI (`.github/workflows/test.yml`, job "Verify WASM build reproducibility"). The SHA-256 hash of `target/wasm32v1-none/release/harvestlock_escrow.wasm` must match between two consecutive clean builds. Current hash: see latest CI run.
+
+## Supply-Chain Health
+
+`cargo deny check advisories bans` runs in CI to catch yanked or unmaintained dependencies. See `deny.toml` for configuration. As of this writing, the dependency tree is minimal (`soroban-sdk = "28.0.0"` only) and passes all checks cleanly.

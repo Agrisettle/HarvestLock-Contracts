@@ -1,0 +1,30 @@
+# cargo-deny configuration for HarvestLock-Contracts
+# See https://embarkstudios.github.io/cargo-deny/ for documentation
+
+[graph]
+targets = [
+    { triple = "wasm32v1-none" },
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "deny"
+# paste is unmaintained but used by soroban-env-host (transitive dep we can't control)
+ignore = [
+    "RUSTSEC-2024-0436",  # paste - unmaintained, comes via soroban-env-host
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

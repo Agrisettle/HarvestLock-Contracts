@@ -87,6 +87,8 @@ jobs:
         Conventional Commits
         cargo test
         stellar contract build
+        Verify WASM build reproducibility
+        cargo deny
       # Top-level path prefixes PRs normally touch. Files outside these
       # are flagged by the diff-review gate (never auto-merged).
       SCOPE_PREFIXES: |-

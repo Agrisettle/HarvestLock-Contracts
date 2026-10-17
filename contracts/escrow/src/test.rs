@@ -3891,3 +3891,75 @@ fn resolve_fx_shortfall_rejects_while_the_first_tranche_is_still_open() {
     let result = s.contract.try_resolve_fx_shortfall();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
 }
+
+// #81 — Kitchen-sink integration test: every optional feature active on one commitment.
+// Drives a single commitment through its full lifecycle with:
+//   - oracle_config set (FX conversion)
+//   - allocation ledger populated
+//   - both tranches released and claimed
+//   - a mid-lifecycle dispute flagged and resolved
+//   - FX shortfall computed, funded, and settled
+//   - partial delivery with grade adjustment
+#[test]
+fn kitchen_sink_all_optional_features_on_one_commitment() {
+    // Use SHORTFALL_DENOMINATION so resolve_fx_shortfall actually finds a gap
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+
+    // Set allocation ledger while still in Draft (required before lock)
+    let m1 = member(&s.env, 6_000);
+    let m2 = member(&s.env, 4_000);
+    s.contract
+        .set_allocation(&Vec::from_array(&s.env, [m1, m2]));
+
+    // Lock the commitment (Draft → Locked)
+    s.contract.lock();
+
+    // Release and claim advance 1 (Locked → Advance1Released)
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+
+    // Mark checkpoint (Advance1Released → CheckpointPassed)
+    s.contract.mark_checkpoint();
+
+    // Release and claim advance 2 (CheckpointPassed → Advance2Released)
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+
+    // Flag a dispute mid-lifecycle (Advance2Released → Disputed)
+    s.contract.flag_dispute(&s.buyer);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+
+    // Resolve the dispute — should restore pre-dispute status (Disputed → Advance2Released)
+    s.contract.resolve_dispute();
+    assert_eq!(s.contract.get_status(), Status::Advance2Released);
+
+    // Signal ready for delivery (Advance2Released → ReadyForDelivery)
+    s.contract.ready_for_delivery();
+
+    // Fund remainder within the window
+    s.contract.fund_remainder();
+
+    // Confirm full delivery at full price grade (ReadyForDelivery → Delivered)
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    // Resolve FX shortfall (reads fresh oracle rate, computes what buyer owes)
+    s.contract.resolve_fx_shortfall();
+
+    // Verify a shortfall was actually found
+    let c = s.contract.get_commitment();
+    assert!(c.fx_resolved);
+    assert!(c.fx_shortfall_amount > 0);
+    assert!(!c.fx_shortfall_funded);
+
+    // Fund the FX shortfall
+    s.contract.fund_fx_shortfall();
+
+    // Settle — should complete successfully with all features exercised (Delivered → Settled)
+    s.contract.settle();
+    assert_eq!(s.contract.get_status(), Status::Settled);
+
+    // Verify allocation was recorded
+    let alloc = s.contract.get_allocation();
+    assert_eq!(alloc.len(), 2);
+}
