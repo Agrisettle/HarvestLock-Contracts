@@ -291,10 +291,17 @@ exactly as they would have without a dispute. Tests:
 `resolve_dispute_allows_normal_flow_to_continue_afterward`.
 
 #### 14. The freeze doesn't actually freeze anything
-**Verdict: defended.** The freeze works by construction — no other
-state-changing function ever accepts `Disputed` as a required status — and
-one test walks every state-changing call to prove it rather than asserting
-it in prose: `flag_dispute_freezes_every_other_state_changing_call`.
+**Verdict: defended, with one documented exception.** The freeze works by
+construction for every *status-gated* call — none of them ever accepts
+`Disputed` as a required status — and one test walks those calls to prove
+it rather than asserting it in prose:
+`flag_dispute_freezes_every_other_state_changing_call`. The exception is
+`claim_advance_1/2` and `reclaim_advance_1/2`: `claim_tranche` /
+`reclaim_tranche` guard only the tranche deadline, the one-shot flags, and
+the party's auth, so a dispute does **not** block a claim or a reclaim. A
+dispute therefore cannot be used to protect a tranche from the other side
+(and equally cannot extend a window). See
+[`dispute-frontrunning.md`](./dispute-frontrunning.md) §2.
 
 #### 15. Deadlines keep ticking while a dispute is open
 **Verdict: accepted risk, pinned by a test.** Freezing `status` does not
@@ -310,12 +317,20 @@ Revisit if a real dispute ever collides with a deadline this way (see
 `flag_dispute`'s doc comment and [`dispute-scope.md`](./dispute-scope.md) §4).
 
 #### 16. A party flags a dispute to buy time
-**Verdict: accepted risk, bounded.** Any named party can pause the machine
-for up to `remainder_window_secs` at a time — symmetric power, no outcome
-can be changed by pausing, other deadlines keep ticking (entry 15), and the
-pause can't outlive the timeout without unanimous consent. This is the
-"defined escalation" the PRD asks for; a stronger tool would be arbitration,
-which is a non-goal (entry 13).
+**Verdict: accepted risk, and the contract does not bound the
+delay.** Any named party can pause the machine for up to
+`remainder_window_secs` at a time, and because `expire_dispute_window`
+restores the pre-dispute status while `flag_dispute` has no cooldown, bond,
+or per-commitment counter, the flagger can re-flag immediately after each
+expiry. The timeout bounds a *single* freeze, not the strategy. Two claims
+this entry used to make need correcting: a pause *can* change an outcome,
+because a cooperative can flag to block `reclaim_on_nondelivery` and use
+the window to obtain a late `confirm_delivery` (entry 28,
+[`dispute-frontrunning.md`](./dispute-frontrunning.md) §3.1); and the
+freeze leaves other deadlines ticking (entry 15), so it buys time rather
+than curing anything. The flag itself also generates no reputation event,
+so a repeat staller accumulates no record. Full analysis:
+[`dispute-stalling.md`](./dispute-stalling.md).
 
 ### Oracle and FX
 
@@ -333,10 +348,17 @@ is rejected at `initialize`. Tests:
 `get_oracle_config_is_none_when_initialize_never_set_one`.
 
 #### 18. Either side games the FX number by choosing when to resolve
-**Verdict: defended.** `resolve_fx_shortfall` runs exactly once
-(`FxAlreadyResolved`), only from `Delivered` with **both tranches already
-resolved** so the comparison uses final figures rather than a snapshot that
-could still move, and `settle` reads only the recorded number. Tests:
+**Verdict: partially defended — the number is final once set, but *which*
+moment gets locked is a first-caller race.** `resolve_fx_shortfall` runs
+exactly once (`FxAlreadyResolved`), only from `Delivered` with **both
+tranches already resolved** so the comparison uses final figures rather
+than a snapshot that could still move, and `settle` reads only the recorded
+number — so the *loser of the race cannot re-resolve*. What the one-shot
+guard does not do is remove the incentive to be the first caller at a
+preferred quote: the two parties want opposite prices, there is no deadline
+by which resolution must happen, and either can flag a dispute to deny the
+other a favourable window. See
+[`dispute-frontrunning.md`](./dispute-frontrunning.md) §3.3. Tests:
 `cannot_resolve_fx_shortfall_twice`,
 `cannot_resolve_fx_shortfall_before_tranches_are_resolved`,
 `settle_blocked_until_fx_resolved`.
@@ -363,12 +385,16 @@ Tracked in HANDOFF's next steps as an upstream-feed gap.
 **Verdict: accepted risk, bounded.** Anyone can start a clock the state
 machine has already authorized (`release_advance_*`, `settle`,
 `resolve_fx_shortfall`, the `expire_*` sweeps) the moment it becomes
-eligible. Because those calls take no outcome parameter and only complete
-pre-fixed facts (authorization-matrix §2), the worst a griefer can do is
-trigger an outcome the terms already dictate — or pick the instant of an FX
-resolution among moments the oracle genuinely published, itself bounded by
-the staleness bound and freezable by a dispute. Tests pinning what
-permissionless *cannot* do:
+eligible.Because those calls take no outcome parameter and only complete pre-fixed
+facts (authorization-matrix §2), a griefer cannot name a destination and
+cannot redirect a payout to itself. It *can* still pick the instant of a
+call, and two of those instants are not outcome-neutral: an
+expiry sweep that runs before a vested `reclaim_advance_*` transfers the
+lapsed tranche to the cooperative (the sweep does not require resolved
+tranches, unlike `settle`), and the first caller of `resolve_fx_shortfall`
+decides which oracle moment prices the deal. Both are documented in
+[`dispute-frontrunning.md`](./dispute-frontrunning.md) §3.2–§3.3. Tests
+pinning what permissionless *cannot* do:
 `release_advance_1_opens_window_but_transfers_nothing`,
 `expire_remainder_window_is_permissionless`,
 `expire_dispute_window_is_permissionless`,
@@ -463,10 +489,13 @@ delivery can be confirmed for goods that didn't arrive at grade — after the
 buyer has funded the remainder — and `settle` will pay the cooperative.
 This is accepted because (a) PRD §4.1 makes the operator the enforcement
 backstop and routes grade disputes to the operator's own appeals process,
-deliberately not here; (b) the blast radius is bounded: the buyer's
-defenses before the fact are the dispute freeze, the delivery deadline
+deliberately not here;(b) the blast radius is bounded: the buyer's defenses before the fact are the dispute freeze, the delivery deadline
 (`reclaim_on_nondelivery`), and refusing to `fund_remainder` before
-inspecting; (c) the alternative — second-guessing the attestation on
+inspecting — with the caveat that the delivery-deadline defense is
+defeasible, because `confirm_delivery` has no `delivery_deadline` guard, so
+a late attestation can beat the buyer's reclaim, and the dispute freeze is a
+tool the cooperative can use to create that window
+([`dispute-frontrunning.md`](./dispute-frontrunning.md) §3.1); (c) the alternative — second-guessing the attestation on
 chain — is the arbitration the PRD assigns elsewhere. Tests pinning what
 the mechanism *does* cover:
 `confirm_delivery_requires_warehouse_operator`,
@@ -501,7 +530,7 @@ their own deal. Tests pin the mechanical half:
 | Attack / concern | Why it is explicitly out of scope |
 | --- | --- |
 | Arbitrating who was at fault (grade, quantity, "who breached") | The PRD assigns grade disputes to the warehouse operator's appeals process, not HarvestLock; this contract's dispute path only pauses. See [`dispute-scope.md`](./dispute-scope.md) §3 |
-| Enforcing the off-chain reputation consequences (buyer's immediate bar, cooperative's 3-strike system) | Lives in `api/` once built; the on-chain half is only the `Defaulted`/`Forfeited` *distinction* it reacts to |
+| Enforcing the off-chain reputation consequences (buyer's immediate bar, cooperative's 3-strike system) | Lives in the sibling `HarvestLock` repo's `api/` layer, where it is implemented (`api/src/reputation.ts`, `api/src/db/reputation.ts`); the on-chain half is only the `Defaulted`/`Forfeited` *distinction* it reacts to. See [`terminal-outcomes.md`](./terminal-outcomes.md) §7 for the exact trigger conditions and enforcement limits |
 | The off-chain identity map, NDPA erasure execution | The salt↔phone rows are the API's Postgres, by design — this contract only stores the hash |
 | Pro-rated on-chain payouts to member farmers (Transparency Ladder Rung 2+) | v1 is record-only per PRD §4.9's own stated default; adding payout logic would contradict it |
 | On-chain "joint amendment" of a locked member list | No amend path exists on purpose (authorization-matrix §3.2); smuggling one in as a relaxed guard is forbidden |
@@ -512,7 +541,7 @@ their own deal. Tests pin the mechanical half:
 | Testnet resets; mainnet deployment | Testnet only, thrown away by design; nothing here is audited or deployable to mainnet yet — see README's Status section |
 | API-layer availability, censorship, or mis-built transactions | Off chain; the contract can't stop the API from refusing to build a transaction, and doesn't need to |
 | Confidentiality of amounts, parties, or terms | Nothing here is secret; a public ledger is the design, and no confidentiality is claimed |
-| Front-running / MEV around permissionless calls | Outcomes are fixed by terms before the call, so reordering buys nothing except the timing accepted in entry 21; the claim/reclaim boundary itself is pinned (`claim_exactly_at_deadline_still_succeeds`) |
+| Front-running / MEV around permissionless calls | Not fully out of scope: the claim/reclaim boundary itself is pinned (`claim_exactly_at_deadline_still_succeeds`) and no third party can profit, but two ordering-dependent transfers exist and are analysed in [`dispute-frontrunning.md`](./dispute-frontrunning.md) — a post-deadline `confirm_delivery` beating `reclaim_on_nondelivery` (entry 28), and an expiry sweep beating a vested `reclaim_advance_*` (entry 21) |
 | Buyer wiring a wrong token or self-harming parameters at `initialize` | Buyer-authenticated, buyer-borne; the API's floors are a business-judgment layer, not a boundary (entry 30) |
 
 ## Trust assumptions a reader should check
@@ -531,10 +560,12 @@ their own deal. Tests pin the mechanical half:
 5. **Being named is not consenting**: the cooperative/operator never signed
    at creation, so a commitment naming them obliges them to nothing until
    they exercise their own auth'd calls.
-6. **Off-chain enforcement exists**: the reputation bars, appeals process,
-   and API floors described here are `api/`-side work, not yet built —
-   the contract's own `Defaulted`/`Forfeited` distinction is what they will
-   key off.
+6. **Off-chain enforcement exists**: the reputation bars are implemented in
+   the sibling `HarvestLock` repo's `api/` layer and key off the contract's
+   own `Defaulted`/`Forfeited` distinction; the appeals process and API
+   floors are `api/`-side work, and the bar is enforced only when the API
+   creates a new commitment (not on `reassign_buyer`, and not against
+   anyone signing directly). See [`terminal-outcomes.md`](./terminal-outcomes.md) §7.
 7. **Observability works**: `status_changed` events and the view functions
    are how anyone detects a transition; `every_transition_publishes_status_changed`
    holds that every mutation is announced (and `initialize` deliberately
