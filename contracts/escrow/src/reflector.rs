@@ -33,6 +33,14 @@ pub trait Contract {
     fn assets() -> Vec<Asset>;
     /// Decimal places used to represent price for every asset this oracle
     /// quotes. `price / 10^decimals()` is the actual rate.
+    ///
+    /// This contract assumes `decimals()` is immutable for the life of the
+    /// oracle — `resolve_fx_shortfall` scales a settlement by the value read
+    /// live here. That holds for the real Reflector contract: `decimals` is
+    /// written once at initialization and it exposes no setter (Reflector's
+    /// `settings.rs`; SEP-40 also states the value "should never change").
+    /// See `docs/reflector-decimals-assumption.md` and issue #63 for the
+    /// verified finding and the behavior if the invariant is ever broken.
     fn decimals() -> u32;
     /// Quotes `asset`'s price at a specific past `timestamp`, if recorded.
     fn price(asset: Asset, timestamp: u64) -> Option<PriceData>;

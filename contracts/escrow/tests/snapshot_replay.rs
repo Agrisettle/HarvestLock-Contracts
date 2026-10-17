@@ -139,7 +139,7 @@ struct Terms {
 
 impl Default for Terms {
     fn default() -> Self {
-        Terms {
+        Self {
             total_amount: 1_000_000,
             advance1_bps: 1_500,
             advance2_bps: 1_500,
@@ -254,11 +254,10 @@ fn err_name(name: &str) -> Error {
         ("NotAParty", Error::NotAParty),
         ("DisputeWindowNotPassed", Error::DisputeWindowNotPassed),
     ];
-    table
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, e)| *e)
-        .unwrap_or_else(|| panic!("fixture references unknown Error variant `{name}`"))
+    table.iter().find(|(n, _)| *n == name).map_or_else(
+        || panic!("fixture references unknown Error variant `{name}`"),
+        |(_, e)| *e,
+    )
 }
 
 fn status_name(name: &str) -> Status {
@@ -276,11 +275,10 @@ fn status_name(name: &str) -> Status {
         ("Forfeited", Status::Forfeited),
         ("Disputed", Status::Disputed),
     ];
-    table
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, s)| *s)
-        .unwrap_or_else(|| panic!("fixture references unknown Status variant `{name}`"))
+    table.iter().find(|(n, _)| *n == name).map_or_else(
+        || panic!("fixture references unknown Status variant `{name}`"),
+        |(_, s)| *s,
+    )
 }
 
 /// The whole fixture directory, parsed. Any parse failure panics with the
@@ -581,7 +579,7 @@ fn hex_to_32(s: &str) -> [u8; 32] {
         };
         let hi = digit(b[i * 2]);
         let lo = digit(b[i * 2 + 1]);
-        out[i] = ((hi << 4) | lo) as u8;
+        out[i] = u8::try_from((hi << 4) | lo).expect("two hexadecimal digits fit in one byte");
     }
     out
 }
@@ -602,21 +600,24 @@ fn build(snap: &Snapshot) -> Scene {
     let token = token::Client::new(&env, &token_address);
     token::StellarAssetClient::new(&env, &token_address).mint(&buyer, &snap.terms.buyer_mint);
 
-    let mut oracle_config = None;
-    if let Some((symbol, denominated, max_age, price, decimals)) = &snap.terms.oracle {
-        let id = env.register(fixture_oracle::FixtureOracle, ());
-        fixture_oracle::FixtureOracleClient::new(&env, &id).set_quote(
-            price,
-            &env.ledger().timestamp(),
-            decimals,
-        );
-        oracle_config = Some(OracleConfig {
-            oracle_contract: id,
-            price_asset: Symbol::new(&env, symbol),
-            max_age_secs: *max_age,
-            denominated_amount: *denominated,
-        });
-    }
+    let oracle_config =
+        snap.terms
+            .oracle
+            .as_ref()
+            .map(|(symbol, denominated, max_age, price, decimals)| {
+                let id = env.register(fixture_oracle::FixtureOracle, ());
+                fixture_oracle::FixtureOracleClient::new(&env, &id).set_quote(
+                    price,
+                    &env.ledger().timestamp(),
+                    decimals,
+                );
+                OracleConfig {
+                    oracle_contract: id,
+                    price_asset: Symbol::new(&env, symbol),
+                    max_age_secs: *max_age,
+                    denominated_amount: *denominated,
+                }
+            });
 
     let mut grade_schedule = OnChainVec::<u32>::new(&env);
     for g in &snap.terms.grade_price_bps {
@@ -802,7 +803,7 @@ fn check_value(scene: &Scene, key: &str, want: &str) -> Result<(), String> {
         "buyer_balance" => eq_i128(balance(&scene.buyer)),
         "contract_balance" => eq_i128(balance(&contract_address)),
         "stranger_balance" => eq_i128(balance(&scene.stranger)),
-        "settlement_bps" => eq_i128(c.settlement_bps as i128),
+        "settlement_bps" => eq_i128(i128::from(c.settlement_bps)),
         "fx_adjusted_total" => eq_i128(c.fx_adjusted_total),
         "fx_shortfall_amount" => eq_i128(c.fx_shortfall_amount),
         "fx_resolved" => eq_bool(c.fx_resolved),
@@ -819,7 +820,7 @@ fn check_value(scene: &Scene, key: &str, want: &str) -> Result<(), String> {
                 Err(format!("expected {want}, got {:?}", c.dispute_pre_status))
             }
         }
-        "delivered_quantity" => eq_i128(c.delivered_quantity as i128),
+        "delivered_quantity" => eq_i128(i128::from(c.delivered_quantity)),
         "buyer_party" => {
             if c.buyer == scene.addr(party_of(want)) {
                 Ok(())
@@ -828,7 +829,7 @@ fn check_value(scene: &Scene, key: &str, want: &str) -> Result<(), String> {
             }
         }
         "allocation_count" => match scene.contract.try_get_allocation() {
-            Ok(Ok(v)) => eq_i128(v.len() as i128),
+            Ok(Ok(v)) => eq_i128(i128::from(v.len())),
             Ok(Err(c)) => Err(format!("could not decode get_allocation's return: {c:?}")),
             Err(Ok(e)) => Err(format!("get_allocation returned {e:?}")),
             Err(Err(_)) => Err("get_allocation aborted at the host level".to_string()),

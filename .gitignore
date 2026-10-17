@@ -1,6 +1,9 @@
 # Rust / Soroban
 /target/
 **/*.rs.bk
+# cargo-mutants output (issue #62): per-run patches, logs and result files.
+# Regenerated on every run, so never committed.
+mutants.out/
 # Cargo.lock is committed on purpose -- CI builds against it with --locked (issue #91).
 
 # Editors / OS

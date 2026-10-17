@@ -8,8 +8,8 @@ on:
 # Explicit least-privilege token, not relying on the repo/org default
 # (currently "read" too, checked directly -- but shouldn't depend on
 # that staying true). No job pushes, comments, or writes anything --
-# checkout, the static guard scripts, cargo test, and stellar contract
-# build all only need read access.
+# checkout, the static guard scripts, cargo test, Clippy, and the stellar
+# contract build all only need read access.
 permissions:
   contents: read
 
@@ -43,6 +43,32 @@ jobs:
       - name: cargo test
         working-directory: contracts/escrow
         run: cargo test --locked --verbose
+
+  coverage:
+    name: code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Report line coverage
+        run: cargo llvm-cov --workspace --all-targets --locked
 
   # ---------------------------------------------------------------------
   # #111, #122, #124, #125, and the window-overflow property suite — five
@@ -256,6 +282,59 @@ jobs:
       - name: Guard public method auth doc comments
         run: bash .github/scripts/check_auth_docs.sh
 
+  # Mutation testing (#62): deliberately break the code and require the test
+  # suite to notice. A surviving mutant on a tested line means the assertion
+  # looks stronger than it is. A full run is expensive (the baseline build is
+  # minutes, then ~30 s per mutant), so pull requests only mutate the Rust
+  # lines they actually change; the one-off full run and its triaged
+  # survivors are recorded in docs/mutation-testing.md.
+  mutation-testing:
+    name: mutation testing (changed lines)
+    runs-on: ubuntu-latest
+    # Pull requests only: a push to main has no base ref to diff against, and
+    # the full-crate run belongs in the recorded spike, not in every merge.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the merge base with the target branch exists.
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-mutants
+        # Pinned: a mutant diff is only meaningful against a known mutant set.
+        run: cargo install --locked cargo-mutants --version 27.1.0
+
+      - name: Mutate only the lines this PR changes
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+          BASE="$(git merge-base HEAD "origin/${GITHUB_BASE_REF}")"
+          git diff --no-ext-diff --unified=0 "$BASE" HEAD -- '*.rs' > pr.diff
+          if [ ! -s pr.diff ]; then
+            echo "No Rust changes in this PR -- nothing to mutate."
+            exit 0
+          fi
+          cargo mutants \
+            --manifest-path contracts/escrow/Cargo.toml \
+            --in-diff pr.diff \
+            --jobs 2 \
+            --timeout 120
+
   # Differential testing across Soroban SDK minor versions
   sdk-differential-test:
     name: Differential SDK Version Testing
@@ -283,9 +362,13 @@ jobs:
       - name: Update soroban-sdk version
         run: |
           cd contracts/escrow
-          # Update both dependencies and dev-dependencies
+          # Update both dependencies and dev-dependencies. Each sed expression
+          # is a single-quoted shell string, so it must not contain a stray
+          # quote: an earlier version of the dev-dependency pattern ended with
+          # `"',` which closed the shell string early and killed the step with
+          # "unexpected EOF while looking for matching `'`" before any test ran.
           sed -i 's/soroban-sdk = "[^"]*"/soroban-sdk = "${{ matrix.soroban-version }}"/' Cargo.toml
-          sed -i 's/soroban-sdk = { version = "[^"]*"',/soroban-sdk = { version = "${{ matrix.soroban-version }}",/' Cargo.toml
+          sed -i 's/soroban-sdk = { version = "[^"]*"/soroban-sdk = { version = "${{ matrix.soroban-version }}"/' Cargo.toml
 
       - name: Verify updated version
         working-directory: contracts/escrow

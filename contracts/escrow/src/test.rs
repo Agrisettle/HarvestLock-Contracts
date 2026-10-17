@@ -180,7 +180,7 @@ fn set_time(s: &Setup, timestamp: u64) {
 /// mirrors `EscrowContract::deposit_amount` so tests can assert against it
 /// without reaching into contract internals.
 fn deposit_amount(total: i128, advance1_bps: u32, advance2_bps: u32) -> i128 {
-    total * ((advance1_bps + advance2_bps) as i128) / 10_000
+    total * i128::from(advance1_bps + advance2_bps) / 10_000
 }
 
 /// Drives a fresh, locked commitment all the way to `ReadyForDelivery` with
@@ -515,7 +515,7 @@ fn cannot_set_allocation_with_more_than_max_members() {
     // length itself has to be rejected.
     let s = setup(1_500, 1_500);
     let mut members = Vec::new(&s.env);
-    for _ in 0..(MAX_ALLOCATION_MEMBERS + 1) {
+    for _ in 0..=MAX_ALLOCATION_MEMBERS {
         members.push_back(member(&s.env, 1));
     }
     let result = s.contract.try_set_allocation(&members);
@@ -2071,7 +2071,7 @@ fn initialize_rejects_a_grade_schedule_over_max_entries() {
     let contract = EscrowContractClient::new(&env, &contract_id);
 
     let mut over_cap = Vec::new(&env);
-    for _ in 0..(MAX_GRADE_ENTRIES + 1) {
+    for _ in 0..=MAX_GRADE_ENTRIES {
         over_cap.push_back(10_000u32);
     }
 
@@ -2142,6 +2142,16 @@ fn confirm_delivery_rejects_an_out_of_range_grade_index() {
     // GRADE_PRICE_BPS has 3 entries (indices 0-2) -- 3 is out of range.
     let result = s.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &3);
     assert_eq!(result, Err(Ok(Error::InvalidGradeIndex)));
+
+    // #95: the rejection also pins that nothing was persisted — the
+    // bounds check runs before any mutation and before the sole `save`,
+    // so the stored commitment is exactly as `advance_to_remainder_funded`
+    // left it (see `confirm_delivery`'s doc comment for the full trace).
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+    let c = s.contract.get_commitment();
+    assert_eq!(c.delivered_quantity, 0);
+    assert_eq!(c.grade_index, 0);
+    assert_eq!(c.settlement_bps, 0);
 }
 
 #[test]
@@ -2188,7 +2198,7 @@ fn confirm_delivery_storage_profile_and_settlement_bps_invariants() {
     assert_eq!(post.total_amount, pre.total_amount);
     assert_eq!(post.advance1_claimed, pre.advance1_claimed);
     assert_eq!(post.advance2_claimed, pre.advance2_claimed);
-    assert_eq!(post.remainder_funded, true);
+    assert!(post.remainder_funded);
 }
 
 #[test]
@@ -3291,22 +3301,22 @@ fn commitment_struct_footprint_and_field_invariants() {
         s.env.ledger().timestamp() + DELIVERY_WINDOW
     );
     assert_eq!(c.advance1_deadline, 0);
-    assert_eq!(c.advance1_claimed, false);
-    assert_eq!(c.advance1_expired, false);
+    assert!(!c.advance1_claimed);
+    assert!(!c.advance1_expired);
     assert_eq!(c.advance2_deadline, 0);
-    assert_eq!(c.advance2_claimed, false);
-    assert_eq!(c.advance2_expired, false);
+    assert!(!c.advance2_claimed);
+    assert!(!c.advance2_expired);
     assert_eq!(c.remainder_deadline, 0);
-    assert_eq!(c.remainder_funded, false);
+    assert!(!c.remainder_funded);
     assert_eq!(c.contracted_quantity, CONTRACTED_QUANTITY);
     assert_eq!(c.grade_price_bps.len(), 3);
     assert_eq!(c.delivered_quantity, 0);
     assert_eq!(c.grade_index, 0);
     assert_eq!(c.settlement_bps, 0);
-    assert_eq!(c.fx_resolved, false);
+    assert!(!c.fx_resolved);
     assert_eq!(c.fx_adjusted_total, 0);
     assert_eq!(c.fx_shortfall_amount, 0);
-    assert_eq!(c.fx_shortfall_funded, false);
+    assert!(!c.fx_shortfall_funded);
     assert_eq!(c.fx_shortfall_deadline, 0);
     assert_eq!(c.dispute_pre_status, Status::Draft);
     assert_eq!(c.dispute_deadline, 0);
@@ -3502,13 +3512,14 @@ fn assert_transition(s: &Setup, from: Status, to: Status) {
 /// `status_changed` — a call moved funds, set a clock, or created the
 /// commitment without being a state transition.
 fn assert_no_transition(s: &Setup) {
-    assert!(s
-        .env
-        .events()
-        .all()
-        .filter_by_contract(&s.contract.address)
-        .events()
-        .is_empty());
+    assert_eq!(
+        s.env
+            .events()
+            .all()
+            .filter_by_contract(&s.contract.address)
+            .events(),
+        []
+    );
 }
 
 #[test]
@@ -3818,4 +3829,65 @@ fn resolve_dispute_restores_a_ready_for_delivery_commitment_still_inside_its_fun
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
     assert_eq!(s.token.balance(&s.buyer), 0);
     assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Mutation-testing evidence (#62): each of these kills a mutant that
+// survived the full cargo-mutants run. See docs/mutation-testing.md.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn advance_bps_summing_to_exactly_10000_is_accepted_at_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    // 5_000 + 5_000 == 10_000: the whole total is advances, no remainder.
+    // `initialize` must accept this -- only a sum *over* 10_000 is invalid.
+    contract.initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &5_000,
+        &5_000,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
+    );
+}
+
+#[test]
+fn resolve_fx_shortfall_rejects_while_the_first_tranche_is_still_open() {
+    let (s, _oracle) = setup_with_oracle(3_600);
+    s.contract.lock();
+    // Advance 1 is released but never claimed or reclaimed: still open.
+    s.contract.release_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    let c = s.contract.get_commitment();
+    assert!(!c.advance1_claimed && !c.advance1_expired);
+    assert!(c.advance2_claimed);
+
+    // Both-tranches-open is already covered; this asserts tranche 1's own
+    // guard rather than one that its sibling could answer for it.
+    let result = s.contract.try_resolve_fx_shortfall();
+    assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
 }

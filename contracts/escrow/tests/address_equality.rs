@@ -46,7 +46,7 @@ fn address_equality_is_value_based_across_a_val_round_trip() {
     s.contract.lock();
 
     let original = s.contract.get_commitment().buyer;
-    let val: Val = original.clone().into_val(&s.env);
+    let val: Val = original.into_val(&s.env);
     let rebuilt: Address = val.try_into_val(&s.env).unwrap();
 
     assert_eq!(rebuilt, original);
@@ -84,7 +84,7 @@ fn distinct_addresses_are_unequal_and_not_prefix_confusable() {
 
     // Same host value, re-derived from its own `Val`, is still equal — i.e.
     // the inequality above is about address values, not object handles.
-    let va: Val = a.clone().into_val(&env);
+    let va: Val = a.into_val(&env);
     let a_again: Address = va.try_into_val(&env).unwrap();
     assert_eq!(a, a_again);
     assert_ne!(a_again, b);
@@ -148,8 +148,8 @@ fn party_membership_tracks_the_stored_address_after_reassign() {
     let s = world_in(
         &env,
         buyer.clone(),
-        cooperative.clone(),
-        warehouse.clone(),
+        cooperative,
+        warehouse,
         1_500,
         2_000,
         common::WINDOW,

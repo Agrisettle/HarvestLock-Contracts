@@ -29,8 +29,17 @@ itself for all four absolute deadlines (`remainder_deadline`,
 `delivery_deadline`, `fx_shortfall_deadline`, `dispute_deadline`; #112–#115,
 with the inclusive/exclusive rule now stated in the doc comments rather than
 left implicit), the `Commitment`-footprint audit (#143), dispatch-cost
-benchmarks, and two CI guard scripts (Error-discriminant stability,
-public-method auth doc completeness). No deployment entry until the next
+benchmarks, two CI guard scripts (Error-discriminant stability,
+public-method auth doc completeness), and the #95–#98 review set: the
+`confirm_delivery` bounds-check ordering recorded as analyzed (no gap —
+check runs before any mutation; #95), the abandoned-at-`Draft` funds
+answer documented (nothing ever moved at that stage; #96), a runnable
+minimal-commitment walkthrough in `docs/minimal-example.md` (#97), and
+a storage-TTL audit with a real fix — `bump_instance_ttl` re-rents the
+contract instance (and code) entry from `load`/`initialize` when its
+lifetime has decayed below half the network max, closing the gap where
+a dormant `Locked` escrow's own state could be archived while still
+needed (`docs/storage-ttl.md`; #98). No deployment entry until the next
 build goes to testnet.
 
 ## [Deployment 10] — 2026-09-06
