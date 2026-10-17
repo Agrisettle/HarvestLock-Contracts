@@ -1085,5 +1085,40 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "status_changed"
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "ReadyForDelivery"
+                  }
+                ]
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Delivered"
+                  }
+                ]
+              }
+            ],
+            "data": {
+              "map": []
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }
