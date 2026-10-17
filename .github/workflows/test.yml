@@ -71,11 +71,12 @@ jobs:
         run: cargo llvm-cov --workspace --all-targets --locked
 
   # ---------------------------------------------------------------------
-  # #111, #122, #124, #125 — four integration suites, each its own job so
-  # a failure points at the issue it guards instead of at "cargo test".
-  # They are separate `--test` targets under contracts/escrow/tests/, so
-  # the umbrella `test` job above also runs them; these jobs exist so the
-  # signal is legible per issue and so a suite can be re-run alone.
+  # #111, #122, #124, #125, and the window-overflow property suite — five
+  # integration suites, each its own job so a failure points at the issue
+  # it guards instead of at "cargo test". They are separate `--test`
+  # targets under contracts/escrow/tests/, so the umbrella `test` job
+  # above also runs them; these jobs exist so the signal is legible per
+  # issue and so a suite can be re-run alone.
   # ---------------------------------------------------------------------
 
   deadline-boundary:
@@ -183,6 +184,34 @@ jobs:
       - name: cargo test --test snapshot_replay
         working-directory: contracts/escrow
         run: cargo test --test snapshot_replay -- --nocapture
+
+  window-overflow:
+    name: window overflow property tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Property test: adding claim_window_secs/remainder_window_secs/
+      # delivery_window_secs to a ledger timestamp either stores the exact
+      # sum or refuses atomically -- never a wrapped-around deadline --
+      # including deliberately adversarial near-u64::MAX inputs.
+      - name: cargo test --test window_overflow
+        working-directory: contracts/escrow
+        run: cargo test --test window_overflow --verbose
 
   build-wasm:
     name: stellar contract build
