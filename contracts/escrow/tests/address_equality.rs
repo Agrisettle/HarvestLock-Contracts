@@ -53,10 +53,7 @@ fn address_equality_is_value_based_across_a_val_round_trip() {
     assert_eq!(rebuilt, s.buyer);
     // And the host agrees they're the same principal: identical balances,
     // because it really is one account, not two look-alikes.
-    assert_eq!(
-        s.token.balance(&rebuilt),
-        s.token.balance(&s.buyer)
-    );
+    assert_eq!(s.token.balance(&rebuilt), s.token.balance(&s.buyer));
 }
 
 /// The negative half: a distinct generated address is *not* equal, and no
@@ -115,7 +112,10 @@ fn flag_dispute_recognizes_a_party_by_address_value_not_by_object_provenance() {
 
     s.contract.flag_dispute(&decoded);
     assert_eq!(s.status(), Status::Disputed);
-    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Locked);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Locked
+    );
 }
 
 /// A stranger is rejected — the check compares against all three stored
@@ -145,7 +145,15 @@ fn party_membership_tracks_the_stored_address_after_reassign() {
     let buyer = Address::generate(&env);
     let cooperative = Address::generate(&env);
     let warehouse = Address::generate(&env);
-    let s = world_in(&env, buyer.clone(), cooperative.clone(), warehouse.clone(), 1_500, 2_000, common::WINDOW);
+    let s = world_in(
+        &env,
+        buyer.clone(),
+        cooperative.clone(),
+        warehouse.clone(),
+        1_500,
+        2_000,
+        common::WINDOW,
+    );
 
     let new_buyer = Address::generate(&env);
     // `reassign_buyer` needs three distinct signatures; under
@@ -179,7 +187,15 @@ fn require_once_each_dedups_by_address_value() {
     env.mock_all_auths();
     let shared = Address::generate(&env);
     let coop = Address::generate(&env);
-    let s = world_in(&env, shared.clone(), coop.clone(), shared.clone(), 1_500, 2_000, common::WINDOW);
+    let s = world_in(
+        &env,
+        shared.clone(),
+        coop.clone(),
+        shared.clone(),
+        1_500,
+        2_000,
+        common::WINDOW,
+    );
 
     // The shape this test is actually exercising.
     let c = s.contract.get_commitment();
@@ -253,6 +269,8 @@ fn lib_source_never_stringifies_addresses() {
     // And the two legitimate hand-written comparisons are still the
     // PartialEq-based ones the audit describes (a rewrite to something else
     // should make a reviewer look at this file).
-    assert!(SRC.contains("flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator"));
+    assert!(SRC.contains(
+        "flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator"
+    ));
     assert!(SRC.contains("addresses[..i].iter().all(|seen| seen != addr)"));
 }

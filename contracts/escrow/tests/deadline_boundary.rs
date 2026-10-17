@@ -41,7 +41,11 @@ use harvestlock_escrow::{Error, Status};
 fn claim_advance_1_exactly_at_deadline_succeeds() {
     let s = world(1_500, 2_000);
     let deadline = s.locked_tranche1_open();
-    assert_eq!(deadline, common::WINDOW, "deadline == release time + window");
+    assert_eq!(
+        deadline,
+        common::WINDOW,
+        "deadline == release time + window"
+    );
 
     s.set_time(deadline); // now == advance1_deadline, exactly
     assert_eq!(s.now(), s.contract.get_commitment().advance1_deadline);
@@ -150,7 +154,10 @@ fn reclaim_advance_2_exactly_one_tick_past_deadline_succeeds() {
 
     let c = s.contract.get_commitment();
     assert!(c.advance2_expired && !c.advance2_claimed);
-    assert_eq!(s.token.balance(&s.buyer), s.total_amount - s.bps(3_500) + s.bps(2_000));
+    assert_eq!(
+        s.token.balance(&s.buyer),
+        s.total_amount - s.bps(3_500) + s.bps(2_000)
+    );
 }
 
 // ---------- the boundary as a partition ----------

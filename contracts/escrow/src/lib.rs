@@ -1068,7 +1068,11 @@ impl EscrowContract {
     /// via `Self::save` upon state transition to `Status::Delivered`. No
     /// redundant reads or writes occur across the quantity/grade calculation
     /// or final state-write.
-    pub fn confirm_delivery(env: Env, delivered_quantity: u32, grade_index: u32) -> Result<(), Error> {
+    pub fn confirm_delivery(
+        env: Env,
+        delivered_quantity: u32,
+        grade_index: u32,
+    ) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         if c.status != Status::ReadyForDelivery {
             return Err(Error::InvalidState);
@@ -1181,7 +1185,11 @@ impl EscrowContract {
         let buyer_refund = remainder_balance - coop_payment;
 
         if coop_payment > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.cooperative, &coop_payment);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &c.cooperative,
+                &coop_payment,
+            );
         }
         if buyer_refund > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &buyer_refund);
@@ -1254,7 +1262,8 @@ impl EscrowContract {
             0
         });
         let owed_from_remainder = (fx_adjusted_total - claimed_by_coop).max(0);
-        let available_balance = token::Client::new(&env, &c.token).balance(&env.current_contract_address());
+        let available_balance =
+            token::Client::new(&env, &c.token).balance(&env.current_contract_address());
         let shortfall = (owed_from_remainder - available_balance).max(0);
 
         c.fx_adjusted_total = fx_adjusted_total;
@@ -1305,7 +1314,11 @@ impl EscrowContract {
         c.fx_shortfall_funded = true;
         Self::save(&env, &c);
 
-        token::Client::new(&env, &c.token).transfer(&c.buyer, env.current_contract_address(), &amount);
+        token::Client::new(&env, &c.token).transfer(
+            &c.buyer,
+            env.current_contract_address(),
+            &amount,
+        );
         Ok(())
     }
 

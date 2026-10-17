@@ -52,7 +52,15 @@ fn setup_with_window(advance1_bps: u32, advance2_bps: u32, window: u64) -> Setup
     let buyer = Address::generate(&env);
     let cooperative = Address::generate(&env);
     let warehouse = Address::generate(&env);
-    setup_in(&env, buyer, cooperative, warehouse, advance1_bps, advance2_bps, window)
+    setup_in(
+        &env,
+        buyer,
+        cooperative,
+        warehouse,
+        advance1_bps,
+        advance2_bps,
+        window,
+    )
 }
 
 /// The identity-agnostic half of `setup_with_window` — generates nothing, so
@@ -443,10 +451,7 @@ fn member(env: &Env, share_bps: u32) -> AllocationMember {
 #[test]
 fn set_allocation_records_the_member_list() {
     let s = setup(1_500, 1_500);
-    let members = Vec::from_array(
-        &s.env,
-        [member(&s.env, 6_000), member(&s.env, 4_000)],
-    );
+    let members = Vec::from_array(&s.env, [member(&s.env, 6_000), member(&s.env, 4_000)]);
 
     s.contract.set_allocation(&members);
 
@@ -485,10 +490,7 @@ fn cannot_set_allocation_with_an_empty_member_list() {
 #[test]
 fn cannot_set_allocation_with_shares_summing_over_10000_bps() {
     let s = setup(1_500, 1_500);
-    let members = Vec::from_array(
-        &s.env,
-        [member(&s.env, 6_000), member(&s.env, 5_000)],
-    );
+    let members = Vec::from_array(&s.env, [member(&s.env, 6_000), member(&s.env, 5_000)]);
     let result = s.contract.try_set_allocation(&members);
     assert_eq!(result, Err(Ok(Error::InvalidAllocation)));
 }
@@ -640,7 +642,9 @@ mod mock_oracle {
 /// (1_000_000), so tests using the plain `setup_with_oracle` wrapper
 /// never hit a shortfall; `setup_with_oracle_denomination` lets the FX
 /// shortfall tests below choose a `denominated_amount` that does.
-fn setup_with_oracle(max_age_secs: u64) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
+fn setup_with_oracle(
+    max_age_secs: u64,
+) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
     setup_with_oracle_denomination(max_age_secs, 500_000)
 }
 
@@ -848,7 +852,8 @@ fn oracle_rate_is_callable_after_settlement() {
     let (s, _oracle) = setup_with_oracle(3_600);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     // Oracle-configured, so settle() now requires resolve_fx_shortfall()
     // first -- denominated_amount (500_000) at this fixture's price
     // (1.75) comes to 875_000, comfortably under total_amount (1_000_000),
@@ -875,7 +880,8 @@ const EXPECTED_SHORTFALL: i128 = 750_000; // 1_750_000 - 300_000 claimed - 700_0
 fn advance_to_delivered_with_shortfall(s: &Setup) {
     s.contract.lock();
     advance_to_remainder_funded(s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 }
 
 #[test]
@@ -935,7 +941,8 @@ fn cannot_resolve_fx_shortfall_before_tranches_are_resolved() {
     s.contract.release_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_resolve_fx_shortfall();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
@@ -946,7 +953,8 @@ fn resolve_fx_shortfall_requires_oracle_configured() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_resolve_fx_shortfall();
     assert_eq!(result, Err(Ok(Error::OracleNotConfigured)));
@@ -990,7 +998,10 @@ fn fund_fx_shortfall_pays_in_the_shortfall_and_unblocks_settle() {
 
     s.contract.fund_fx_shortfall();
 
-    assert_eq!(s.token.balance(&s.buyer), buyer_balance_before - EXPECTED_SHORTFALL);
+    assert_eq!(
+        s.token.balance(&s.buyer),
+        buyer_balance_before - EXPECTED_SHORTFALL
+    );
     assert!(s.contract.get_commitment().fx_shortfall_funded);
 
     // No longer blocked.
@@ -1014,7 +1025,10 @@ fn fund_fx_shortfall_requires_buyer_auth() {
     // buyer's auth to exist at all.
     s.contract.fund_fx_shortfall();
     let auths = s.env.auths();
-    assert!(auths.iter().any(|(addr, _)| *addr == s.buyer), "expected buyer auth on fund_fx_shortfall");
+    assert!(
+        auths.iter().any(|(addr, _)| *addr == s.buyer),
+        "expected buyer auth on fund_fx_shortfall"
+    );
 }
 
 #[test]
@@ -1073,7 +1087,10 @@ fn expire_fx_shortfall_window_sweeps_escrow_to_cooperative_and_defaults_the_buye
     s.contract.expire_fx_shortfall_window();
 
     assert_eq!(s.contract.get_status(), Status::Defaulted);
-    assert_eq!(s.token.balance(&s.cooperative), cooperative_balance_before + contract_balance_before);
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        cooperative_balance_before + contract_balance_before
+    );
     assert_eq!(s.token.balance(&s.contract.address), 0);
 }
 
@@ -1702,7 +1719,8 @@ fn cannot_reclaim_on_nondelivery_after_delivered() {
     let s = setup(1_500, 2_000);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     advance_time(&s, DELIVERY_WINDOW + 1);
 
     let result = s.contract.try_reclaim_on_nondelivery();
@@ -1785,7 +1803,9 @@ fn cannot_confirm_delivery_before_ready_for_delivery() {
     s.contract.release_advance_2();
     s.contract.claim_advance_2();
 
-    let result = s.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    let result = s
+        .contract
+        .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_eq!(result, Err(Ok(Error::InvalidState)));
 }
 
@@ -1800,7 +1820,9 @@ fn cannot_confirm_delivery_before_remainder_funded() {
     s.contract.claim_advance_2();
     s.contract.ready_for_delivery();
 
-    let result = s.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    let result = s
+        .contract
+        .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_eq!(result, Err(Ok(Error::RemainderNotFunded)));
 }
 
@@ -1817,7 +1839,8 @@ fn settle_blocked_if_advance_1_never_resolved() {
     s.contract.claim_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_settle();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
@@ -1834,7 +1857,8 @@ fn settle_blocked_if_advance_2_never_resolved() {
     // deliberately never claim or reclaim advance 2
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_settle();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
@@ -1867,7 +1891,8 @@ fn full_happy_path_both_tranches_claimed_pays_out_exactly_total_amount() {
     s.contract.claim_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     assert_eq!(s.contract.get_status(), Status::Settled);
@@ -1890,7 +1915,8 @@ fn full_happy_path_advance_1_reclaimed_advance_2_claimed_still_sums_correctly() 
     s.contract.claim_advance_2(); // this one claimed normally
     s.contract.ready_for_delivery();
     s.contract.fund_remainder();
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
@@ -1922,7 +1948,8 @@ fn zero_advance_bps_still_requires_explicit_resolution_before_settle() {
     s.contract.release_advance_2();
     s.contract.ready_for_delivery();
     s.contract.fund_remainder(); // with 0/0 bps, this funds the entire total_amount
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let blocked = s.contract.try_settle();
     assert_eq!(blocked, Err(Ok(Error::TrancheUnresolved)));
@@ -2143,7 +2170,8 @@ fn confirm_delivery_storage_profile_and_settlement_bps_invariants() {
     assert_eq!(pre.status, Status::ReadyForDelivery);
 
     // Profile confirm_delivery execution: exactly 1 load, 1 save, state transitions cleanly
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let post = s.contract.get_commitment();
     assert_eq!(post.status, Status::Delivered);
@@ -2174,7 +2202,8 @@ fn partial_delivery_pays_cooperative_proportionally_and_refunds_the_shortfall_to
     advance_to_remainder_funded(&s); // both tranches claimed normally
 
     let half_quantity = CONTRACTED_QUANTITY / 2;
-    s.contract.confirm_delivery(&half_quantity, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&half_quantity, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
@@ -2231,7 +2260,8 @@ fn over_delivery_does_not_pay_more_than_the_full_contract_value() {
     advance_to_remainder_funded(&s);
 
     let double_quantity = CONTRACTED_QUANTITY * 2;
-    s.contract.confirm_delivery(&double_quantity, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&double_quantity, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     assert_eq!(s.contract.get_commitment().settlement_bps, 10_000);
@@ -2259,7 +2289,10 @@ fn severe_shortfall_does_not_claw_back_advances_already_claimed() {
     let remainder = s.total_amount - advance1_amount - advance2_amount;
 
     assert_eq!(s.contract.get_commitment().settlement_bps, 0);
-    assert_eq!(s.token.balance(&s.cooperative), advance1_amount + advance2_amount);
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        advance1_amount + advance2_amount
+    );
     assert_eq!(s.token.balance(&s.buyer), remainder);
 }
 
@@ -2275,7 +2308,8 @@ fn confirm_delivery_requires_warehouse_operator() {
     // signer (everything auths successfully in that mode) — what it does
     // confirm is that the call path genuinely requires an auth to exist at
     // all, by checking the recorded auth trace names the warehouse address.
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     let auths = s.env.auths();
     let touched_warehouse = auths.iter().any(|(addr, _)| *addr == s.warehouse);
     assert!(
@@ -2357,7 +2391,8 @@ fn cannot_cancel_after_delivery_confirmed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     let result = s.contract.try_cancel();
     assert_eq!(result, Err(Ok(Error::InvalidState)));
@@ -2446,7 +2481,8 @@ fn cannot_reassign_buyer_after_delivery_confirmed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     let new_buyer = Address::generate(&s.env);
 
     let result = s.contract.try_reassign_buyer(&new_buyer);
@@ -2481,7 +2517,10 @@ fn flag_dispute_by_buyer_moves_to_disputed_and_records_pre_status() {
     s.contract.flag_dispute(&s.buyer);
 
     assert_eq!(s.contract.get_status(), Status::Disputed);
-    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Locked);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Locked
+    );
 }
 
 #[test]
@@ -2527,7 +2566,8 @@ fn flag_dispute_rejects_after_settlement() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
 
     let result = s.contract.try_flag_dispute(&s.buyer);
@@ -2549,12 +2589,16 @@ fn flag_dispute_reaches_from_delivered_too() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
 
     s.contract.flag_dispute(&s.cooperative);
 
     assert_eq!(s.contract.get_status(), Status::Disputed);
-    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Delivered);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Delivered
+    );
 }
 
 #[test]
@@ -2563,7 +2607,10 @@ fn flag_dispute_freezes_every_other_state_changing_call() {
     s.contract.lock();
     s.contract.flag_dispute(&s.buyer);
 
-    assert_eq!(s.contract.try_release_advance_1(), Err(Ok(Error::InvalidState)));
+    assert_eq!(
+        s.contract.try_release_advance_1(),
+        Err(Ok(Error::InvalidState))
+    );
     assert_eq!(s.contract.try_cancel(), Err(Ok(Error::InvalidState)));
     assert_eq!(
         s.contract.try_reassign_buyer(&Address::generate(&s.env)),
@@ -2581,7 +2628,10 @@ fn resolve_dispute_restores_the_exact_pre_dispute_status() {
     s.contract.resolve_dispute();
 
     assert_eq!(s.contract.get_status(), Status::Advance1Released);
-    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Draft);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Draft
+    );
 }
 
 #[test]
@@ -2612,7 +2662,10 @@ fn resolve_dispute_requires_all_three_parties_auth() {
     let touched = |addr: &Address| auths.iter().any(|(a, _)| a == addr);
     assert!(touched(&s.buyer), "expected the buyer's auth");
     assert!(touched(&s.cooperative), "expected the cooperative's auth");
-    assert!(touched(&s.warehouse), "expected the warehouse operator's auth");
+    assert!(
+        touched(&s.warehouse),
+        "expected the warehouse operator's auth"
+    );
 }
 
 #[test]
@@ -2686,7 +2739,10 @@ fn expire_dispute_window_restores_pre_dispute_status_after_the_deadline() {
     s.contract.expire_dispute_window();
 
     assert_eq!(s.contract.get_status(), Status::Advance1Released);
-    assert_eq!(s.contract.get_commitment().dispute_pre_status, Status::Draft);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Draft
+    );
 }
 
 #[test]
@@ -2707,7 +2763,9 @@ fn expire_dispute_window_is_permissionless() {
 
     let auths = s.env.auths();
     assert!(
-        !auths.iter().any(|(a, _)| *a == s.cooperative || *a == s.warehouse),
+        !auths
+            .iter()
+            .any(|(a, _)| *a == s.cooperative || *a == s.warehouse),
         "expire_dispute_window should not require any party's auth"
     );
 }
@@ -2733,7 +2791,10 @@ fn dispute_does_not_pause_an_already_ticking_deadline_known_limitation() {
     s.contract.reclaim_advance_1();
     let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
     let advance1_amount = s.total_amount * 1_500 / 10_000;
-    assert_eq!(s.token.balance(&s.buyer), s.total_amount - deposit + advance1_amount);
+    assert_eq!(
+        s.token.balance(&s.buyer),
+        s.total_amount - deposit + advance1_amount
+    );
 }
 
 #[test]
@@ -3225,7 +3286,10 @@ fn commitment_struct_footprint_and_field_invariants() {
     assert_eq!(c.claim_window_secs, WINDOW);
     assert_eq!(c.remainder_window_secs, REMAINDER_WINDOW);
     assert_eq!(c.status, Status::Draft);
-    assert_eq!(c.delivery_deadline, s.env.ledger().timestamp() + DELIVERY_WINDOW);
+    assert_eq!(
+        c.delivery_deadline,
+        s.env.ledger().timestamp() + DELIVERY_WINDOW
+    );
     assert_eq!(c.advance1_deadline, 0);
     assert_eq!(c.advance1_claimed, false);
     assert_eq!(c.advance1_expired, false);
@@ -3578,7 +3642,8 @@ fn reassign_buyer_leaves_a_recorded_allocation_ledger_completely_untouched() {
 /// running on absolute time, so a dispute outliving it lands on the default
 /// path instead of buying the buyer a free extension.
 #[test]
-fn flag_dispute_during_an_open_fx_shortfall_window_freezes_settle_without_disturbing_the_deadline() {
+fn flag_dispute_during_an_open_fx_shortfall_window_freezes_settle_without_disturbing_the_deadline()
+{
     let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
     advance_to_delivered_with_shortfall(&s);
     s.contract.resolve_fx_shortfall();
@@ -3743,7 +3808,8 @@ fn resolve_dispute_restores_a_ready_for_delivery_commitment_still_inside_its_fun
     s.contract.fund_remainder();
     assert!(s.contract.get_commitment().remainder_funded);
 
-    s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
     assert_eq!(s.contract.get_status(), Status::Settled);
 

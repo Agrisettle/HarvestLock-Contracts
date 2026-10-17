@@ -70,9 +70,7 @@ const DENOMINATED: i128 = 500_000;
 /// cross-contract calls on XDR shape, not Rust type identity), plus three
 /// test-only setup hooks the real Reflector contract does not have.
 mod faulty_oracle {
-    use soroban_sdk::{
-        contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
-    };
+    use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
 
     #[contracttype]
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,7 +169,12 @@ fn oracle_world(max_age_secs: u64, denominated_amount: i128) -> OracleWorld {
     let oracle_id = env.register(faulty_oracle::FaultyOracle, ());
     let oracle = faulty_oracle::FaultyOracleClient::new(&env, &oracle_id);
     oracle.set_quote(&FRESH_PRICE, &env.ledger().timestamp());
-    let w = build_with(env.clone(), oracle_id.clone(), max_age_secs, denominated_amount);
+    let w = build_with(
+        env.clone(),
+        oracle_id.clone(),
+        max_age_secs,
+        denominated_amount,
+    );
     OracleWorld {
         w,
         oracle_addr: oracle_id,
@@ -185,7 +188,12 @@ fn oracle_world_unreachable(max_age_secs: u64, denominated_amount: i128) -> Orac
     env.mock_all_auths();
     // Generated, funded-looking, and deliberately *never registered*.
     let dangling = Address::generate(&env);
-    let w = build_with(env.clone(), dangling.clone(), max_age_secs, denominated_amount);
+    let w = build_with(
+        env.clone(),
+        dangling.clone(),
+        max_age_secs,
+        denominated_amount,
+    );
     OracleWorld {
         w,
         oracle_addr: dangling,
@@ -274,7 +282,10 @@ fn no_oracle_configured_degrades_to_oracle_not_configured_on_both_read_paths() {
     // `Error::OracleNotConfigured` used to name only `oracle_rate` even
     // though `resolve_fx_shortfall` returns it too (fixed in this PR).
     let s = world(1_500, 1_500);
-    assert_eq!(s.contract.try_oracle_rate(), Err(Ok(Error::OracleNotConfigured)));
+    assert_eq!(
+        s.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleNotConfigured))
+    );
     assert_eq!(s.contract.get_oracle_config(), None);
 
     // The settlement path degrades identically, and nothing is recorded.
@@ -324,10 +335,7 @@ fn stale_quote_degrades_to_oracle_stale_on_both_read_paths() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     s.w.advance(MAX_AGE + 1);
 
-    assert_eq!(
-        s.w.contract.try_oracle_rate(),
-        Err(Ok(Error::OracleStale))
-    );
+    assert_eq!(s.w.contract.try_oracle_rate(), Err(Ok(Error::OracleStale)));
 
     s.w.drive_to_delivered();
     assert_eq!(
@@ -420,10 +428,7 @@ fn a_future_dated_quote_bypasses_the_staleness_bound_for_as_long_as_it_stays_ahe
     // The bypass lasts exactly as long as the ledger stays behind the stamp —
     // once real time passes it, normal staleness applies again.
     s.w.advance(10_000 + MAX_AGE + 1);
-    assert_eq!(
-        s.w.contract.try_oracle_rate(),
-        Err(Ok(Error::OracleStale))
-    );
+    assert_eq!(s.w.contract.try_oracle_rate(), Err(Ok(Error::OracleStale)));
 
     // The sharp version of the finding: nothing bounds how far ahead a quote
     // may be stamped, so a feed (or a compromised one) that always reports a
@@ -494,7 +499,10 @@ fn an_overflowing_price_traps_resolve_fx_shortfall_without_recording_anything() 
     );
 
     let c = s.w.contract.get_commitment();
-    assert!(!c.fx_resolved, "and Soroban's atomicity left no partial write");
+    assert!(
+        !c.fx_resolved,
+        "and Soroban's atomicity left no partial write"
+    );
     assert_eq!(c.fx_adjusted_total, 0);
     assert_eq!(s.w.status(), Status::Delivered);
 }
@@ -537,7 +545,10 @@ fn a_healthy_quote_still_resolves_normally_after_the_fault_modes() {
     let fresh_id = env.register(faulty_oracle::FaultyOracle, ());
     let fresh = faulty_oracle::FaultyOracleClient::new(&env, &fresh_id);
     fresh.set_quote(&FRESH_PRICE, &env.ledger().timestamp());
-    assert_eq!(fresh.lastprice(&asset_ngn(&env)).unwrap().price, FRESH_PRICE);
+    assert_eq!(
+        fresh.lastprice(&asset_ngn(&env)).unwrap().price,
+        FRESH_PRICE
+    );
 }
 
 fn asset_ngn(env: &Env) -> faulty_oracle::Asset {

@@ -164,8 +164,7 @@ impl World {
     /// need in order to reach the oracle read at all.
     pub fn drive_to_delivered(&self) {
         self.drive_to_remainder_funded();
-        self.contract
-            .confirm_delivery(&CONTRACTED_QUANTITY, &0);
+        self.contract.confirm_delivery(&CONTRACTED_QUANTITY, &0);
     }
 }
 
