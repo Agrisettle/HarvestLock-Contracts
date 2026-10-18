@@ -214,7 +214,14 @@ jobs:
 
   build-wasm:
     name: stellar contract build
-    runs-on: ubuntu-latest
+    # Pinned, not floating `ubuntu-latest`: this job's native build
+    # dependencies (libdbus-1-dev, libudev-dev — see below) are exactly the
+    # kind that break silently when -latest re-points at a new image, which
+    # is how this job broke twice before being caught. Pinning turns an
+    # image change into an explicit, reviewable bump instead of a surprise;
+    # bump the version deliberately and re-check the apt packages when you
+    # do (issue #88).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
