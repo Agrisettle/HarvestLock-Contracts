@@ -2774,6 +2774,10 @@ fn flag_dispute_reaches_from_delivered_too() {
 }
 
 #[test]
+/// Covers issue #50: `reassign_buyer()` while the commitment is `Disputed`
+/// is rejected via the existing `Error::InvalidState` guard (reassign_buyer's
+/// status match only permits Draft..=ReadyForDelivery, rejecting Disputed).
+/// Also checks other state-changing calls are frozen in Disputed state.
 fn flag_dispute_freezes_every_other_state_changing_call() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
