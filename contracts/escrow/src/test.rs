@@ -2740,13 +2740,20 @@ fn flag_dispute_rejects_after_settlement() {
 }
 
 #[test]
+/// Covers issue #51: `flag_dispute()` called a second time while already `Disputed`
+/// returns `Err(Error::InvalidState)`, whether called by another party or the same party.
 fn flag_dispute_rejects_a_second_flag() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     s.contract.flag_dispute(&s.buyer);
 
+    // Calling a second time while already Disputed (by another party)
     let result = s.contract.try_flag_dispute(&s.cooperative);
     assert_eq!(result, Err(Ok(Error::InvalidState)));
+
+    // Calling a second time while already Disputed (by the same party)
+    let result_same = s.contract.try_flag_dispute(&s.buyer);
+    assert_eq!(result_same, Err(Ok(Error::InvalidState)));
 }
 
 #[test]
