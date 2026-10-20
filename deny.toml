@@ -16,6 +16,33 @@ ignore = [
     "RUSTSEC-2024-0436",  # paste - unmaintained, comes via soroban-env-host
 ]
 
+[licenses]
+# Explicit allowed-license list (#59): `cargo deny check licenses` fails on
+# any crate in the dependency graph whose license isn't named here, so a
+# future dependency with an incompatible or unknown license is caught by CI
+# instead of discovered later.
+#
+# Every entry is permissive and FSF/OSI-approved, and each one is actually
+# encountered in this tree (verified green with `cargo deny check licenses`
+# against Cargo.lock — cargo-deny also warns about any entry that stops
+# matching, so the list can't silently rot either). The one real finding the
+# first run surfaced, triaged here: `wasmparser` 0.116.1 and
+# `wasmparser-nostd` 0.100.2, both transitive via soroban-env-host's WASM
+# runtime, are `Apache-2.0 WITH LLVM-exception` — accepted deliberately: the
+# same grants as Apache-2.0 plus an LLVM-style patent/termination clause,
+# standard for WebAssembly toolchain code, no copyleft. Extend deliberately
+# after reading the new dependency's license — never just to silence a
+# finding.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"

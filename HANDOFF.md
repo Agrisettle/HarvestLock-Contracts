@@ -940,7 +940,37 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 20 Oct 2026 — the delivery group's resource-cost pass:
+*Last updated: 20 Oct 2026 (later) — four-issue bundle (#56–#59): two
+genuine test gaps closed, two CI supply-chain gates added. **No contract
+code changed.** Honest either-way checks first: a repo-wide search found
+**no** existing test for either named scenario, so both were added rather
+than answered with a comment: `cannot_confirm_delivery_twice` (#56) — a
+second `confirm_delivery()` on the same commitment is refused by the
+`ReadyForDelivery` guard with `InvalidState`, proven with a retry carrying
+deliberately different, otherwise-valid quantity/grade arguments that must
+leave the first call's recorded `delivered_quantity`/`grade_index` /
+`settlement_bps` untouched; and
+`claim_advance_1_rejects_the_buyer_as_signer` (#57) — under `mock_auths`
+(the #138–#141 technique, the only way to observe rejection rather than
+merely that an auth exists) the buyer's own signature cannot satisfy
+`claim_tranche`'s `cooperative.require_auth()`, nothing is claimed or
+moved by the refused attempt, and the cooperative's own signature then
+completes the same claim. CI (`.github/workflows/test.yml`): a new
+`cargo audit` job (#58) checks every Cargo.lock crate against the RustSec
+advisory database on every push/PR — green, the one known finding
+(`paste`, RUSTSEC-2024-0436, unmaintained, transitive via
+soroban-env-host) prints as an allowed warning and is already recorded in
+deny.toml's `[advisories].ignore` — and `cargo deny check licenses` now
+runs as its own step in the existing cargo-deny job (#59) against a new
+explicit `[licenses].allow` list in `deny.toml`; that check's first run
+surfaced a real finding, `wasmparser`/`wasmparser-nostd` (both via
+soroban-env-host) under `Apache-2.0 WITH LLVM-exception`, triaged in
+deliberately as permissive (no copyleft) rather than silenced. Measured:
+**213 tests passing** — 167 in `src/test.rs` (2 new), 46 across `tests/`
+unchanged; `cargo fmt --check`, `cargo deny check licenses advisories
+bans`, `cargo audit`, and both guard scripts green at this HEAD.
+
+Prior entry: 20 Oct 2026 — the delivery group's resource-cost pass:
 `mark_checkpoint` and `confirm_delivery` measured for the first time, on a
 deployed testnet instance, with
 [`soroban-cost-estimator`](https://github.com/Stellar-Cost-Labs/soroban-cost-estimator).
