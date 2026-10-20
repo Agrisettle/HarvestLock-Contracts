@@ -63,6 +63,16 @@ itself, and its `OracleStale` refusal still can't persist a marker of
 its own, which is exactly why the probe is a separate call). No
 deployment entry until the next build goes to testnet.
 
+Coverage for two scenarios no existing test pinned — `confirm_delivery()`
+called twice on the same commitment (#56) and `claim_advance_1()`
+attempted by the buyer rather than the cooperative (#57) — plus two
+supply-chain CI gates: a `cargo audit` job checking every Cargo.lock crate
+against the RustSec advisory database on every push/PR (#58), and
+`cargo deny check licenses` running against a new explicit allowed-license
+list in `deny.toml` (#59), whose first run surfaced and triaged
+`wasmparser`'s `Apache-2.0 WITH LLVM-exception`. Docs-only otherwise — no
+contract code changed.
+
 ## [Deployment 11] — 2026-10-20
 
 ### Added
