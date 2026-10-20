@@ -525,6 +525,20 @@ jobs:
                 esac
               done
 
+              # A required check that has not been CREATED yet looks the same
+              # as a path-filtered check that will never run ("" = n/a), so a
+              # fast bot run could merge before CI has even queued. Also wait
+              # until every other workflow run on this head SHA has finished
+              # (other auto-merge runs excluded to avoid waiting on each
+              # other). An API error counts as "still running" (fail-closed).
+              OTHER_RUNS="$(gh api \
+                "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" \
+                --jq "[.workflow_runs[] | select(.id != ${GITHUB_RUN_ID})
+                  | select(.name != \"Auto-merge bot\")
+                  | select(.status != \"completed\")] | length" \
+                2>/dev/null || echo 1)"
+              [ "${OTHER_RUNS:-1}" = "0" ] || PENDING=true
+
               if [ -n "${FAILED}" ]; then OUTCOME="fail"; break; fi
               if [ "${PENDING}" = "false" ]; then OUTCOME="pass"; break; fi
               sleep 30
