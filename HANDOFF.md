@@ -517,7 +517,81 @@ staged multi-party HTTP layer (see its own HANDOFF.md) rather than raw
 Soroban auth entries in one invocation, and this project already built
 exactly that mechanism for `reassign_buyer`.
 
-**All ten deployed/uploaded instances are validation artifacts, not
+**Deployment 11** (this session, 20 Oct 2026) — WASM hash
+`e097f1ffe08f878007cd9511d5fc70da0e238ac64491181e158d58f91e4714c5`
+(60,043 bytes, 29 exported functions — no new functions; this was a
+**measurement** deployment, not a feature one). Uploaded via `stellar
+contract install`; four instances deployed
+(`CCTQTECYATFFE3GJWYSND6CJOGB6KLGSF3JKK5KW3HRBNTKLFBFJEUWJ` for the
+walk-through, `CDG2V5HIJ5KJS6D3QK4VI4NRCRVUZYHHZQWYSONULUKQYJMOPFDBWAQ7`
+and `CBTFFKL24HYNUUG4K26FBB3B47T5KROWR3FTMBH4SST5NA3NCT5IFATV` as
+controls, and
+`CDKP2KUIDUJ4MS3G4GDS372BK3HMRZZEMJGM4C5GULTGAISI2FFGZAXK` as an
+independent reproduction of the `confirm_delivery` figure). The point of
+the deployment: the delivery-group methods
+(`mark_checkpoint`, `confirm_delivery`) had **never had a systematic
+resource-cost pass** — only correctness testing — so this session measured
+them with
+[`soroban-cost-estimator`](https://github.com/Stellar-Cost-Labs/soroban-cost-estimator)
+against the deployed instances and wrote the numbers up in
+[`docs/gas-costs.md`](./docs/gas-costs.md). The same WASM is what the
+dependabot SDK bump to 29.0.1 (19 Oct 2026) produces at this HEAD.
+
+Walked through on real testnet transactions against the real native-XLM SAC,
+100,000,000 stroops, 15%/20% advance split, `contracted_quantity: 1000`,
+`grade_price_bps: [10000, 9000, 7500]`:
+
+1. `lock` (35,000,000 deposit), `release_advance_1`, then **`mark_checkpoint`**
+   by the warehouse operator — status genuinely flipped to `CheckpointPassed`.
+2. `release_advance_2`, `claim_advance_1` (15,000,000 to the cooperative),
+   `claim_advance_2` (20,000,000), `ready_for_delivery` (cooperative),
+   `fund_remainder` (65,000,000 from the buyer).
+3. **`confirm_delivery`** by the warehouse operator with `delivered_quantity:
+   1000`, `grade_index: 0` — a fresh `get_commitment` read afterwards shows
+   `status: Delivered`, `delivered_quantity: 1000`, `grade_index: 0`,
+   `settlement_bps: 10000`, `remainder_funded: true`. Full delivery at the
+   top grade, so the arithmetic path really ran rather than erroring out.
+
+Measured resource costs (protocol 29, ledgers ~5290578–5290808), all against
+the deployed instances, not a local harness:
+
+| Method | CPU insns | Read/write entries | Fee non-refundable | Fee total (simulated) | Fee charged (real) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `mark_checkpoint` | 1,523,347 | 2 / 2 | 4,579 | 906,370 | 4,181 |
+| `confirm_delivery` | 1,530,217 | 2 / 2 | 4,584 | 906,976 | 4,242 |
+
+Two findings worth keeping:
+
+- **The auth-gated calls are the expensive ones, not the ones that move
+  money.** `mark_checkpoint`/`confirm_delivery` move *zero* stroops and
+  still cost ~1.52M CPU instructions — ~53% more than the permissionless
+  `release_advance_1` (996,645 on the same build, same instance) and within
+  9% of `claim_advance_1` (1,671,867), which *does* move 15,000,000 stroops.
+  The delta appears only on the auth-gated path: one extra read entry, one
+  extra write entry, ~527k CPU instructions. Not a defect — a fact worth
+  knowing before anyone assumes "cheap call" means "cheap".
+- **99.5% of the estimator's `Fee (total)` is simulated storage rent, not
+  execution.** The real submissions were charged 4,181 and 4,242 stroops
+  total (see `docs/gas-costs.md`'s CLI cross-check). Budget off the
+  non-refundable column, not the total.
+
+**A real upstream tooling limitation surfaced here**, and is documented in
+full in [`docs/gas-costs.md`](./docs/gas-costs.md#tooling-finding--soroban-cost-estimator-v010-cannot-encode-a-u32-argument):
+`soroban-cost-estimator` v0.1.0's `--arg` infers an argument's type from the
+literal alone (`parse_arg_scval` → `ScVal::I64` for any integer), ignoring the
+contract spec it has already parsed. `confirm_delivery` takes two `u32`
+parameters, so the stock binary cannot invoke it at all — the host aborts with
+`Error(WasmVm, InvalidAction)` / `VM call trapped: UnreachableCodeReached`
+before the contract body runs. Upstream `main` (commit `9627919`) has the
+same defect: it adds `validate_args_against_spec`, which *accepts* `1000` for
+a `u32` parameter, and then still encodes it as `ScVal::I64`. The measurement
+above used a two-hunk patch to v0.1.0 that encodes `--arg` values with the
+spec's declared type; the patch touches only argument encoding, and was
+verified to leave every measured value byte-identical on the zero-argument
+path. **Worth reporting upstream** — it blocks the tool for any contract
+with a `u32`/`i32`/`u64` parameter, which is most of them.
+
+**All eleven deployments' instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -866,7 +940,51 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 17 Oct 2026 (later) — issues **#1** and **#2**, one new
+*Last updated: 20 Oct 2026 — the delivery group's resource-cost pass:
+`mark_checkpoint` and `confirm_delivery` measured for the first time, on a
+deployed testnet instance, with
+[`soroban-cost-estimator`](https://github.com/Stellar-Cost-Labs/soroban-cost-estimator).
+**Docs only — no contract code changed, no test added or removed.** The
+measured baseline is now **211 tests passing** (measured, not carried over:
+165 in `src/test.rs`, 46 across `tests/` — 7 `address_equality`, 12
+`deadline_boundary`, 13 `oracle_fault_injection`, 10
+`permissionless_release_review`, 4 `snapshot_replay`). `cargo fmt --check`,
+the two guard scripts (discriminants 1..38 sequential; all 30 public
+methods' doc comments name their auth party) and the repo's advisory clippy
+invocation are all green at this HEAD.
+
+What was measured, and what it found (full write-up, with reproduce steps
+and the CLI cross-check, in [`docs/gas-costs.md`](./docs/gas-costs.md)):
+
+- `mark_checkpoint` — 1,523,347 CPU instructions, 2 read / 2 write entries,
+  4,579 non-refundable stroops, 906,370 total simulated.
+- `confirm_delivery` — 1,530,217 CPU instructions, 2 read / 2 write entries,
+  4,584 non-refundable stroops, 906,976 total simulated. Real submitted
+  transactions were charged 4,181 and 4,242 stroops respectively — 99.5% of
+  the estimator's "total" is simulated storage rent, not execution.
+- **The auth-gated calls are the expensive ones, not the money-moving
+  ones.** Both calls move zero stroops and still cost ~53% more CPU than
+  the permissionless `release_advance_1` (996,645 on the same build, same
+  instance, same balance) and within 9% of `claim_advance_1` (1,671,867),
+  which does move 15,000,000 stroops. The delta appears only on the
+  auth-gated path — one extra read entry, one extra write entry, ~527k CPU
+  instructions. Worth knowing before anyone reads "cheap call" as "cheap".
+- A **real upstream tooling limitation**, documented in full in
+  `docs/gas-costs.md`: `soroban-cost-estimator` v0.1.0's `--arg` infers an
+  argument's type from the literal alone (`ScVal::I64` for any integer),
+  ignoring the contract spec it has already parsed — so it cannot invoke
+  any contract with a `u32`/`i32`/`u64` parameter at all. `confirm_delivery`
+  takes two `u32`s, so the stock binary aborts with
+  `Error(WasmVm, InvalidAction)` before the contract body runs. Upstream
+  `main` (commit `9627919`) has the same defect. The measurement used a
+  two-hunk patch that encodes `--arg` with the spec's declared type; the
+  patch touches argument encoding only and was verified to leave every
+  measured value byte-identical on the zero-argument path. **Worth
+  reporting upstream.**
+- Deployment 11 (this session): WASM hash `e097f1ff…`, 60,043 bytes, four
+  instances, all validation artifacts — see "Verified on testnet" above.
+
+Prior entry: 17 Oct 2026 (later) — issues **#1** and **#2**, one new
 contract call plus a written security review. 210 tests total, measured:
 164 in `src/test.rs` (6 new), 46 across `tests/` (7 `address_equality`,
 12 `deadline_boundary`, 13 `oracle_fault_injection`, 10 new

@@ -63,6 +63,44 @@ itself, and its `OracleStale` refusal still can't persist a marker of
 its own, which is exactly why the probe is a separate call). No
 deployment entry until the next build goes to testnet.
 
+## [Deployment 11] — 2026-10-20
+
+### Added
+
+- A measured resource-cost baseline for the delivery group. `mark_checkpoint`
+  and `confirm_delivery` had only ever been correctness-tested; this
+  deployment measured them against a live testnet instance with
+  [`soroban-cost-estimator`](https://github.com/Stellar-Cost-Labs/soroban-cost-estimator)
+  and recorded the numbers in [`docs/gas-costs.md`](./docs/gas-costs.md) —
+  CPU instructions, memory, read/write entries and bytes, tx size, and the
+  fee split into its non-refundable and refundable halves.
+
+### Measured
+
+- `mark_checkpoint` — 1,523,347 CPU instructions, 2 read / 2 write entries,
+  4,579 non-refundable stroops. `confirm_delivery` — 1,530,217 CPU
+  instructions, 2 read / 2 write entries, 4,584 non-refundable stroops.
+  Both were also really submitted, and were charged 4,181 and 4,242 stroops
+  in total: 99.5% of the estimator's headline "total" is simulated storage
+  rent, not execution.
+- The auth-gated calls are the expensive ones, not the money-moving ones:
+  both of these move zero stroops and still cost ~53% more CPU than the
+  permissionless `release_advance_1` measured on the same build and the same
+  instance — the extra read entry, write entry and ~527k CPU instructions
+  appear only on the auth-gated path.
+- A real upstream limitation, recorded in full in `docs/gas-costs.md`: the
+  estimator's `--arg` infers an argument's type from the literal alone, so
+  v0.1.0 cannot invoke any contract with a `u32`/`i32`/`u64` parameter at
+  all — including this contract's `confirm_delivery`. Upstream `main` has
+  the same defect.
+
+No contract code changed. WASM `e097f1ff…` · 60,043 bytes · 29 exported
+functions · instances `CCTQTECYATFFE3GJWYSND6CJOGB6KLGSF3JKK5KW3HRBNTKLFBFJEUWJ`
+(walk-through), `CDG2V5HIJ5KJS6D3QK4VI4NRCRVUZYHHZQWYSONULUKQYJMOPFDBWAQ7`
+and `CBTFFKL24HYNUUG4K26FBB3B47T5KROWR3FTMBH4SST5NA3NCT5IFATV` (controls),
+`CDKP2KUIDUJ4MS3G4GDS372BK3HMRZZEMJGM4C5GULTGAISI2FFGZAXK` (independent
+reproduction) · [walk-through][handoff-deployments]
+
 ## [Deployment 10] — 2026-09-06
 
 ### Added
