@@ -69,8 +69,8 @@ top-up on real testnet (see HANDOFF.md's Deployment 9). PRD's must-have
 let any one of the three named parties freeze a commitment and either
 unanimous consent or a timeout resume it — still not arbitration of
 who's at fault, a bounded pause only, by explicit design (see
-HANDOFF.md). 138 tests passing, deployed and exercised on Stellar
-testnet ten times. Reflector's real testnet oracle doesn't quote NGN
+HANDOFF.md). 211 tests passing, deployed and exercised on Stellar
+testnet eleven times. Reflector's real testnet oracle doesn't quote NGN
 yet (confirmed live, not assumed — GBP proves the mechanism instead) —
 tracked in HANDOFF.md's "next steps," matching
 [`ROADMAP.md`, Phase 0 Track B](https://github.com/Agrisettle/HarvestLock/blob/main/ROADMAP.md#track-b--build-the-contract-weeks-110-in-parallel)
