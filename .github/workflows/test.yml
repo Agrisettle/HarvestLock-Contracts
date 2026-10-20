@@ -411,6 +411,37 @@ jobs:
           cd contracts/escrow
           git checkout Cargo.toml
 
+  # Dependency vulnerability scan (#58): `cargo test` proves the contract
+  # behaves; this proves the pinned dependency set itself carries no crate
+  # with a known vulnerability. Every crate in Cargo.lock is checked against
+  # the RustSec advisory database on every push and PR, so a newly published
+  # advisory against something already in the tree turns CI red on the next
+  # run instead of being discovered by whoever upgrades last. Softer
+  # findings print without failing the run — currently one: `paste`
+  # (RUSTSEC-2024-0436, unmaintained, transitive via soroban-env-host and
+  # already recorded in deny.toml's [advisories].ignore). A known-
+  # vulnerable crate still exits non-zero; if an advisory is ever reviewed
+  # and accepted, record it in an `audit.toml` beside deny.toml rather than
+  # removing this job.
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # `cargo audit` is a cargo subcommand — it needs a `cargo` on PATH to
+      # read the workspace metadata, even though it compiles nothing itself.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Prebuilt release binary, same installer already used for
+      # cargo-llvm-cov above — no minutes spent compiling the scanner.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Check dependencies against the RustSec advisory database
+        run: cargo audit
+
   cargo-deny:
     name: cargo deny
     runs-on: ubuntu-latest
@@ -436,3 +467,11 @@ jobs:
 
       - name: Check advisories and bans
         run: cargo deny check advisories bans
+
+      # License compliance (#59): the explicit allowed-license list in
+      # deny.toml's [licenses].allow is the whole gate — a future dependency
+      # whose license isn't on that list fails here, automatically, instead
+      # of being discovered during review (or after release). Kept as its
+      # own step so a red run names licenses, not "cargo deny" in general.
+      - name: Check licenses
+        run: cargo deny check licenses
