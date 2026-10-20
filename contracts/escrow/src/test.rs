@@ -1391,6 +1391,53 @@ fn claim_exactly_at_deadline_still_succeeds() {
     assert!(s.token.balance(&s.cooperative) > 0);
 }
 
+#[test]
+/// Covers issue #57: `claim_advance_1()` attempted by the buyer instead of
+/// the cooperative. `claim_tranche` gates on `cooperative.require_auth()`
+/// before any state check, so under enforcing auth the buyer's own signature
+/// cannot satisfy it. This uses `mock_auths` — the same technique as the
+/// multi-party auth-scrutiny tests further below — because it mocks only the
+/// listed invocation and fails every other `require_auth()`, which is what
+/// makes the wrong-signer rejection observable; `mock_all_auths()` alone
+/// (which the surrounding tests run under) can only prove an auth exists,
+/// never that the wrong party is refused.
+fn claim_advance_1_rejects_the_buyer_as_signer() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+
+    let invoke = mock_invoke(&s.contract.address, "claim_advance_1", ().into_val(&s.env));
+
+    // The buyer presents their own signature for the exact call — the
+    // cooperative's required signature is absent, so the host refuses
+    // before the contract body runs.
+    s.env.mock_auths(&[MockAuth {
+        address: &s.buyer,
+        invoke: &invoke,
+    }]);
+    let result = s.contract.try_claim_advance_1();
+    assert!(
+        result.is_err(),
+        "the buyer's signature must not satisfy claim_advance_1's cooperative auth: {result:?}"
+    );
+
+    // The refused attempt claimed nothing and moved nothing.
+    assert!(!s.contract.get_commitment().advance1_claimed);
+    assert_eq!(s.token.balance(&s.cooperative), 0);
+
+    // The cooperative's own signature is the one the call actually requires.
+    s.env.mock_auths(&[MockAuth {
+        address: &s.cooperative,
+        invoke: &invoke,
+    }]);
+    s.contract.claim_advance_1();
+    assert!(s.contract.get_commitment().advance1_claimed);
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        s.total_amount * 1_500 / 10_000
+    );
+}
+
 // ---------- reclaiming after expiry ----------
 
 #[test]
@@ -1979,6 +2026,33 @@ fn cannot_confirm_delivery_before_remainder_funded() {
         .contract
         .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_eq!(result, Err(Ok(Error::RemainderNotFunded)));
+}
+
+#[test]
+/// Covers issue #56: `confirm_delivery()` called twice on the same
+/// commitment. The first call moves status to `Delivered`, so the second is
+/// refused by the `ReadyForDelivery` guard with `InvalidState` before it can
+/// touch anything. The retry deliberately carries *different* quantity/grade
+/// arguments that would otherwise be valid — proving the refusal is the
+/// status gate and that none of the first call's recorded delivery data is
+/// rewritten by a replay.
+fn cannot_confirm_delivery_twice() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    let result = s.contract.try_confirm_delivery(&500, &2);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+
+    // The refused second call left the first call's records exactly as they
+    // were — no overwrite, no double count.
+    let c = s.contract.get_commitment();
+    assert_eq!(c.status, Status::Delivered);
+    assert_eq!(c.delivered_quantity, CONTRACTED_QUANTITY);
+    assert_eq!(c.grade_index, FULL_PRICE_GRADE);
+    assert_eq!(c.settlement_bps, 10_000); // full quantity at the full-price grade
 }
 
 // ---------- settle requires both tranches resolved ----------
