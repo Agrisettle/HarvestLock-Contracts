@@ -11,3 +11,6 @@ mutants.out/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Python bytecode (CI scanner self-tests)
+__pycache__/

@@ -7,6 +7,12 @@ name: Auto-merge bot
 #     issue linked in its body is commented on and CLOSED immediately — it
 #     is never merged. Contributors must request assignment on the issue
 #     first; once assigned they may reopen the PR and the bot re-evaluates.
+#   - Malware gate: before anything else, runs the base-branch
+#     .github/scripts/malware_scan.py against the PR's patches. A BLOCK
+#     (malicious patterns) or HOLD (CI/security config, process spawning,
+#     removed contract auth, unscannable files) verdict is posted on the
+#     PR, the PR is labelled `security-hold`, and it is NEVER merged by the
+#     bot — a maintainer must review it. Scanner errors fail closed (HOLD).
 #   - Code review is handled by CodeRabbit (see .coderabbit.yaml) — the bot
 #     does NOT post AI code reviews. The bot's job is merge automation plus
 #     the safety gates a reviewer can't see: CI status and waiting for
@@ -88,6 +94,7 @@ jobs:
       # string, not YAML comments.
       REQUIRED_CHECKS: |-
         Conventional Commits
+        Malware scan
         cargo test
         stellar contract build
         Verify WASM build reproducibility
@@ -428,6 +435,62 @@ jobs:
               else
                 echo "  ℹ️ No linked issue found in PR body — skipping assignment check"
               fi
+            fi
+
+            # ── malware gate (authoritative, fail-closed) ──
+            # The scanner is the BASE-branch copy (this job never checks out
+            # the PR head) and reads the PR's patches via the API, so a PR
+            # cannot weaken or skip it. BLOCK (exit 1) = malicious patterns;
+            # HOLD (exit 2) = sensitive change a bot must not merge alone;
+            # anything else = the scan failed, treated as HOLD. The PR is
+            # rescanned on every push and by the hourly sweep; the label is
+            # removed automatically once the whole PR diff scans clean. The
+            # maintainer's own PRs (SELF) are only stopped by BLOCK.
+            SCAN_REPORT="${RUNNER_TEMP:-/tmp}/malware-scan-${PR}.md"
+            SCAN_RC=0
+            python3 .github/scripts/malware_scan.py --repo "${REPO}" \
+              --pr "${PR}" --report "${SCAN_REPORT}" || SCAN_RC=$?
+            if [ "${SCAN_RC}" -eq 2 ] && [ "${SELF}" = "true" ]; then
+              echo "  ℹ️ malware scan HOLD on the maintainer's own PR — not blocking"
+              SCAN_RC=0
+            fi
+            if [ "${SCAN_RC}" -eq 0 ]; then
+              echo "  ✅ malware scan clean"
+              gh pr edit "${PR}" --repo "${REPO}" \
+                --remove-label security-hold >/dev/null 2>&1 || true
+            else
+              if [ "${SCAN_RC}" -eq 1 ]; then
+                echo "  🛑 malware scan BLOCKED #${PR}"
+                SEC_HEAD="🤖 **Auto-merge bot** — 🛑 **Security hold: possible malicious code.**"
+              else
+                echo "  ⚠️ malware scan HOLD #${PR} (rc=${SCAN_RC})"
+                SEC_HEAD="🤖 **Auto-merge bot** — ⚠️ **Security hold: maintainer review required.**"
+              fi
+              SEC_HEAD+=" This PR will **not** be merged automatically."
+              gh label create security-hold --repo "${REPO}" --color B60205 \
+                --description "Malware scan flagged this PR; maintainer review required" \
+                >/dev/null 2>&1 || true
+              gh pr edit "${PR}" --repo "${REPO}" --add-label security-hold \
+                >/dev/null 2>&1 || true
+              MARKER_SEC="<!-- BOT-SECURITY-HOLD sha=${SHA} -->"
+              ALREADY_SEC="$(gh pr view "${PR}" --repo "${REPO}" \
+                --json reviews \
+                --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
+                  | select(.body | contains(\"${MARKER_SEC}\"))] | length" \
+                2>/dev/null || echo 0)"
+              if [ "${ALREADY_SEC}" -eq 0 ]; then
+                SEC_BODY="${SEC_HEAD}"$'\n\n'
+                if [ -s "${SCAN_REPORT}" ]; then
+                  SEC_BODY+="$(cat "${SCAN_REPORT}")"
+                else
+                  SEC_BODY+="The malware scan could not complete, so this PR is held."
+                fi
+                SEC_BODY+=$'\n\n'"Pushing new commits re-runs the scan. A maintainer will review this PR."
+                SEC_BODY+=$'\n\n'"${MARKER_SEC}"
+                gh pr review "${PR}" --repo "${REPO}" --comment \
+                  --body "${SEC_BODY}" 2>/dev/null || true
+              fi
+              continue
             fi
 
             # (No bot code-review posts — CodeRabbit handles code review.
