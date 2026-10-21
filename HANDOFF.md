@@ -940,7 +940,39 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 20 Oct 2026 (later) — four-issue bundle (#56–#59): two
+*Last updated: 21 Oct 2026 — four-issue bundle (#52–#55): coverage
+verification, one genuine gap closed. **No contract code changed.**
+Honest either-way checks first — a repo-wide search of `src/test.rs` (and
+the `tests/` suites) for the relevant method names found three of the
+four scenarios already covered, so those got a doc comment naming the
+existing test instead of a duplicate: #52 (`cancel()` after the remainder
+is funded but before `Delivered`, already pinned by
+`cancel_still_works_from_ready_for_delivery_including_the_already_funded_remainder`),
+#54 (`set_allocation()` after `lock()`, already pinned by
+`cannot_set_allocation_after_lock`), and #55 (`resolve_fx_shortfall()`
+with no `oracle_config` ever set at `initialize`, already pinned by
+`resolve_fx_shortfall_requires_oracle_configured`). The fourth was a
+real gap: no test anywhere flags a *second*, different dispute on the
+same commitment after the first was resolved (#53) — the nearest
+neighbors only reject a second flag *while still* `Disputed`
+(`flag_dispute_rejects_a_second_flag`) or run a single dispute round
+(`kitchen_sink_all_optional_features_on_one_commitment`). Added
+`second_dispute_on_the_same_commitment_is_flagged_and_resolved_later_in_its_lifecycle`:
+two dispute rounds on one commitment — the buyer from `Locked`, then the
+warehouse from `ReadyForDelivery` with the remainder funded — each
+asserting the round's recorded `dispute_pre_status`, the cleared
+`dispute_deadline` and reset `dispute_pre_status` after
+`resolve_dispute`, and the lifecycle continuing past the second freeze
+all the way to `Delivered`. Snapshot policy as recorded below: the new
+test's snapshot left untracked, and the tracked files a local re-run
+re-recorded (protocol 28→29, `fx_quote_stale`, `live_until` drift)
+restored to HEAD rather than committed. Measured: **214 tests passing** —
+168 in `src/test.rs` (1 new), 46 across `tests/` unchanged (7
+`address_equality`, 12 `deadline_boundary`, 13 `oracle_fault_injection`,
+10 `permissionless_release_review`, 4 `snapshot_replay`); `cargo fmt
+--check` and both guard scripts green at this HEAD.
+
+Prior entry: 20 Oct 2026 (later) — four-issue bundle (#56–#59): two
 genuine test gaps closed, two CI supply-chain gates added. **No contract
 code changed.** Honest either-way checks first: a repo-wide search found
 **no** existing test for either named scenario, so both were added rather

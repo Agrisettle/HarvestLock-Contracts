@@ -537,6 +537,11 @@ fn allocation_with_exactly_max_members_is_allowed() {
 }
 
 #[test]
+/// Covers issue #54: `set_allocation()` attempted after `lock()` has already
+/// run. The allocation ledger is Draft-only — one-time and immutable once
+/// the commitment leaves `Draft` — so the call must bounce with
+/// `InvalidState` rather than rewrite a ledger the cooperative may already
+/// be acting on.
 fn cannot_set_allocation_after_lock() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
@@ -957,6 +962,10 @@ fn cannot_resolve_fx_shortfall_before_tranches_are_resolved() {
 }
 
 #[test]
+/// Covers issue #55: `resolve_fx_shortfall()` called when no `oracle_config`
+/// was ever set at `initialize`. The plain `setup()` fixture never configures
+/// one, so the call must refuse with `OracleNotConfigured` — the documented
+/// degradation path (#124) — instead of reading an oracle that doesn't exist.
 fn resolve_fx_shortfall_requires_oracle_configured() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
@@ -2601,6 +2610,12 @@ fn cancel_after_partial_claim_leaves_claimed_advance_with_cooperative() {
 }
 
 #[test]
+/// Covers issue #52: `cancel()` attempted after the remainder has been
+/// funded but before `Delivered`. `advance_to_remainder_funded` stops at
+/// `ReadyForDelivery` with the remainder fully funded — exactly the window
+/// between `fund_remainder()` and `confirm_delivery()` — and `cancel()`
+/// must still succeed from there, returning the funded remainder to the
+/// buyer while the already-claimed tranches stay with the cooperative.
 fn cancel_still_works_from_ready_for_delivery_including_the_already_funded_remainder() {
     let s = setup(1_500, 2_000);
     s.contract.lock();
@@ -2828,6 +2843,58 @@ fn flag_dispute_rejects_a_second_flag() {
     // Calling a second time while already Disputed (by the same party)
     let result_same = s.contract.try_flag_dispute(&s.buyer);
     assert_eq!(result_same, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+/// Covers issue #53: a second, *different* dispute on the same commitment —
+/// flagged by another party at a later lifecycle stage, after the first
+/// dispute was resolved — is accepted, freezes from the new stage, and
+/// resolves back to it. The one-dispute-at-a-time rule pinned by
+/// `flag_dispute_rejects_a_second_flag` only guards while the first dispute
+/// is still open: `resolve_dispute` restores the pre-dispute status and
+/// clears the dispute fields, so the next dispute starts from a clean slate.
+fn second_dispute_on_the_same_commitment_is_flagged_and_resolved_later_in_its_lifecycle() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    // Round one: the buyer disputes from Locked.
+    s.contract.flag_dispute(&s.buyer);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Locked
+    );
+    s.contract.resolve_dispute();
+    assert_eq!(s.contract.get_status(), Status::Locked);
+    // Resolution clears the dispute fields — nothing lingers into round two.
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Draft
+    );
+    assert_eq!(s.contract.get_commitment().dispute_deadline, 0);
+
+    // Push much further into the lifecycle so the second dispute is
+    // genuinely a later one: ReadyForDelivery with the remainder funded.
+    advance_to_remainder_funded(&s);
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+
+    // Round two: a different party disputes from a different stage, and the
+    // freeze records the new pre-dispute status, not the old one.
+    s.contract.flag_dispute(&s.warehouse);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::ReadyForDelivery
+    );
+    s.contract.resolve_dispute();
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+    assert_eq!(s.contract.get_commitment().dispute_deadline, 0);
+
+    // The second freeze genuinely lifted: the lifecycle continues past it,
+    // all the way to Delivered.
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(s.contract.get_status(), Status::Delivered);
 }
 
 #[test]
