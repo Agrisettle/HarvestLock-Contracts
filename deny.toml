@@ -11,9 +11,16 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"
+# Reviewed-and-accepted advisories on transitive deps we can't control.
 # paste is unmaintained but used by soroban-env-host (transitive dep we can't control)
 ignore = [
     "RUSTSEC-2024-0436",  # paste - unmaintained, comes via soroban-env-host
+    # crypto-bigint 0.5.5: RUSTSEC-2026-0387 (constant-time timing variability,
+    # fixed upstream only in >= 0.7.6) arrives via soroban-env-host ->
+    # k256/p256, which require crypto-bigint ^0.5 — no compatible upgrade
+    # exists until soroban-env-host moves. Mirrored in audit.toml for
+    # `cargo audit` (same list as .github/workflows/test.yml documents).
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]
