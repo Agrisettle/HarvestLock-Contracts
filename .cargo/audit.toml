@@ -1,0 +1,21 @@
+# cargo-audit configuration for HarvestLock-Contracts
+#
+# The cargo-audit job in .github/workflows/test.yml says an advisory that
+# has been reviewed and accepted belongs in an `audit.toml` beside
+# deny.toml — this file is what lets `cargo audit` exit zero on a known
+# finding instead of the job being removed. cargo-audit discovers its
+# config at `.cargo/audit.toml` (project) or `~/.cargo/audit.toml` (user
+# home), not at the repo root, so it lives here. deny.toml's
+# [advisories].ignore carries the same IDs for `cargo deny check
+# advisories`, so the two scanners agree.
+
+[advisories]
+ignore = [
+    # crypto-bigint 0.5.5: RUSTSEC-2026-0387 (multiple timing variability
+    # issues in constant-time operations, fixed upstream only in >= 0.7.6).
+    # It reaches Cargo.lock solely through soroban-env-host 29.0.1 ->
+    # k256 0.13 / p256 0.13, whose crypto-bigint requirement is ^0.5, so
+    # there is no compatible upgrade until soroban-env-host moves. Dropping
+    # soroban-sdk is not an option; re-evaluate when SDK 30 ships.
+    "RUSTSEC-2026-0387",
+]
