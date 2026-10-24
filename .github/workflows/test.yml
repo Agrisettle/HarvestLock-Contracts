@@ -450,8 +450,13 @@ jobs:
   # (RUSTSEC-2024-0436, unmaintained, transitive via soroban-env-host and
   # already recorded in deny.toml's [advisories].ignore). A known-
   # vulnerable crate still exits non-zero; if an advisory is ever reviewed
-  # and accepted, record it in an `audit.toml` beside deny.toml rather than
-  # removing this job.
+  # and accepted, record it in cargo-audit's config file `.cargo/audit.toml`
+  # (cargo-audit discovers its config at `.cargo/audit.toml` or
+  # `~/.cargo/audit.toml` — never at an `audit.toml` beside deny.toml, as
+  # this comment previously said) and mirror the ID in deny.toml's
+  # [advisories].ignore so both scanners accept the same set, rather than
+  # removing this job. RUSTSEC-2026-0387 was recorded this way — see both
+  # files for its reasoning and re-check condition.
   cargo-audit:
     name: cargo audit
     runs-on: ubuntu-latest
