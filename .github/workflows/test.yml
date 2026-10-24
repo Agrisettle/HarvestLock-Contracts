@@ -71,13 +71,41 @@ jobs:
         run: cargo llvm-cov --workspace --all-targets --locked
 
   # ---------------------------------------------------------------------
-  # #111, #122, #124, #125, and the window-overflow property suite — five
-  # integration suites, each its own job so a failure points at the issue
-  # it guards instead of at "cargo test". They are separate `--test`
+  # #2, #111, #122, #124, #125, and the window-overflow property suite —
+  # six integration suites, each its own job so a failure points at the
+  # issue it guards instead of at "cargo test". They are separate `--test`
   # targets under contracts/escrow/tests/, so the umbrella `test` job
   # above also runs them; these jobs exist so the signal is legible per
   # issue and so a suite can be re-run alone.
   # ---------------------------------------------------------------------
+
+  permissionless-release-review:
+    name: "#2 permissionless release review"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Pins docs/permissionless-release-review.md's conclusions: the two
+      # tranche-opening calls need no signature, move no funds, write their
+      # clock exactly once, and empower nobody — including the issue's
+      # end-to-end third-party griefing scenario.
+      - name: cargo test --test permissionless_release_review
+        working-directory: contracts/escrow
+        run: cargo test --test permissionless_release_review --verbose
 
   deadline-boundary:
     name: "#111 deadline boundary tests"
@@ -215,7 +243,14 @@ jobs:
 
   build-wasm:
     name: stellar contract build
-    runs-on: ubuntu-latest
+    # Pinned, not floating `ubuntu-latest`: this job's native build
+    # dependencies (libdbus-1-dev, libudev-dev — see below) are exactly the
+    # kind that break silently when -latest re-points at a new image, which
+    # is how this job broke twice before being caught. Pinning turns an
+    # image change into an explicit, reviewable bump instead of a surprise;
+    # bump the version deliberately and re-check the apt packages when you
+    # do (issue #88).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -254,6 +289,23 @@ jobs:
       - name: stellar contract build
         working-directory: .
         run: stellar contract build --locked
+
+      - name: Verify WASM build reproducibility
+        working-directory: .
+        run: |
+          # Build once more from a clean target directory and compare hashes.
+          # If the two builds produce different WASM, this step fails.
+          HASH_1=$(sha256sum target/wasm32v1-none/release/harvestlock_escrow.wasm | awk '{print $1}')
+          rm -rf target
+          stellar contract build --locked
+          HASH_2=$(sha256sum target/wasm32v1-none/release/harvestlock_escrow.wasm | awk '{print $1}')
+          echo "Build 1 hash: $HASH_1"
+          echo "Build 2 hash: $HASH_2"
+          if [ "$HASH_1" != "$HASH_2" ]; then
+            echo "::error::WASM build is NOT reproducible — hashes differ between runs"
+            exit 1
+          fi
+          echo "WASM build is reproducible (hash=$HASH_1)"
 
   # Regression safety nets one layer up from `cargo test`: both guard a
   # class of problem no single hand-written test is positioned to catch
@@ -387,3 +439,68 @@ jobs:
         run: |
           cd contracts/escrow
           git checkout Cargo.toml
+
+  # Dependency vulnerability scan (#58): `cargo test` proves the contract
+  # behaves; this proves the pinned dependency set itself carries no crate
+  # with a known vulnerability. Every crate in Cargo.lock is checked against
+  # the RustSec advisory database on every push and PR, so a newly published
+  # advisory against something already in the tree turns CI red on the next
+  # run instead of being discovered by whoever upgrades last. Softer
+  # findings print without failing the run — currently one: `paste`
+  # (RUSTSEC-2024-0436, unmaintained, transitive via soroban-env-host and
+  # already recorded in deny.toml's [advisories].ignore). A known-
+  # vulnerable crate still exits non-zero; if an advisory is ever reviewed
+  # and accepted, record it in an `audit.toml` beside deny.toml rather than
+  # removing this job.
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # `cargo audit` is a cargo subcommand — it needs a `cargo` on PATH to
+      # read the workspace metadata, even though it compiles nothing itself.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Prebuilt release binary, same installer already used for
+      # cargo-llvm-cov above — no minutes spent compiling the scanner.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Check dependencies against the RustSec advisory database
+        run: cargo audit
+
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: Check advisories and bans
+        run: cargo deny check advisories bans
+
+      # License compliance (#59): the explicit allowed-license list in
+      # deny.toml's [licenses].allow is the whole gate — a future dependency
+      # whose license isn't on that list fails here, automatically, instead
+      # of being discovered during review (or after release). Kept as its
+      # own step so a red run names licenses, not "cargo deny" in general.
+      - name: Check licenses
+        run: cargo deny check licenses

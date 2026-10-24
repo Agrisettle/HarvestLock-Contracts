@@ -537,6 +537,11 @@ fn allocation_with_exactly_max_members_is_allowed() {
 }
 
 #[test]
+/// Covers issue #54: `set_allocation()` attempted after `lock()` has already
+/// run. The allocation ledger is Draft-only — one-time and immutable once
+/// the commitment leaves `Draft` — so the call must bounce with
+/// `InvalidState` rather than rewrite a ledger the cooperative may already
+/// be acting on.
 fn cannot_set_allocation_after_lock() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
@@ -621,6 +626,14 @@ mod mock_oracle {
                 .instance()
                 .get::<_, (i128, u64)>(&symbol_short!("price"))
                 .map(|(price, timestamp)| PriceData { price, timestamp })
+        }
+
+        /// Simulates "this oracle does not quote that asset" for the
+        /// freshness probe — same test-only shape as the fault-injection
+        /// suite's `clear_quote`; the real oracle has no such hook (its
+        /// feed simply doesn't list the symbol).
+        pub fn clear_price(env: Env) {
+            env.storage().instance().remove(&symbol_short!("price"));
         }
 
         /// Hardcoded to match Reflector's real fiat-exchange-rate oracle
@@ -949,6 +962,10 @@ fn cannot_resolve_fx_shortfall_before_tranches_are_resolved() {
 }
 
 #[test]
+/// Covers issue #55: `resolve_fx_shortfall()` called when no `oracle_config`
+/// was ever set at `initialize`. The plain `setup()` fixture never configures
+/// one, so the call must refuse with `OracleNotConfigured` — the documented
+/// degradation path (#124) — instead of reading an oracle that doesn't exist.
 fn resolve_fx_shortfall_requires_oracle_configured() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
@@ -1155,6 +1172,153 @@ fn cannot_expire_fx_shortfall_window_once_funded() {
     assert_eq!(result, Err(Ok(Error::FxShortfallAlreadyFunded)));
 }
 
+// ---------- refresh_fx_quote_status (#1, "waiting on a fresh quote") ----------
+
+#[test]
+fn stale_quote_leaves_no_flag_but_refresh_fx_quote_status_records_one() {
+    // The whole reason #1 needed its own probe: `resolve_fx_shortfall`'s
+    // OracleStale refusal returns `Err`, and a Soroban invocation that
+    // errors rolls back every write it made — so the refusal itself can
+    // never record why it refused. Proven here, not assumed: after the
+    // failed resolve the flag is still false, and only the separate
+    // (successful) probe persists it.
+    let (s, _oracle) = setup_with_oracle(3_600);
+    advance_to_delivered_with_shortfall(&s);
+    advance_time(&s, 3_601); // the configured quote is now stale
+
+    assert_eq!(
+        s.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleStale))
+    );
+    assert!(
+        !s.contract.get_commitment().fx_quote_stale,
+        "the failed call must have written nothing"
+    );
+
+    s.contract.refresh_fx_quote_status();
+    assert!(s.contract.get_commitment().fx_quote_stale);
+}
+
+#[test]
+fn refresh_fx_quote_status_clears_the_flag_once_a_fresh_quote_lands() {
+    let (s, oracle) = setup_with_oracle(3_600);
+    advance_to_delivered_with_shortfall(&s);
+    advance_time(&s, 3_601);
+    s.contract.refresh_fx_quote_status();
+    assert!(s.contract.get_commitment().fx_quote_stale);
+
+    // Reflector publishes a fresh quote; the next probe self-corrects —
+    // no reverse transition to learn, the flag tracks reality.
+    oracle.set_price(&175_000_000_000_000i128, &s.env.ledger().timestamp());
+    s.contract.refresh_fx_quote_status();
+    assert!(!s.contract.get_commitment().fx_quote_stale);
+}
+
+#[test]
+fn refresh_fx_quote_status_is_informational_and_gates_nothing() {
+    // The flag must not change settlement behavior in any direction. It
+    // doesn't unblock anything by itself (`settle` is still gated on
+    // `FxNotResolved`), and a normal fresh-quote resolve -> fund ->
+    // settle path runs identically with the flag having been set and
+    // cleared in between.
+    let (s, oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    advance_time(&s, 3_601);
+    s.contract.refresh_fx_quote_status();
+    assert!(s.contract.get_commitment().fx_quote_stale);
+    assert_eq!(s.contract.try_settle(), Err(Ok(Error::FxNotResolved)));
+
+    // Fresh quote: the probe clears, the shortfall path works exactly as
+    // it did before the flag existed (750_000 top-up, per the fixture's
+    // recorded figures), and settle completes.
+    oracle.set_price(&175_000_000_000_000i128, &s.env.ledger().timestamp());
+    s.contract.refresh_fx_quote_status();
+    assert!(!s.contract.get_commitment().fx_quote_stale);
+    s.contract.resolve_fx_shortfall();
+    assert_eq!(
+        s.contract.get_commitment().fx_shortfall_amount,
+        EXPECTED_SHORTFALL
+    );
+    s.contract.fund_fx_shortfall();
+    s.contract.settle();
+    assert_eq!(s.contract.get_status(), Status::Settled);
+}
+
+#[test]
+fn resolve_fx_shortfall_clears_the_flag_so_it_never_lingers_past_resolution() {
+    let (s, oracle) = setup_with_oracle(3_600);
+    advance_to_delivered_with_shortfall(&s);
+    advance_time(&s, 3_601);
+    s.contract.refresh_fx_quote_status();
+    assert!(s.contract.get_commitment().fx_quote_stale);
+
+    // Fresh quote, then resolve *without* another probe — resolution
+    // itself must clear the flag, or a commitment could sit `Settled`
+    // still advertising "waiting on a fresh quote".
+    oracle.set_price(&175_000_000_000_000i128, &s.env.ledger().timestamp());
+    s.contract.resolve_fx_shortfall();
+    assert!(!s.contract.get_commitment().fx_quote_stale);
+
+    // And there's nothing left to wait for once resolved.
+    assert_eq!(
+        s.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::FxAlreadyResolved))
+    );
+}
+
+#[test]
+fn refresh_fx_quote_status_refuses_outside_delivered_and_without_an_oracle() {
+    // Not yet Delivered — the flag can't matter before settlement is
+    // actually pending.
+    let (s2, _oracle) = setup_with_oracle(3_600);
+    s2.contract.lock();
+    assert_eq!(
+        s2.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::InvalidState))
+    );
+
+    // Delivered, but this commitment never needed a conversion at all.
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    assert_eq!(
+        s.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::InvalidState))
+    );
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(
+        s.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::OracleNotConfigured))
+    );
+    assert!(
+        !s.contract.get_commitment().fx_quote_stale,
+        "a refused call must have written nothing"
+    );
+}
+
+#[test]
+fn refresh_fx_quote_status_does_not_conflate_a_missing_quote_with_a_stale_one() {
+    // "The oracle doesn't quote this asset at all" is a permanent
+    // configuration gap, not "come back later" — waiting will never fix
+    // it, so the error propagates and the waiting flag is not set.
+    let (s, oracle) = setup_with_oracle(3_600);
+    advance_to_delivered_with_shortfall(&s);
+    oracle.clear_price();
+
+    assert_eq!(
+        s.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::OraclePriceUnavailable))
+    );
+    assert!(!s.contract.get_commitment().fx_quote_stale);
+}
+
 // ---------- opening a tranche moves no funds ----------
 
 #[test]
@@ -1234,6 +1398,53 @@ fn claim_exactly_at_deadline_still_succeeds() {
 
     s.contract.claim_advance_1();
     assert!(s.token.balance(&s.cooperative) > 0);
+}
+
+#[test]
+/// Covers issue #57: `claim_advance_1()` attempted by the buyer instead of
+/// the cooperative. `claim_tranche` gates on `cooperative.require_auth()`
+/// before any state check, so under enforcing auth the buyer's own signature
+/// cannot satisfy it. This uses `mock_auths` — the same technique as the
+/// multi-party auth-scrutiny tests further below — because it mocks only the
+/// listed invocation and fails every other `require_auth()`, which is what
+/// makes the wrong-signer rejection observable; `mock_all_auths()` alone
+/// (which the surrounding tests run under) can only prove an auth exists,
+/// never that the wrong party is refused.
+fn claim_advance_1_rejects_the_buyer_as_signer() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+
+    let invoke = mock_invoke(&s.contract.address, "claim_advance_1", ().into_val(&s.env));
+
+    // The buyer presents their own signature for the exact call — the
+    // cooperative's required signature is absent, so the host refuses
+    // before the contract body runs.
+    s.env.mock_auths(&[MockAuth {
+        address: &s.buyer,
+        invoke: &invoke,
+    }]);
+    let result = s.contract.try_claim_advance_1();
+    assert!(
+        result.is_err(),
+        "the buyer's signature must not satisfy claim_advance_1's cooperative auth: {result:?}"
+    );
+
+    // The refused attempt claimed nothing and moved nothing.
+    assert!(!s.contract.get_commitment().advance1_claimed);
+    assert_eq!(s.token.balance(&s.cooperative), 0);
+
+    // The cooperative's own signature is the one the call actually requires.
+    s.env.mock_auths(&[MockAuth {
+        address: &s.cooperative,
+        invoke: &invoke,
+    }]);
+    s.contract.claim_advance_1();
+    assert!(s.contract.get_commitment().advance1_claimed);
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        s.total_amount * 1_500 / 10_000
+    );
 }
 
 // ---------- reclaiming after expiry ----------
@@ -1826,6 +2037,33 @@ fn cannot_confirm_delivery_before_remainder_funded() {
     assert_eq!(result, Err(Ok(Error::RemainderNotFunded)));
 }
 
+#[test]
+/// Covers issue #56: `confirm_delivery()` called twice on the same
+/// commitment. The first call moves status to `Delivered`, so the second is
+/// refused by the `ReadyForDelivery` guard with `InvalidState` before it can
+/// touch anything. The retry deliberately carries *different* quantity/grade
+/// arguments that would otherwise be valid — proving the refusal is the
+/// status gate and that none of the first call's recorded delivery data is
+/// rewritten by a replay.
+fn cannot_confirm_delivery_twice() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    let result = s.contract.try_confirm_delivery(&500, &2);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+
+    // The refused second call left the first call's records exactly as they
+    // were — no overwrite, no double count.
+    let c = s.contract.get_commitment();
+    assert_eq!(c.status, Status::Delivered);
+    assert_eq!(c.delivered_quantity, CONTRACTED_QUANTITY);
+    assert_eq!(c.grade_index, FULL_PRICE_GRADE);
+    assert_eq!(c.settlement_bps, 10_000); // full quantity at the full-price grade
+}
+
 // ---------- settle requires both tranches resolved ----------
 
 #[test]
@@ -2372,6 +2610,12 @@ fn cancel_after_partial_claim_leaves_claimed_advance_with_cooperative() {
 }
 
 #[test]
+/// Covers issue #52: `cancel()` attempted after the remainder has been
+/// funded but before `Delivered`. `advance_to_remainder_funded` stops at
+/// `ReadyForDelivery` with the remainder fully funded — exactly the window
+/// between `fund_remainder()` and `confirm_delivery()` — and `cancel()`
+/// must still succeed from there, returning the funded remainder to the
+/// buyer while the already-claimed tranches stay with the cooperative.
 fn cancel_still_works_from_ready_for_delivery_including_the_already_funded_remainder() {
     let s = setup(1_500, 2_000);
     s.contract.lock();
@@ -2585,13 +2829,72 @@ fn flag_dispute_rejects_after_settlement() {
 }
 
 #[test]
+/// Covers issue #51: `flag_dispute()` called a second time while already `Disputed`
+/// returns `Err(Error::InvalidState)`, whether called by another party or the same party.
 fn flag_dispute_rejects_a_second_flag() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     s.contract.flag_dispute(&s.buyer);
 
+    // Calling a second time while already Disputed (by another party)
     let result = s.contract.try_flag_dispute(&s.cooperative);
     assert_eq!(result, Err(Ok(Error::InvalidState)));
+
+    // Calling a second time while already Disputed (by the same party)
+    let result_same = s.contract.try_flag_dispute(&s.buyer);
+    assert_eq!(result_same, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+/// Covers issue #53: a second, *different* dispute on the same commitment —
+/// flagged by another party at a later lifecycle stage, after the first
+/// dispute was resolved — is accepted, freezes from the new stage, and
+/// resolves back to it. The one-dispute-at-a-time rule pinned by
+/// `flag_dispute_rejects_a_second_flag` only guards while the first dispute
+/// is still open: `resolve_dispute` restores the pre-dispute status and
+/// clears the dispute fields, so the next dispute starts from a clean slate.
+fn second_dispute_on_the_same_commitment_is_flagged_and_resolved_later_in_its_lifecycle() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    // Round one: the buyer disputes from Locked.
+    s.contract.flag_dispute(&s.buyer);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Locked
+    );
+    s.contract.resolve_dispute();
+    assert_eq!(s.contract.get_status(), Status::Locked);
+    // Resolution clears the dispute fields — nothing lingers into round two.
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Draft
+    );
+    assert_eq!(s.contract.get_commitment().dispute_deadline, 0);
+
+    // Push much further into the lifecycle so the second dispute is
+    // genuinely a later one: ReadyForDelivery with the remainder funded.
+    advance_to_remainder_funded(&s);
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+
+    // Round two: a different party disputes from a different stage, and the
+    // freeze records the new pre-dispute status, not the old one.
+    s.contract.flag_dispute(&s.warehouse);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::ReadyForDelivery
+    );
+    s.contract.resolve_dispute();
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+    assert_eq!(s.contract.get_commitment().dispute_deadline, 0);
+
+    // The second freeze genuinely lifted: the lifecycle continues past it,
+    // all the way to Delivered.
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(s.contract.get_status(), Status::Delivered);
 }
 
 #[test]
@@ -2612,6 +2915,10 @@ fn flag_dispute_reaches_from_delivered_too() {
 }
 
 #[test]
+/// Covers issue #50: `reassign_buyer()` while the commitment is `Disputed`
+/// is rejected via the existing `Error::InvalidState` guard (reassign_buyer's
+/// status match only permits Draft..=ReadyForDelivery, rejecting Disputed).
+/// Also checks other state-changing calls are frozen in Disputed state.
 fn flag_dispute_freezes_every_other_state_changing_call() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
@@ -3890,4 +4197,76 @@ fn resolve_fx_shortfall_rejects_while_the_first_tranche_is_still_open() {
     // guard rather than one that its sibling could answer for it.
     let result = s.contract.try_resolve_fx_shortfall();
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
+}
+
+// #81 — Kitchen-sink integration test: every optional feature active on one commitment.
+// Drives a single commitment through its full lifecycle with:
+//   - oracle_config set (FX conversion)
+//   - allocation ledger populated
+//   - both tranches released and claimed
+//   - a mid-lifecycle dispute flagged and resolved
+//   - FX shortfall computed, funded, and settled
+//   - partial delivery with grade adjustment
+#[test]
+fn kitchen_sink_all_optional_features_on_one_commitment() {
+    // Use SHORTFALL_DENOMINATION so resolve_fx_shortfall actually finds a gap
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+
+    // Set allocation ledger while still in Draft (required before lock)
+    let m1 = member(&s.env, 6_000);
+    let m2 = member(&s.env, 4_000);
+    s.contract
+        .set_allocation(&Vec::from_array(&s.env, [m1, m2]));
+
+    // Lock the commitment (Draft → Locked)
+    s.contract.lock();
+
+    // Release and claim advance 1 (Locked → Advance1Released)
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+
+    // Mark checkpoint (Advance1Released → CheckpointPassed)
+    s.contract.mark_checkpoint();
+
+    // Release and claim advance 2 (CheckpointPassed → Advance2Released)
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+
+    // Flag a dispute mid-lifecycle (Advance2Released → Disputed)
+    s.contract.flag_dispute(&s.buyer);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+
+    // Resolve the dispute — should restore pre-dispute status (Disputed → Advance2Released)
+    s.contract.resolve_dispute();
+    assert_eq!(s.contract.get_status(), Status::Advance2Released);
+
+    // Signal ready for delivery (Advance2Released → ReadyForDelivery)
+    s.contract.ready_for_delivery();
+
+    // Fund remainder within the window
+    s.contract.fund_remainder();
+
+    // Confirm full delivery at full price grade (ReadyForDelivery → Delivered)
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    // Resolve FX shortfall (reads fresh oracle rate, computes what buyer owes)
+    s.contract.resolve_fx_shortfall();
+
+    // Verify a shortfall was actually found
+    let c = s.contract.get_commitment();
+    assert!(c.fx_resolved);
+    assert!(c.fx_shortfall_amount > 0);
+    assert!(!c.fx_shortfall_funded);
+
+    // Fund the FX shortfall
+    s.contract.fund_fx_shortfall();
+
+    // Settle — should complete successfully with all features exercised (Delivered → Settled)
+    s.contract.settle();
+    assert_eq!(s.contract.get_status(), Status::Settled);
+
+    // Verify allocation was recorded
+    let alloc = s.contract.get_allocation();
+    assert_eq!(alloc.len(), 2);
 }

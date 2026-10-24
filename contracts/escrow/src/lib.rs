@@ -101,6 +101,25 @@
 //! commitment: re-resolving later against a different rate would let
 //! either side game the number by choosing when to call it.
 //!
+//! **The "waiting on a fresh quote" signal (#1)**: a stale quote still
+//! refuses `resolve_fx_shortfall` outright (`Error::OracleStale`) — and
+//! because a Soroban invocation that returns `Err` rolls back every state
+//! write it made, that refusal can't itself record *why* settlement is
+//! stuck. `refresh_fx_quote_status` — permissionless, same reasoning as
+//! `resolve_fx_shortfall` — is the write that refusal can't be: it runs
+//! the same staleness check and records the answer in
+//! `Commitment::fx_quote_stale`, which `get_commitment` surfaces so the
+//! API/indexers/UI can show "waiting on a fresh quote" instead of a
+//! caller having to infer that from a failed `resolve_fx_shortfall` call.
+//! Deliberately a boolean flag alongside `fx_resolved`, not a new
+//! `Status` variant: this is a condition on one sub-step of settlement,
+//! not a position in the deal's lifecycle (the commitment is still
+//! `Delivered`), and a new variant would force every status-matching
+//! guard, `StatusChanged` consumer, and off-chain reputation mapping to
+//! learn about an oracle-side delay none of them act on. The flag gates
+//! nothing — `resolve_fx_shortfall` still enforces staleness itself — so
+//! its worst-case failure is a misleading display, never a wrong payout.
+//!
 //! **Storage lifetime (#98)**: every persistent fact this contract keeps —
 //! the `Commitment` struct, the allocation ledger, the oracle config, and
 //! the dispute fields (which live *inside* `Commitment`, not under
@@ -392,7 +411,7 @@ enum Tranche {
 /// On-chain state for a single escrow commitment instance.
 ///
 /// **Footprint Audit & Storage Necessity Finding**:
-/// A comprehensive review of every field in this struct confirmed that all 32
+/// A comprehensive review of every field in this struct confirmed that all 33
 /// fields are genuinely necessary in on-chain instance storage and cannot be
 /// moved off-chain or derived from events:
 /// 1. **Auth & Token Routing** (`buyer`, `cooperative`, `warehouse_operator`, `token`):
@@ -410,8 +429,14 @@ enum Tranche {
 /// 4. **Attestation & Settlement** (`delivered_quantity`, `grade_index`, `settlement_bps`):
 ///    Warehouse delivery attestation data consumed by `settle` to calculate proportional payout.
 /// 5. **Oracle/FX & Dispute State** (`fx_resolved`, `fx_adjusted_total`, `fx_shortfall_amount`,
-///    `fx_shortfall_funded`, `fx_shortfall_deadline`, `dispute_pre_status`, `dispute_deadline`):
-///    Enforces dispute freeze/recovery and bounds oracle currency adjustments.
+///    `fx_shortfall_funded`, `fx_shortfall_deadline`, `fx_quote_stale`, `dispute_pre_status`,
+///    `dispute_deadline`): Enforces dispute freeze/recovery and bounds oracle currency
+///    adjustments. `fx_quote_stale` (#1) is the one *informational* field — nothing gates
+///    on it — but it still belongs on chain: it records the outcome of a cross-contract
+///    oracle probe that only a write path can perform (a view getter that called the oracle
+///    would make every `get_commitment` poll depend on an external contract's liveness and
+///    cost), and it must persist so `get_commitment` can answer "waiting on a fresh quote"
+///    without anyone re-running the read.
 ///
 /// Furthermore, `get_commitment` returns this entire struct to off-chain indexers and `api/`.
 /// Bitfield compression was evaluated and rejected: packing booleans would break canonical
@@ -525,6 +550,16 @@ pub struct Commitment {
     /// yet another `initialize` parameter for a second deadline serving
     /// the same "give the buyer a fair chance to act" purpose.
     pub fx_shortfall_deadline: u64,
+
+    /// Set by `refresh_fx_quote_status` (#1): the most recent oracle-freshness
+    /// probe found a quote older than `oracle_config.max_age_secs`, i.e.
+    /// `resolve_fx_shortfall` is currently blocked on Reflector publishing a
+    /// fresh one. Cleared by the next probe that finds a fresh quote (and by
+    /// a successful `resolve_fx_shortfall`, so it can never linger once the
+    /// one-time resolution has run). **Informational only** — no guard reads
+    /// it; see `refresh_fx_quote_status`'s doc comment for why this is a
+    /// flag alongside `fx_resolved` rather than a distinct `Status`.
+    pub fx_quote_stale: bool,
 
     /// Set by `flag_dispute`, the status to restore on `resolve_dispute`
     /// or `expire_dispute_window`. `Status::Draft` whenever `status`
@@ -700,6 +735,7 @@ impl EscrowContract {
             fx_shortfall_amount: 0,
             fx_shortfall_funded: false,
             fx_shortfall_deadline: 0,
+            fx_quote_stale: false,
             dispute_pre_status: Status::Draft,
             dispute_deadline: 0,
         };
@@ -883,6 +919,19 @@ impl EscrowContract {
     /// Deliberately not auth-gated: it starts a clock, it doesn't move
     /// money or grant anyone anything they weren't already entitled to
     /// under the agreed terms.
+    ///
+    /// Security-reviewed on the record (#2): that reasoning holds under
+    /// adversarial timing — a third party can pick the instant the window
+    /// opens but gains nothing by it (no funds move, the deadline is
+    /// written exactly once so the clock can never be restarted or
+    /// extended, the lapse beneficiary stays the buyer, and the
+    /// cooperative always gets the full `claim_window_secs` from whenever
+    /// the window opened). The full reader audit and the pinned scenarios
+    /// live in `docs/permissionless-release-review.md` and
+    /// `contracts/escrow/tests/permissionless_release_review.rs`.
+    /// Auth-gating would add a timing veto the non-custodial design
+    /// deliberately gives nobody (PRD §4.5) while adding a liveness
+    /// dependency, not safety.
     pub fn release_advance_1(env: Env) -> Result<(), Error> {
         Self::open_tranche(&env, Tranche::One, Status::Locked, Status::Advance1Released)
     }
@@ -929,7 +978,12 @@ impl EscrowContract {
     /// CheckpointPassed -> Advance2Released. Same mechanics as
     /// `release_advance_1`, for tranche 2. Permissionless like
     /// `release_advance_1` — deliberately not auth-gated, it only starts
-    /// a clock.
+    /// a clock. The #2 security review covers both calls together (they
+    /// share `open_tranche`); see `release_advance_1`'s doc comment and
+    /// `docs/permissionless-release-review.md`. Note that tranche 2's
+    /// clock additionally cannot be pulled early at all: reaching
+    /// `CheckpointPassed` requires the warehouse operator's auth-gated
+    /// `mark_checkpoint` first.
     pub fn release_advance_2(env: Env) -> Result<(), Error> {
         Self::open_tranche(
             &env,
@@ -1294,6 +1348,12 @@ impl EscrowContract {
     /// a number, it doesn't move funds or grant anyone anything they
     /// weren't already entitled to. One-time (`FxAlreadyResolved`) —
     /// see the module doc for why re-resolving isn't allowed.
+    ///
+    /// On success, clears `fx_quote_stale` (#1): a commitment whose
+    /// resolution just ran is by definition no longer waiting on a fresh
+    /// quote. (The stale-refusal itself still can't set anything — an
+    /// invocation returning `Err` rolls back every write — which is
+    /// exactly what `refresh_fx_quote_status` exists for.)
     pub fn resolve_fx_shortfall(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         if c.status != Status::Delivered {
@@ -1336,6 +1396,7 @@ impl EscrowContract {
 
         c.fx_adjusted_total = fx_adjusted_total;
         c.fx_resolved = true;
+        c.fx_quote_stale = false;
         c.fx_shortfall_amount = shortfall;
         if shortfall > 0 {
             c.fx_shortfall_funded = false;
@@ -1345,6 +1406,78 @@ impl EscrowContract {
             // (`fx_shortfall_amount > 0 && !fx_shortfall_funded`) reads
             // naturally without a separate "or amount is zero" branch.
             c.fx_shortfall_funded = true;
+        }
+        Self::save(&env, &c);
+        Ok(())
+    }
+
+    /// Records whether settlement's FX resolution is currently blocked
+    /// on a stale oracle quote (#1) — the "waiting on a fresh quote"
+    /// signal, made readable instead of inferable only from a failed
+    /// `resolve_fx_shortfall` call.
+    ///
+    /// Why this exists as its own call: Soroban rolls back every state
+    /// write an invocation makes when it returns `Err`, so
+    /// `resolve_fx_shortfall`'s `OracleStale` refusal cannot persist any
+    /// marker of its own — by the time a caller sees that error, nothing
+    /// was recorded. This probe is the write that refusal can't be: it
+    /// runs the same staleness check and records the answer in
+    /// `Commitment::fx_quote_stale`, which `get_commitment` surfaces to
+    /// the API/indexers/UI.
+    ///
+    /// Sets the flag when the quote is stale; clears it when a fresh
+    /// quote is read — so the flag self-corrects the moment Reflector
+    /// publishes a fresh one, with no reverse transition to learn. A
+    /// missing quote (`OraclePriceUnavailable`) propagates as an error
+    /// instead of setting anything: "the oracle doesn't quote this asset
+    /// at all" is a permanent configuration gap, not "come back later",
+    /// and conflating the two would tell a watcher to wait for something
+    /// that may never arrive. Host-level failures (unreachable/crashed
+    /// oracle) likewise write nothing — same fault-injection findings as
+    /// `oracle_rate` (F1).
+    ///
+    /// The flag is **informational only**: no guard reads it, and
+    /// `resolve_fx_shortfall` still enforces staleness itself — its
+    /// worst-case failure is a misleading display, never a wrong payout.
+    /// Deliberately a boolean flag alongside `fx_resolved`, not a new
+    /// `Status` variant: "waiting on a fresh quote" is a condition on one
+    /// sub-step of settlement, not a position in the deal's lifecycle —
+    /// the commitment is still `Delivered`, and a new variant would force
+    /// every status-matching guard, `StatusChanged` consumer, and
+    /// off-chain reputation mapping to learn about an oracle-side delay
+    /// none of them act on. (A new variant is also technically barred in
+    /// a subtler way than the churn: the dispute mechanism restores an
+    /// arbitrary pre-dispute `Status`, and every additional variant is
+    /// one more restore target the freeze/resume pair would have to
+    /// reason about.) The lighter option issue #1 named, with none of
+    /// the state-machine complexity it asked about.
+    ///
+    /// Permissionless — no auth required, same reasoning as
+    /// `resolve_fx_shortfall`: it records an oracle fact, moves nothing,
+    /// grants nothing, and takes no outcome parameter (the answer is
+    /// whatever the configured oracle says). Refuses with `InvalidState`
+    /// outside `Delivered` (the only status in which the flag can
+    /// matter), `OracleNotConfigured` when this commitment needs no
+    /// conversion, and `FxAlreadyResolved` once the one-time resolution
+    /// has run — there is nothing left to wait for.
+    pub fn refresh_fx_quote_status(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        let oracle_config: OracleConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleConfig)
+            .ok_or(Error::OracleNotConfigured)?;
+
+        match Self::read_oracle_rate(&env, &oracle_config) {
+            Ok(_) => c.fx_quote_stale = false,
+            Err(Error::OracleStale) => c.fx_quote_stale = true,
+            Err(e) => return Err(e),
         }
         Self::save(&env, &c);
         Ok(())

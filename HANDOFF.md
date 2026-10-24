@@ -141,7 +141,7 @@ being created in `Draft` is an initial state, not a transition into one.
 This is the primitive `api/`'s read-triggered cache refresh has been
 waiting for; shipped contract-side only, no consumer exists yet.
 
-Tests (**194 passing: 159 in `src/test.rs`, 35 across `tests/`** — see the
+Tests (**210 passing: 164 in `src/test.rs`, 46 across `tests/`** — see the
 "Last updated"
 entry for the count's history) cover, beyond last session's set: `lock` escrows
 only the deposit, not the full total; `ready_for_delivery` opens the window
@@ -517,7 +517,81 @@ staged multi-party HTTP layer (see its own HANDOFF.md) rather than raw
 Soroban auth entries in one invocation, and this project already built
 exactly that mechanism for `reassign_buyer`.
 
-**All ten deployed/uploaded instances are validation artifacts, not
+**Deployment 11** (this session, 20 Oct 2026) — WASM hash
+`e097f1ffe08f878007cd9511d5fc70da0e238ac64491181e158d58f91e4714c5`
+(60,043 bytes, 29 exported functions — no new functions; this was a
+**measurement** deployment, not a feature one). Uploaded via `stellar
+contract install`; four instances deployed
+(`CCTQTECYATFFE3GJWYSND6CJOGB6KLGSF3JKK5KW3HRBNTKLFBFJEUWJ` for the
+walk-through, `CDG2V5HIJ5KJS6D3QK4VI4NRCRVUZYHHZQWYSONULUKQYJMOPFDBWAQ7`
+and `CBTFFKL24HYNUUG4K26FBB3B47T5KROWR3FTMBH4SST5NA3NCT5IFATV` as
+controls, and
+`CDKP2KUIDUJ4MS3G4GDS372BK3HMRZZEMJGM4C5GULTGAISI2FFGZAXK` as an
+independent reproduction of the `confirm_delivery` figure). The point of
+the deployment: the delivery-group methods
+(`mark_checkpoint`, `confirm_delivery`) had **never had a systematic
+resource-cost pass** — only correctness testing — so this session measured
+them with
+[`soroban-cost-estimator`](https://github.com/Stellar-Cost-Labs/soroban-cost-estimator)
+against the deployed instances and wrote the numbers up in
+[`docs/gas-costs.md`](./docs/gas-costs.md). The same WASM is what the
+dependabot SDK bump to 29.0.1 (19 Oct 2026) produces at this HEAD.
+
+Walked through on real testnet transactions against the real native-XLM SAC,
+100,000,000 stroops, 15%/20% advance split, `contracted_quantity: 1000`,
+`grade_price_bps: [10000, 9000, 7500]`:
+
+1. `lock` (35,000,000 deposit), `release_advance_1`, then **`mark_checkpoint`**
+   by the warehouse operator — status genuinely flipped to `CheckpointPassed`.
+2. `release_advance_2`, `claim_advance_1` (15,000,000 to the cooperative),
+   `claim_advance_2` (20,000,000), `ready_for_delivery` (cooperative),
+   `fund_remainder` (65,000,000 from the buyer).
+3. **`confirm_delivery`** by the warehouse operator with `delivered_quantity:
+   1000`, `grade_index: 0` — a fresh `get_commitment` read afterwards shows
+   `status: Delivered`, `delivered_quantity: 1000`, `grade_index: 0`,
+   `settlement_bps: 10000`, `remainder_funded: true`. Full delivery at the
+   top grade, so the arithmetic path really ran rather than erroring out.
+
+Measured resource costs (protocol 29, ledgers ~5290578–5290808), all against
+the deployed instances, not a local harness:
+
+| Method | CPU insns | Read/write entries | Fee non-refundable | Fee total (simulated) | Fee charged (real) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `mark_checkpoint` | 1,523,347 | 2 / 2 | 4,579 | 906,370 | 4,181 |
+| `confirm_delivery` | 1,530,217 | 2 / 2 | 4,584 | 906,976 | 4,242 |
+
+Two findings worth keeping:
+
+- **The auth-gated calls are the expensive ones, not the ones that move
+  money.** `mark_checkpoint`/`confirm_delivery` move *zero* stroops and
+  still cost ~1.52M CPU instructions — ~53% more than the permissionless
+  `release_advance_1` (996,645 on the same build, same instance) and within
+  9% of `claim_advance_1` (1,671,867), which *does* move 15,000,000 stroops.
+  The delta appears only on the auth-gated path: one extra read entry, one
+  extra write entry, ~527k CPU instructions. Not a defect — a fact worth
+  knowing before anyone assumes "cheap call" means "cheap".
+- **99.5% of the estimator's `Fee (total)` is simulated storage rent, not
+  execution.** The real submissions were charged 4,181 and 4,242 stroops
+  total (see `docs/gas-costs.md`'s CLI cross-check). Budget off the
+  non-refundable column, not the total.
+
+**A real upstream tooling limitation surfaced here**, and is documented in
+full in [`docs/gas-costs.md`](./docs/gas-costs.md#tooling-finding--soroban-cost-estimator-v010-cannot-encode-a-u32-argument):
+`soroban-cost-estimator` v0.1.0's `--arg` infers an argument's type from the
+literal alone (`parse_arg_scval` → `ScVal::I64` for any integer), ignoring the
+contract spec it has already parsed. `confirm_delivery` takes two `u32`
+parameters, so the stock binary cannot invoke it at all — the host aborts with
+`Error(WasmVm, InvalidAction)` / `VM call trapped: UnreachableCodeReached`
+before the contract body runs. Upstream `main` (commit `9627919`) has the
+same defect: it adds `validate_args_against_spec`, which *accepts* `1000` for
+a `u32` parameter, and then still encodes it as `ScVal::I64`. The measurement
+above used a two-hunk patch to v0.1.0 that encodes `--arg` values with the
+spec's declared type; the patch touches only argument encoding, and was
+verified to leave every measured value byte-identical on the zero-argument
+path. **Worth reporting upstream** — it blocks the tool for any contract
+with a `u32`/`i32`/`u64` parameter, which is most of them.
+
+**All eleven deployments' instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -572,6 +646,16 @@ so nobody "fixes" them without knowing what they're trading off.
    today (this session's tests use GBP) and activates for NGN
    automatically the day Reflector adds it — no code change needed,
    just a different `price_asset` string at `initialize`.
+   **#1's "waiting on a fresh quote" signal is now built**: a stale
+   quote still refuses `resolve_fx_shortfall` outright, and since a
+   Soroban invocation returning `Err` rolls back every write, that
+   refusal can't record why — so the new permissionless probe
+   `refresh_fx_quote_status` records the answer in the new
+   `Commitment::fx_quote_stale` flag, which `get_commitment` surfaces.
+   Deliberately a boolean flag alongside `fx_resolved`, not a distinct
+   `Status` variant (it's a condition on one settlement sub-step, not a
+   position in the deal's lifecycle), and informational only — no guard
+   reads it, `resolve_fx_shortfall` still enforces staleness itself.
 4. ~~No allocation ledger.~~ **Built** (Deployment 7, 4 Sept 2026, see
    above): `set_allocation`/`get_allocation`, per-member salted hashes,
    record-only (PRD §4.9 Rung 1, the v1 default, not a deferred
@@ -590,8 +674,22 @@ so nobody "fixes" them without knowing what they're trading off.
    as it always could — this was never a security boundary, just the
    right layer for a business-judgment default.
 6. **`release_advance_1`/`release_advance_2` remain not auth-gated** (see
-   "Design decisions" — this is deliberate, not new this session, but
-   still worth a security reviewer's attention on sight).
+   "Design decisions" — this is deliberate, not new this session).
+   **Reviewed on the record (#2)**: `docs/permissionless-release-review.md`
+   stress-tests the adversarial-timing scenarios this note used to flag
+   (early clock-start griefing, restart/extension, every downstream
+   reader of the two deadline fields, dispute-freeze interaction) and
+   concludes the permissionless shape holds — recorded confirmation, not
+   a code change to the auth shape. Every claim in that review is pinned
+   by the dedicated suite
+   `contracts/escrow/tests/permissionless_release_review.rs` (own CI
+   job), including the issue's end-to-end third-party griefing scenario.
+   If a deployment ever needs a *minimum* time before a tranche may
+   open, the review's own answer is a term fixed at `initialize` (a new
+   eligibility condition both parties can see), not a signature gate —
+   the latter would create a timing veto the non-custodial design
+   deliberately gives nobody (PRD §4.5) while adding a liveness
+   dependency, not safety.
 
 ## Design decisions worth knowing before you change anything
 
@@ -842,7 +940,158 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 17 Oct 2026 — #63, the Reflector `decimals()` question:
+*Last updated: 21 Oct 2026 — four-issue bundle (#52–#55): coverage
+verification, one genuine gap closed. **No contract code changed.**
+Honest either-way checks first — a repo-wide search of `src/test.rs` (and
+the `tests/` suites) for the relevant method names found three of the
+four scenarios already covered, so those got a doc comment naming the
+existing test instead of a duplicate: #52 (`cancel()` after the remainder
+is funded but before `Delivered`, already pinned by
+`cancel_still_works_from_ready_for_delivery_including_the_already_funded_remainder`),
+#54 (`set_allocation()` after `lock()`, already pinned by
+`cannot_set_allocation_after_lock`), and #55 (`resolve_fx_shortfall()`
+with no `oracle_config` ever set at `initialize`, already pinned by
+`resolve_fx_shortfall_requires_oracle_configured`). The fourth was a
+real gap: no test anywhere flags a *second*, different dispute on the
+same commitment after the first was resolved (#53) — the nearest
+neighbors only reject a second flag *while still* `Disputed`
+(`flag_dispute_rejects_a_second_flag`) or run a single dispute round
+(`kitchen_sink_all_optional_features_on_one_commitment`). Added
+`second_dispute_on_the_same_commitment_is_flagged_and_resolved_later_in_its_lifecycle`:
+two dispute rounds on one commitment — the buyer from `Locked`, then the
+warehouse from `ReadyForDelivery` with the remainder funded — each
+asserting the round's recorded `dispute_pre_status`, the cleared
+`dispute_deadline` and reset `dispute_pre_status` after
+`resolve_dispute`, and the lifecycle continuing past the second freeze
+all the way to `Delivered`. Snapshot policy as recorded below: the new
+test's snapshot left untracked, and the tracked files a local re-run
+re-recorded (protocol 28→29, `fx_quote_stale`, `live_until` drift)
+restored to HEAD rather than committed. Measured: **214 tests passing** —
+168 in `src/test.rs` (1 new), 46 across `tests/` unchanged (7
+`address_equality`, 12 `deadline_boundary`, 13 `oracle_fault_injection`,
+10 `permissionless_release_review`, 4 `snapshot_replay`); `cargo fmt
+--check` and both guard scripts green at this HEAD.
+
+Prior entry: 20 Oct 2026 (later) — four-issue bundle (#56–#59): two
+genuine test gaps closed, two CI supply-chain gates added. **No contract
+code changed.** Honest either-way checks first: a repo-wide search found
+**no** existing test for either named scenario, so both were added rather
+than answered with a comment: `cannot_confirm_delivery_twice` (#56) — a
+second `confirm_delivery()` on the same commitment is refused by the
+`ReadyForDelivery` guard with `InvalidState`, proven with a retry carrying
+deliberately different, otherwise-valid quantity/grade arguments that must
+leave the first call's recorded `delivered_quantity`/`grade_index` /
+`settlement_bps` untouched; and
+`claim_advance_1_rejects_the_buyer_as_signer` (#57) — under `mock_auths`
+(the #138–#141 technique, the only way to observe rejection rather than
+merely that an auth exists) the buyer's own signature cannot satisfy
+`claim_tranche`'s `cooperative.require_auth()`, nothing is claimed or
+moved by the refused attempt, and the cooperative's own signature then
+completes the same claim. CI (`.github/workflows/test.yml`): a new
+`cargo audit` job (#58) checks every Cargo.lock crate against the RustSec
+advisory database on every push/PR — green, the one known finding
+(`paste`, RUSTSEC-2024-0436, unmaintained, transitive via
+soroban-env-host) prints as an allowed warning and is already recorded in
+deny.toml's `[advisories].ignore` — and `cargo deny check licenses` now
+runs as its own step in the existing cargo-deny job (#59) against a new
+explicit `[licenses].allow` list in `deny.toml`; that check's first run
+surfaced a real finding, `wasmparser`/`wasmparser-nostd` (both via
+soroban-env-host) under `Apache-2.0 WITH LLVM-exception`, triaged in
+deliberately as permissive (no copyleft) rather than silenced. Measured:
+**213 tests passing** — 167 in `src/test.rs` (2 new), 46 across `tests/`
+unchanged; `cargo fmt --check`, `cargo deny check licenses advisories
+bans`, `cargo audit`, and both guard scripts green at this HEAD.
+
+Prior entry: 20 Oct 2026 — the delivery group's resource-cost pass:
+`mark_checkpoint` and `confirm_delivery` measured for the first time, on a
+deployed testnet instance, with
+[`soroban-cost-estimator`](https://github.com/Stellar-Cost-Labs/soroban-cost-estimator).
+**Docs only — no contract code changed, no test added or removed.** The
+measured baseline is now **211 tests passing** (measured, not carried over:
+165 in `src/test.rs`, 46 across `tests/` — 7 `address_equality`, 12
+`deadline_boundary`, 13 `oracle_fault_injection`, 10
+`permissionless_release_review`, 4 `snapshot_replay`). `cargo fmt --check`,
+the two guard scripts (discriminants 1..38 sequential; all 30 public
+methods' doc comments name their auth party) and the repo's advisory clippy
+invocation are all green at this HEAD.
+
+What was measured, and what it found (full write-up, with reproduce steps
+and the CLI cross-check, in [`docs/gas-costs.md`](./docs/gas-costs.md)):
+
+- `mark_checkpoint` — 1,523,347 CPU instructions, 2 read / 2 write entries,
+  4,579 non-refundable stroops, 906,370 total simulated.
+- `confirm_delivery` — 1,530,217 CPU instructions, 2 read / 2 write entries,
+  4,584 non-refundable stroops, 906,976 total simulated. Real submitted
+  transactions were charged 4,181 and 4,242 stroops respectively — 99.5% of
+  the estimator's "total" is simulated storage rent, not execution.
+- **The auth-gated calls are the expensive ones, not the money-moving
+  ones.** Both calls move zero stroops and still cost ~53% more CPU than
+  the permissionless `release_advance_1` (996,645 on the same build, same
+  instance, same balance) and within 9% of `claim_advance_1` (1,671,867),
+  which does move 15,000,000 stroops. The delta appears only on the
+  auth-gated path — one extra read entry, one extra write entry, ~527k CPU
+  instructions. Worth knowing before anyone reads "cheap call" as "cheap".
+- A **real upstream tooling limitation**, documented in full in
+  `docs/gas-costs.md`: `soroban-cost-estimator` v0.1.0's `--arg` infers an
+  argument's type from the literal alone (`ScVal::I64` for any integer),
+  ignoring the contract spec it has already parsed — so it cannot invoke
+  any contract with a `u32`/`i32`/`u64` parameter at all. `confirm_delivery`
+  takes two `u32`s, so the stock binary aborts with
+  `Error(WasmVm, InvalidAction)` before the contract body runs. Upstream
+  `main` (commit `9627919`) has the same defect. The measurement used a
+  two-hunk patch that encodes `--arg` with the spec's declared type; the
+  patch touches argument encoding only and was verified to leave every
+  measured value byte-identical on the zero-argument path. **Worth
+  reporting upstream.**
+- Deployment 11 (this session): WASM hash `e097f1ff…`, 60,043 bytes, four
+  instances, all validation artifacts — see "Verified on testnet" above.
+
+Prior entry: 17 Oct 2026 (later) — issues **#1** and **#2**, one new
+contract call plus a written security review. 210 tests total, measured:
+164 in `src/test.rs` (6 new), 46 across `tests/` (7 `address_equality`,
+12 `deadline_boundary`, 13 `oracle_fault_injection`, 10 new
+`permissionless_release_review`, 4 `snapshot_replay`). **#1 — the
+"waiting on a fresh quote" signal**: a Soroban invocation returning
+`Err` rolls back every write, so `resolve_fx_shortfall`'s `OracleStale`
+could never persist a marker of why settlement is stuck. New
+permissionless `refresh_fx_quote_status` runs the same staleness check
+and records the answer in the new `Commitment::fx_quote_stale` (struct
+field 33), which `get_commitment` surfaces; a fresh probe clears it, and
+so does a successful `resolve_fx_shortfall`, so it can't linger past
+resolution. A *missing* quote propagates as an error rather than setting
+anything — "never quoted at all" is a config gap, not "come back later."
+Refuses `InvalidState` outside `Delivered`, `OracleNotConfigured`,
+`FxAlreadyResolved`. Deliberately a boolean alongside `fx_resolved`,
+not a `Status` variant (a condition on one settlement sub-step, not a
+lifecycle position — plus every extra variant is one more restore target
+the dispute freeze/resume pair would need to reason about);
+informational only, no guard reads it, worst case is a misleading
+display. 6 new tests in `src/test.rs`, none removed — measured lib
+total 164, which corrects the prior entries' 159/156 by one (the
+count line above is the measured one). **#2 — permissionless
+release review, on the record**: `docs/permissionless-release-review.md`
+pins the verdict that `release_advance_1/2` stay permissionless (no auth
+gate added): clock written exactly once, no funds move, lapse beneficiary
+is always the buyer, cooperative always gets the full
+`claim_window_secs` from whenever the window opened — with "what would
+change the verdict" spelled out (a term fixed at `initialize`, not a
+signature gate). Every claim is pinned by the new 10-test suite
+`contracts/escrow/tests/permissionless_release_review.rs`, given its own
+CI job in `.github/workflows/test.yml`, including the issue's
+end-to-end third-party griefing scenario. Doc comments on both calls
+updated to state the review's conclusion; `docs/authorization-matrix.md`
+(29 → 30 public functions, 7 → 8 permissionless, new row) and
+`docs/threat-model.md` (§21 reworded with the #2 suite named, roles
+table updated) brought in line; `docs/ts-bindings-comparison.md` stopped
+citing a now-drifting field count. Guard scripts re-run green after the
+new method: discriminants 1..38 sequential, auth docs cover all 30
+public methods. Snapshots: the record-only convention applied harder
+this session — the new suites' snapshots are untracked and the 136
+tracked files that a local re-run re-recorded (the new `fx_quote_stale`
+field, `live_until` drift) were restored to HEAD rather than committed,
+same reasoning as the prior entries below.
+
+Prior entry: 17 Oct 2026 — #63, the Reflector `decimals()` question:
 documented finding plus one test, no contract behavior changed. `oracle_rate()`
 performs *no* conversion math — it returns the raw `price` from `lastprice`
 and never calls the oracle's `decimals()` — so a change to Reflector's
