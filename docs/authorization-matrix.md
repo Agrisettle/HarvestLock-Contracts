@@ -18,8 +18,8 @@ full matrix.
 
 ## TL;DR
 
-- 29 public functions, 5 authorization shapes, **zero un-gated
-  fund-moving paths**: 13 single-party gates, 7 permissionless state
+- 30 public functions, 5 authorization shapes, **zero un-gated
+  fund-moving paths**: 13 single-party gates, 8 permissionless state
   changes, 3 multi-party mutual actions, 1 caller-authenticated flag,
   5 no-auth views.
 - **Permissionless is deliberate, and safe by construction** — a
@@ -61,6 +61,7 @@ calls no `require_auth()` at all.
 | `confirm_delivery` | **Warehouse operator** | §4.1/§4.5 — the operator is the independent delivery oracle; "release requires buyer plus warehouse-operator attestation". |
 | `settle` | **Permissionless** | §4.1 — conditional release executes pre-agreed math on already-recorded state; nobody (not even the buyer) can withhold it once conditions are met. This is what "no unilateral drain" actually buys. |
 | `resolve_fx_shortfall` | **Permissionless** | §4.2 option (b)/§16.3 — a one-time comparison of escrowed-vs-converted obligation; deterministic on the oracle read. |
+| `refresh_fx_quote_status` | **Permissionless** | #1 — records the answer of the same staleness check (`Commitment::fx_quote_stale`, the "waiting on a fresh quote" signal). Informational only: takes no outcome parameter, moves nothing, and no guard reads the flag back. |
 | `fund_fx_shortfall` | **Buyer** | §4.2 option (b) — "buyer tops up" at settlement when the rate moved. Fund-mover, correctly gated to the payer. |
 | `expire_fx_shortfall_window` | **Permissionless** | Buyer-default path if the top-up never funds; same uncontested deadline logic as `expire_remainder_window`. |
 | `cancel` | **Buyer + cooperative** | Edge table — "Mutual cancellation: defined unwind… no penalty, logged". Mutual by definition, both signatures required. |
@@ -82,12 +83,15 @@ that address signs once (tests: `cancel_succeeds_when_buyer_and_cooperative_shar
 
 ## 2. Why "permissionless" is safe here, not sloppy
 
-The seven permissionless functions share one property, and it is worth
+The eight permissionless functions share one property, and it is worth
 stating as an invariant a reviewer can check each against: **the call can
 only complete a fact the deal already fixed at lock-in.**
 
 - `release_advance_1/2` move nothing — they timestamp a claim window
-  that the state machine already defined.
+  that the state machine already defined. (Security-reviewed on the
+  record in [permissionless-release-review.md](./permissionless-release-review.md),
+  #2, with the adversarial-timing scenarios pinned by
+  `tests/permissionless_release_review.rs`.)
 - `expire_remainder_window` / `expire_fx_shortfall_window` execute a
   deadline the buyer's own funding behavior decided. Waiting for the
   *other* side to call the buyer-default path would hand the defaulting
@@ -98,6 +102,10 @@ only complete a fact the deal already fixed at lock-in.**
 - `resolve_fx_shortfall` is one-time and deterministic on the oracle
   read; re-resolving isn't allowed (`FxAlreadyResolved`), so timing of
   the call buys nobody anything.
+- `refresh_fx_quote_status` merely records what a fresh oracle read
+  said (the #1 "waiting on a fresh quote" flag); no outcome parameter,
+  no guard reads the flag, and the worst a wrong flag can do is mislead
+  a display.
 - `expire_dispute_window` restores exactly the pre-dispute status — it
   cannot decide anything the parties hadn't already agreed.
 

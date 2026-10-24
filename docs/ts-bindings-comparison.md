@@ -104,7 +104,7 @@ Both are the same deeper failure mode: **a hand-written encoder is a
 copy of the contract's ABI that nothing mechanically keeps in sync.**
 Its failure surfaces at transaction-simulation time on a deployed
 instance, not at compile time. The generated bindings are that copy,
-generated — plus typed read results (`Commitment` with all 32 fields,
+generated — plus typed read results (`Commitment` with all fields,
 `Status`, the error enum with doc comments), which covers the second
 half of the same problem: the app's `Commitment` interface has already
 gone stale once behind a contract change (the 5 FX fields, fixed by hand

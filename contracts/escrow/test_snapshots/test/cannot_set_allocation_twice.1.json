@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "df18c861a2d6b9e2bc0907ab9a2a5d46c366b6d1d51450aeceed3b5032f30cbf"
+                            "bytes": "c898f1e7e22edcbd95f959d793bea790ef1530d695e475d1c5979ad8e2208883"
                           }
                         },
                         {
@@ -154,7 +154,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 28,
+    "protocol_version": 29,
     "sequence_number": 0,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -296,7 +296,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "df18c861a2d6b9e2bc0907ab9a2a5d46c366b6d1d51450aeceed3b5032f30cbf"
+                                  "bytes": "c898f1e7e22edcbd95f959d793bea790ef1530d695e475d1c5979ad8e2208883"
                                 }
                               },
                               {
@@ -472,6 +472,14 @@
                           },
                           {
                             "key": {
+                              "symbol": "fx_quote_stale"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "fx_resolved"
                             },
                             "val": {
@@ -606,7 +614,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 6311999
       },
       {
         "entry": {
@@ -775,7 +783,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 6311999
       }
     ]
   },

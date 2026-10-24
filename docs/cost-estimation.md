@@ -110,6 +110,19 @@ snapshots).
    tool — it avoids a fresh supply-chain dependency for what is largely the same
    RPC payload.
 
+   **Update (20 Oct 2026), after using it for real:** a second, concrete
+   reason not to depend on it. The estimator's `--arg` infers an argument's
+   type from the literal alone (`ScVal::I64` for any integer), ignoring the
+   contract spec it has already parsed — so v0.1.0 **cannot invoke any
+   contract with a `u32`/`i32`/`u64` parameter at all**, and upstream `main`
+   has the same defect. `confirm_delivery` takes two `u32`s, so the stock
+   binary aborts with `Error(WasmVm, InvalidAction)` before the contract
+   body runs. The measurement in [`gas-costs.md`](./gas-costs.md) therefore
+   needed a small source patch to the tool, which is a poor thing to have to
+   repeat for every future contract we measure. The CLI's `--cost` has no
+   such limitation. See
+   [`gas-costs.md`'s tooling finding](./gas-costs.md#tooling-finding--soroban-cost-estimator-v010-cannot-encode-a-u32-argument).
+
 Net: the CLI makes the external tool **partially** redundant (its measurement
 role), not wholly. Its fee-conversion and snapshot-trending layers remain
 genuinely additive and worth keeping available for the budgeting/trending use

@@ -10,12 +10,7 @@ regardless, not through a public issue.
 
 ## Reporting a vulnerability
 
-Two private channels:
-
-**GitHub private vulnerability reporting** — open the repo's
-[Security tab](https://github.com/Agrisettle/HarvestLock-Contracts/security)
-and use "Report a vulnerability". Lower friction than email, and the
-report stays attached to this repo, visible only to the maintainers.
+Two private channels, both read by the project maintainer:
 
 **Email samuelojetunde898@gmail.com** with:
 
@@ -29,8 +24,17 @@ report stays attached to this repo, visible only to the maintainers.
   shortfall/grade adjustment or the advance-tranche accounting are the
   parts with the most arithmetic to get wrong)
 
+**GitHub private vulnerability reporting** — if the repo's
+[Security tab](https://github.com/Agrisettle/HarvestLock-Contracts/security)
+shows a "Report a vulnerability" button, that's the lower-friction
+option: the report stays attached to this repo, visible only to the
+maintainers. The button only appears once private vulnerability
+reporting has been enabled for the repo — an admin-only setting — and
+it isn't enabled here yet, so use email until it is.
+
 There's no bug-bounty program yet — this is a two-person team pre-pilot.
-You'll get a human reply, not an automated one.
+You'll get a human reply, not an automated one, and a rough sense of
+timeline once the report's been read.
 
 **Please don't open a public GitHub issue for a suspected vulnerability**
 until it's been triaged privately first — same policy across every repo

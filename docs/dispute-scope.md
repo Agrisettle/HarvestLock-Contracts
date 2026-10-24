@@ -83,9 +83,16 @@ on testnet:
 | `expire_dispute_window()` | **Anyone** (deliberately permissionless), once `dispute_deadline` has passed | Same restore as `resolve_dispute`. Exists so one party refusing to consent can't freeze the commitment forever. |
 
 The freeze works by construction, not by a blocklist: every other
-state-changing function matches a specific required status (or set of
+*status-gated* function matches a specific required status (or set of
 statuses), and `Disputed` is never among them, so while a commitment is
-`Disputed` nothing else can move it. `resolve` / `expire` restore
+`Disputed` none of them can move it. One deliberate exception is worth
+stating because "nothing else can move" would be literally false:
+`claim_advance_1/2` and `reclaim_advance_1/2` never check `status` —
+`claim_tranche` / `reclaim_tranche` guard only the tranche deadline, the
+one-shot flags, and the party's auth. A dispute therefore does **not**
+block a claim or a reclaim, and cannot be used to protect a tranche from
+the other side. See [`dispute-frontrunning.md`](./dispute-frontrunning.md)
+§2 for why that matters. `resolve` / `expire` restore
 *exactly* the status recorded at flag time — if the off-chain resolution is
 "unwind the deal," the parties call the existing `cancel()` next, same as
 they would have without ever disputing.
@@ -134,6 +141,12 @@ unneeded complexity for a mechanism nobody has used yet.
   user "your position is safe while disputed" must account for the known
   limitation in §2: other deadlines keep ticking. If a real dispute ever
   collides with one, revisit deadline-shifting then — not speculatively now.
+- **A dispute is a delay, not a free option.** `flag_dispute` costs one
+  transaction, carries no bond or reputation event, and can be repeated
+  immediately after `expire_dispute_window`. The full incentive analysis
+  is in [`dispute-stalling.md`](./dispute-stalling.md); the races it
+  participates in are in
+  [`dispute-frontrunning.md`](./dispute-frontrunning.md).
 - **The arbitration-key question is still open, and still not this
   contract's to answer.** If PRD question 06 is ever answered with "party X
   holds a tiebreak key," that key belongs in custody/off-chain procedure
