@@ -27,7 +27,35 @@ silently reconciling it.
 
 - Rust `1.97.1`, target `wasm32v1-none` already installed (this is the
   current recommended Soroban target, not the older `wasm32-unknown-unknown`
-  — don't "fix" this back).
+  — don't "fix" this back). **Now pinned in `rust-toolchain.toml`** at the
+  repo root — `channel = "1.97.1"`, `targets = ["wasm32v1-none"]`,
+  `components = ["rustfmt", "clippy"]` — so the version that produces a WASM
+  hash no longer depends on whichever `stable` a machine has that week
+  (`docs/versioning.md` makes that hash the identity of a version, and CI's
+  reproducibility check only compares two builds on the *same* runner).
+  rustup applies the file to every `cargo`/`rustc` call under this tree,
+  including CI's, which means the workflows' `dtolnay/rust-toolchain@stable`
+  steps install `stable` but `cargo` still resolves `1.97.1` — a real change
+  to what CI builds with, recorded for maintainers in
+  `docs/dev-setup-troubleshooting.md`.
+- **WASM hash under the pin:**
+  `e9416ded5455583485205120e184ac292f02f1f378e2e7b4d329cde85dd1daa5`,
+  60,039 bytes, produced by `stellar contract build --locked` with `rustc
+  1.97.1` / `stellar-cli 30.0.1`. Two consecutive clean builds (second one
+  after `rm -rf target`) produced the identical hash. This is a *build*
+  identity only: nothing was uploaded, so under `docs/versioning.md` §2 it
+  mints no version — it would be a PATCH-class rebuild of `0.9.1` the day it
+  ships. It is not Deployment 11's `e097f1ff…` (60,043 bytes); the bytes
+  differ because the compiler differs, with no contract source change.
+- Full suite under the pin: **225 tests passing** (169 in `src/test.rs`, 56
+  across `tests/` — 7 `address_equality`, 12 `deadline_boundary`, 13
+  `oracle_fault_injection`, 10 `permissionless_release_review`, 4
+  `snapshot_replay`, 10 `window_overflow`), `cargo fmt --check` clean.
+  `cargo clippy --all-targets -- -D warnings` is *not* clean and was never
+  green: five `clippy::too_many_arguments` warnings on the contract entry
+  points (13–14 args against a threshold of 7). Not a regression from the
+  pin, and CI doesn't run Clippy — recorded in
+  `docs/dev-setup-troubleshooting.md` rather than silenced.
 - `soroban-sdk = "28.0.0"` — bumped from `27.0.6` (itself resolved via
   `cargo add`, not hand-picked) by dependabot in PR #5, 14 Oct 2026, with
   both CI jobs green. Don't downgrade without a reason; don't upgrade
@@ -940,7 +968,35 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 21 Oct 2026 — four-issue bundle (#52–#55): coverage
+*Last updated: 20 Nov 2026 — pinned the toolchain: new root
+`rust-toolchain.toml` (`channel = "1.97.1"`, `targets =
+["wasm32v1-none"]`, `components = ["rustfmt", "clippy"]`). **No contract
+code changed, no test added or removed.** The problem it closes: the WASM
+hash is the canonical identity of a version, and it was being produced by
+whichever `stable` the machine had, so CI's two-build reproducibility check
+guaranteed only same-runner consistency, not reproducibility across time.
+Verified under the pin, not assumed: `cargo fmt --check` clean, **225 tests
+passing** (169 unit + 56 integration across the six suites), `stellar
+contract build --locked` green twice from a clean `target/` with an
+identical hash — `e9416ded5455583485205120e184ac292f02f1f378e2e7b4d329cde85dd1daa5`,
+60,039 bytes, `rustc 1.97.1` / `stellar-cli 30.0.1` — recorded in the
+toolchain section above. Nothing was uploaded, so per `docs/versioning.md`
+no version is minted. `docs/dev-setup-troubleshooting.md` gained the
+"pinned toolchain" section: why the file exists, how to confirm
+(`rustup show`), how to bump it, and the CI consequence maintainers need
+to know — the workflows still say `dtolnay/rust-toolchain@stable`, but
+rustup applies the toolchain file, so `cargo` now resolves `1.97.1`
+regardless (and the build job's `targets:` input installs the wasm target
+for `stable`, while the pin gets its target from the file). Workflow files
+were deliberately left untouched (maintainer-managed). The repo's malware
+scanner classifies `rust-toolchain.toml` as a sensitive path (it "changes
+CI, review, deploy or build configuration"), which is a WARN — logged on
+the PR, not a merge hold, per `auto-merge.yml`'s own exit-code table.
+Clippy recorded honestly: five
+`too_many_arguments` warnings on contract entry points, pre-existing and
+not CI-gated.
+
+Prior entry: 21 Oct 2026 — four-issue bundle (#52–#55): coverage
 verification, one genuine gap closed. **No contract code changed.**
 Honest either-way checks first — a repo-wide search of `src/test.rs` (and
 the `tests/` suites) for the relevant method names found three of the

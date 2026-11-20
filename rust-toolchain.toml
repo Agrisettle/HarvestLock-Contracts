@@ -1,0 +1,9 @@
+# Pinned deliberately: the WASM hash is the canonical identity of a version
+# (docs/versioning.md §1), so the compiler that produces it has to be the same
+# one everywhere. Bump this in its own PR, re-record the hash, and re-run the
+# full suite — never as a side effect of another change. See
+# docs/dev-setup-troubleshooting.md.
+[toolchain]
+channel = "1.97.1"
+targets = ["wasm32v1-none"]
+components = ["rustfmt", "clippy"]
