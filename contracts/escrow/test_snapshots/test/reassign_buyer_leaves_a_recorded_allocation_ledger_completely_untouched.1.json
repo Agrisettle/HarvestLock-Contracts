@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "984869f573b42774dd264baf3164700d300da5a4678b67b10d258547439de4f9"
+                            "bytes": "868c7b891683ee2fc6aa5c9c2cbe5ead8a1599abe523c6c5fb1e0cff0e035b40"
                           }
                         },
                         {
@@ -149,7 +149,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "a7a580438a1ed57b254d0e9f89c9791dcb2d0659ae133d8cfbfb0285f97fece6"
+                            "bytes": "8aa19310560b499b6c99ad564ea070b18626b3ec401d40f279b9b84e2c6f6cb1"
                           }
                         },
                         {
@@ -283,7 +283,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 28,
+    "protocol_version": 29,
     "sequence_number": 0,
     "timestamp": 604801,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -485,7 +485,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "984869f573b42774dd264baf3164700d300da5a4678b67b10d258547439de4f9"
+                                  "bytes": "868c7b891683ee2fc6aa5c9c2cbe5ead8a1599abe523c6c5fb1e0cff0e035b40"
                                 }
                               },
                               {
@@ -505,7 +505,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "a7a580438a1ed57b254d0e9f89c9791dcb2d0659ae133d8cfbfb0285f97fece6"
+                                  "bytes": "8aa19310560b499b6c99ad564ea070b18626b3ec401d40f279b9b84e2c6f6cb1"
                                 }
                               },
                               {
@@ -681,6 +681,14 @@
                           },
                           {
                             "key": {
+                              "symbol": "fx_quote_stale"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "fx_resolved"
                             },
                             "val": {
@@ -815,7 +823,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 6311999
       },
       {
         "entry": {
@@ -1128,7 +1136,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 4095
+        "live_until": 6311999
       }
     ]
   },
