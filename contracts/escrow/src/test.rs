@@ -1,9 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::testutils::{
-    Address as _, BytesN as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke,
-};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{xdr, Env, Event as _, IntoVal, Val};
 
 const WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days, arbitrary but realistic
@@ -478,8 +476,10 @@ fn lock_transfers_only_the_deposit_not_the_full_total() {
 // ---------- allocation ledger (record-only, PRD §4.9 Rung 1) ----------
 
 fn member(env: &Env, share_bps: u32) -> AllocationMember {
+    let mut member_hash = [0; 32];
+    member_hash[..4].copy_from_slice(&share_bps.to_be_bytes());
     AllocationMember {
-        member_hash: BytesN::random(env),
+        member_hash: BytesN::from_array(env, &member_hash),
         share_bps,
     }
 }
@@ -3676,7 +3676,7 @@ fn set_allocation_with_duplicate_member_hashes_is_stored_verbatim() {
     // list or a share_bps sum over 10_000. Confirm both identical-hash
     // entries are silently accepted and stored verbatim.
     let s = setup(1_500, 1_500);
-    let colliding_hash = BytesN::random(&s.env); // stand-in for the colliding hash
+    let colliding_hash = BytesN::from_array(&s.env, &[0xA5; 32]);
     let members = Vec::from_array(
         &s.env,
         [
