@@ -239,6 +239,7 @@ fn build_with(
         env: env.clone(),
         contract,
         token,
+        token_admin: mint,
         buyer,
         cooperative,
         warehouse,
