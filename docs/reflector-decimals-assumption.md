@@ -185,6 +185,40 @@ current source), this assumption is void and the conversion should be
 re-examined, ideally by storing the expected scale in `OracleConfig` and
 rejecting a mismatch with a dedicated error.
 
+## 5. The settlement token's own `decimals()` (#258)
+
+The sections above are about the *oracle's* scale. A separate assumption sat
+next to it: `OracleConfig::denominated_amount` is documented in 7-decimal
+units because `total_amount` used the native token's 7-decimal convention, and
+`resolve_fx_shortfall` divided only by `10^oracle_decimals`. That is correct
+for the native XLM and USDC SACs (both 7 decimals) but wrong by a power of ten
+for any SEP-41 token with 6, 18, or another scale.
+
+**The chosen fix is explicit scaling, not a rejection at `initialize`.**
+`resolve_fx_shortfall` now reads the settlement token's live `decimals()` and
+converts the 7-decimal FX result into the token's own units:
+
+```rust
+let fx_adjusted_total = ngn_owed * rate.price
+    * 10i128.pow(token_decimals)
+    / (10i128.pow(oracle_decimals) * 10_000_000);
+```
+
+Rejecting non-7-decimal tokens in `initialize` was the smaller change, but it
+would make the contract unusable with USDC (6 decimals), the very stablecoin a
+real pilot would settle in. Reading the token's scale keeps the 7-decimal
+convention meaningful only where it belongs: the fiat side of the
+conversion. No new `Error` variant is needed, so
+`contracts/escrow/error_discriminants.snapshot` is unchanged.
+
+The token's `decimals()` is read per call, like the oracle's, and carries the
+same provider-trust assumption: a token proxy that changed its scale between
+funding and settlement would silently move the conversion. Unlike the oracle
+side, that risk is inherent to any SEP-41 token this contract accepts, and
+reading live is still strictly better than hardcoding 7. Regression test:
+`resolve_fx_shortfall_scales_to_the_settlement_tokens_own_decimals` in
+`contracts/escrow/src/test.rs`, using a 6-decimal mock token.
+
 ## References
 
 - SEP-40 — Oracle Price Feeds:

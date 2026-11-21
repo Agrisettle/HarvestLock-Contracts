@@ -1,0 +1,17 @@
+[package]
+name = "wasm-imports"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Lists the host functions a Soroban contract WASM imports, and fails on denylisted capabilities."
+
+[workspace]
+
+[dependencies]
+wasmparser = "0.263.0"
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+wat = "1.263.0"

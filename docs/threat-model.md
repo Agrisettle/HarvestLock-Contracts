@@ -106,9 +106,9 @@ the only funds at risk before then are the buyer's own.
 
 ## The authorization surface in one screen
 
-31 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
+32 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
 single-party gates, 8 permissionless state changes, 3 multi-party mutual
-actions, 1 caller-authenticated flag, 6 no-auth views. The full table with
+actions, 1 caller-authenticated flag, 7 no-auth views. The full table with
 PRD citations is [`authorization-matrix.md`](./authorization-matrix.md) §1;
 this doc only assumes its central invariant:
 
@@ -466,14 +466,33 @@ scheme, which is the API's to keep — out of this contract's control.
 ### Keys, admin surface, and the token layer
 
 #### 26. Admin, upgrade, pause, or owner takeover
-**Verdict: defended by absence.** There is no admin key, no owner, no
-pause, and no upgrade function — nothing exists to steal or extend, which
-is the strongest form of PRD §4.5's "no unilateral drain, pause, or
-redirect" and §16.3's "no upgrade key" answer. No test is possible or
-needed for a capability that doesn't exist; the guard is that any PR adding
-one violates authorization-matrix §4 and PRD §4.5 explicitly. Consequence
-accepted in exchange: a deployed instance can't be patched in place — a
-change means a new WASM and a new contract ID.
+**Verdict: defended by absence, and the absence is checked against the
+compiled artifact.** There is no admin key, no owner, no pause, and no
+upgrade function — nothing exists to steal or extend, which is the
+strongest form of PRD §4.5's "no unilateral drain, pause, or redirect" and
+§16.3's "no upgrade key" answer. Any PR adding one violates
+authorization-matrix §4 and PRD §4.5 explicitly.
+
+Source review alone is not enough for this claim: a dependency, macro
+expansion, or stray `extern` declaration could link an upgrade or deployer
+host capability without any `pub fn` appearing. The guard on the compiled
+artifact is [`tools/wasm-imports`](../tools/wasm-imports/README.md)
+(#254): it scans the release WASM's import section, maps each short import
+name to its Soroban host function via `soroban-env-common`'s `env.json`,
+fails if `update_current_contract_wasm`, `upload_wasm`, or any of the
+deployer functions (`create_contract`, `create_contract_with_constructor`,
+`create_asset_contract`, `create_external_ref_contract`) is linked, and
+compares the full import list against the committed
+[`imports.snapshot`](../tools/wasm-imports/imports.snapshot) so a new host
+capability appears in review even before it is denylisted. The current
+release artifact imports 28 host functions, all ordinary Soroban surface —
+auth, instance storage/TTL, `call`, events, ledger facts, and
+value/collection encoding — with no `update_*`, `upload_wasm`, or `create_*`
+capability among them; the full list is the committed snapshot. Because a denylisted
+capability is a link-time property, not a reachable code path, there is no
+contract state in which to test for it at runtime; the WASM scan is the
+test. Consequence accepted in exchange: a deployed instance can't be
+patched in place — a change means a new WASM and a new contract ID.
 
 #### 27. One party's key is compromised
 **Verdict: accepted risk, bounded by the actor table.** A stolen key can

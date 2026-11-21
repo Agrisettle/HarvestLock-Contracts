@@ -488,13 +488,30 @@ Each method entry has the following fields:
 
 ---
 
+### 30. `get_commitment_view`
+
+```json
+{
+  "name": "get_commitment_view",
+  "args": [],
+  "returns": "Result<CommitmentView, Error>",
+  "errors": ["NotInitialized"],
+  "state_transition": null,
+  "auth_requirement": "permissionless"
+}
+```
+
+*No auth required — the versioned read model (#256): `schema_version`, `status`, `created_at`, and the `parties` / `terms` / `tranches` / `funding` / `delivery` / `fx` / `dispute` sub-structs. Storage-layout changes to `Commitment` do not change this shape; only a `schema_version` bump does. `fx.configured` distinguishes a commitment with no oracle from one resolved with zero values.*
+
+---
+
 ## Summary
 
-| Total Methods | 29 public methods |
+| Total Methods | 30 public methods |
 |---|---|
 | Auth-gated | 11 methods require explicit auth (buyer/cooperative/warehouse_operator) |
-| Permissionless | 18 methods are permissionless reads or state transitions that don't require auth |
-| State transitions | 12 methods change contract status, 7 are pure reads |
+| Permissionless | 19 methods are permissionless reads or state transitions that don't require auth |
+| State transitions | 12 methods change contract status, 8 are pure reads |
 | Error variants | 38 distinct `Error` variants across all methods |
 
 *This specification is deliberately JSON-structured so that SDK generators, test-harness automata, or a second independent client implementation can programmatically discover and validate every call site against the contract's actual interface, without needing to parse Rust doc comments or guess at argument ordering.*

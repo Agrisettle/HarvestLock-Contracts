@@ -681,6 +681,63 @@ mod mock_oracle {
         }
     }
 }
+/// A minimal SEP-41-shaped token whose `decimals()` is configurable at test
+/// setup (the native SAC is always 7). Only the entry points the escrow
+/// actually calls (`balance`, `transfer`, `decimals`) plus `mint` exist. Used
+/// by #258 to prove `resolve_fx_shortfall` rescales to the settlement token's
+/// own decimals in both directions (< 7 and > 7).
+mod mock_sep41_token {
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+
+    #[contracttype]
+    enum Key {
+        Balance(Address),
+        Decimals,
+    }
+
+    #[contract]
+    pub struct MockSep41Token;
+
+    #[contractimpl]
+    impl MockSep41Token {
+        /// Test-only setup hook; a real SEP-41 token fixes `decimals` at
+        /// deployment and does not expose a setter.
+        pub fn init(env: Env, decimals: u32) {
+            env.storage().instance().set(&Key::Decimals, &decimals);
+        }
+
+        pub fn decimals(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&Key::Decimals)
+                .expect("init must run first")
+        }
+
+        pub fn balance(env: Env, id: Address) -> i128 {
+            env.storage().instance().get(&Key::Balance(id)).unwrap_or(0)
+        }
+
+        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+            from.require_auth();
+            let from_balance = Self::balance(env.clone(), from.clone());
+            let to_balance = Self::balance(env.clone(), to.clone());
+            assert!(from_balance >= amount, "insufficient balance");
+            env.storage()
+                .instance()
+                .set(&Key::Balance(from), &(from_balance - amount));
+            env.storage()
+                .instance()
+                .set(&Key::Balance(to), &(to_balance + amount));
+        }
+
+        pub fn mint(env: Env, to: Address, amount: i128) {
+            let balance = Self::balance(env.clone(), to.clone());
+            env.storage()
+                .instance()
+                .set(&Key::Balance(to), &(balance + amount));
+        }
+    }
+}
 
 /// A commitment initialized with an `oracle_config` pointing at a fresh
 /// `mock_oracle::MockOracle` instance, `price` already set at the current
@@ -964,6 +1021,133 @@ fn resolve_fx_shortfall_finds_nothing_owed_when_already_covered() {
     // on fund_fx_shortfall for a shortfall that doesn't exist.
     assert!(c.fx_shortfall_funded);
     assert_eq!(c.fx_shortfall_deadline, 0);
+}
+/// Builds a delivered commitment settling in a mock token with the given
+/// `decimals`, then runs `resolve_fx_shortfall`. The FX fixture always prices
+/// 4_000_000 (7-decimal fiat units) at 1.75, i.e. 7_000_000 7-decimal
+/// settlement units, and the deposit/remainder split is 15% + 15% / 70%.
+fn resolve_fx_with_token_decimals(token_decimals: u32, total_amount: i128) -> Setup<'static> {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+
+    let token_id = env.register(mock_sep41_token::MockSep41Token, ());
+    let token = token::Client::new(&env, &token_id);
+    let token_admin = mock_sep41_token::MockSep41TokenClient::new(&env, &token_id);
+    token_admin.init(&token_decimals);
+    token_admin.mint(&buyer, &(total_amount * 3));
+
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+    let oracle = mock_oracle::MockOracleClient::new(&env, &oracle_id);
+    oracle.set_price(&175_000_000_000_000i128, &env.ledger().timestamp());
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+    contract.initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_id,
+        &total_amount,
+        &1_500,
+        &1_500,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &Some(OracleConfig {
+            oracle_contract: oracle_id,
+            price_asset: Symbol::new(&env, "NGN"),
+            max_age_secs: 3_600,
+            denominated_amount: 4_000_000,
+        }),
+    );
+
+    contract.lock();
+    contract.release_advance_1();
+    contract.claim_advance_1();
+    contract.mark_checkpoint();
+    contract.release_advance_2();
+    contract.claim_advance_2();
+    contract.ready_for_delivery();
+    contract.fund_remainder();
+    contract.confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    contract.resolve_fx_shortfall();
+
+    Setup {
+        env,
+        contract,
+        token,
+        buyer,
+        cooperative,
+        warehouse,
+        total_amount,
+    }
+}
+
+/// #258: `denominated_amount`'s 7-decimal convention describes the *fiat*
+/// side, not the settlement token. A 6-decimal SEP-41 token must scale the
+/// converted total down by 10^7/10^6 = 10, or every FX settlement is off by
+/// a power of ten. Fixture: 4_000_000 (7-decimal fiat units) x 1.75 =
+/// 7_000_000 7-decimal settlement units = 700_000 six-decimal token units.
+#[test]
+fn resolve_fx_shortfall_scales_to_the_settlement_tokens_own_decimals() {
+    let s = resolve_fx_with_token_decimals(6, 1_000_000);
+
+    let c = s.contract.get_commitment();
+    assert_eq!(
+        c.fx_adjusted_total, 700_000,
+        "4_000_000 fiat units x 1.75 = 700_000 six-decimal token units; \
+         treating the result as 7-decimal would give 7_000_000"
+    );
+    assert_eq!(c.fx_shortfall_amount, 0);
+
+    s.contract.settle();
+    // 300_000 already claimed as advances + 400_000 from the remainder =
+    // the whole 700_000 FX-adjusted obligation; the other 300_000 of the
+    // remainder returns to the buyer.
+    assert_eq!(s.token.balance(&s.cooperative), 700_000);
+    assert_eq!(s.token.balance(&s.buyer), 2_300_000);
+}
+
+/// A 5-decimal token exercises the `decimals < 7` divisor. It is a separate
+/// case from the 6-decimal one on purpose: `7 - 6 == 7 / 6 == 1`, so a
+/// mutation that divides there is indistinguishable at 6 decimals (and was a
+/// surviving mutant until this case existed). At 5 decimals the expected
+/// scale is 10^2, not 10^1.
+#[test]
+fn resolve_fx_shortfall_scales_for_a_five_decimal_token() {
+    let s = resolve_fx_with_token_decimals(5, 100_000);
+
+    let c = s.contract.get_commitment();
+    assert_eq!(
+        c.fx_adjusted_total, 70_000,
+        "7_000_000 7-decimal units is 70_000 at 5 decimals"
+    );
+    s.contract.settle();
+    assert_eq!(s.token.balance(&s.cooperative), 70_000);
+    assert_eq!(s.token.balance(&s.buyer), 230_000);
+}
+
+/// An 18-decimal token exercises the `decimals > 7` multiplier (10^11), the
+/// branch that has to be a subtraction and not a division.
+#[test]
+fn resolve_fx_shortfall_scales_for_an_eighteen_decimal_token() {
+    let s = resolve_fx_with_token_decimals(18, 1_000_000_000_000_000_000);
+
+    let c = s.contract.get_commitment();
+    assert_eq!(
+        c.fx_adjusted_total, 700_000_000_000_000_000,
+        "7_000_000 7-decimal units is 0.7 tokens at 18 decimals"
+    );
+    s.contract.settle();
+    assert_eq!(s.token.balance(&s.cooperative), 700_000_000_000_000_000);
+    assert_eq!(s.token.balance(&s.buyer), 2_300_000_000_000_000_000);
 }
 
 #[test]
@@ -4305,4 +4489,117 @@ fn kitchen_sink_all_optional_features_on_one_commitment() {
     // Verify allocation was recorded
     let alloc = s.contract.get_allocation();
     assert_eq!(alloc.len(), 2);
+}
+
+// ---------- get_commitment_view (#256) ----------
+//
+// The storage struct is free to grow; the read view is the contractual shape.
+// These tests prove the projection is total (every field appears exactly
+// once), that it reports oracle configuration without a second call, and that
+// reading the view costs the same order as reading the storage struct.
+
+#[test]
+fn get_commitment_view_maps_every_commitment_field() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    s.contract.flag_dispute(&s.buyer);
+
+    let c = s.contract.get_commitment();
+    let v = s.contract.get_commitment_view();
+
+    assert_eq!(v.schema_version, COMMITMENT_VIEW_SCHEMA_VERSION);
+    assert_eq!(v.status, c.status);
+    assert_eq!(v.created_at, c.created_at);
+
+    assert_eq!(v.parties.buyer, c.buyer);
+    assert_eq!(v.parties.cooperative, c.cooperative);
+    assert_eq!(v.parties.warehouse_operator, c.warehouse_operator);
+    assert_eq!(v.parties.token, c.token);
+
+    assert_eq!(v.terms.total_amount, c.total_amount);
+    assert_eq!(v.terms.advance1_bps, c.advance1_bps);
+    assert_eq!(v.terms.advance2_bps, c.advance2_bps);
+    assert_eq!(v.terms.claim_window_secs, c.claim_window_secs);
+    assert_eq!(v.terms.remainder_window_secs, c.remainder_window_secs);
+    assert_eq!(v.terms.delivery_deadline, c.delivery_deadline);
+    assert_eq!(v.terms.contracted_quantity, c.contracted_quantity);
+    assert_eq!(v.terms.grade_price_bps, c.grade_price_bps);
+
+    assert_eq!(v.tranches.advance1.deadline, c.advance1_deadline);
+    assert_eq!(v.tranches.advance1.claimed, c.advance1_claimed);
+    assert_eq!(v.tranches.advance1.expired, c.advance1_expired);
+    assert_eq!(v.tranches.advance2.deadline, c.advance2_deadline);
+    assert_eq!(v.tranches.advance2.claimed, c.advance2_claimed);
+    assert_eq!(v.tranches.advance2.expired, c.advance2_expired);
+
+    assert_eq!(v.funding.remainder_deadline, c.remainder_deadline);
+    assert_eq!(v.funding.remainder_funded, c.remainder_funded);
+
+    assert_eq!(v.delivery.delivered_quantity, c.delivered_quantity);
+    assert_eq!(v.delivery.grade_index, c.grade_index);
+    assert_eq!(v.delivery.settlement_bps, c.settlement_bps);
+
+    assert!(v.fx.configured);
+    assert_eq!(v.fx.resolved, c.fx_resolved);
+    assert_eq!(v.fx.adjusted_total, c.fx_adjusted_total);
+    assert_eq!(v.fx.shortfall_amount, c.fx_shortfall_amount);
+    assert_eq!(v.fx.shortfall_funded, c.fx_shortfall_funded);
+    assert_eq!(v.fx.shortfall_deadline, c.fx_shortfall_deadline);
+    assert_eq!(v.fx.quote_stale, c.fx_quote_stale);
+
+    assert_eq!(v.dispute.pre_status, c.dispute_pre_status);
+    assert_eq!(v.dispute.deadline, c.dispute_deadline);
+    // Nothing was left at its default: the fixture really exercised the
+    // non-zero branches (a resolved FX shortfall and an open dispute).
+    assert!(v.fx.adjusted_total > 0);
+    assert_eq!(v.dispute.pre_status, Status::Delivered);
+    assert!(v.dispute.deadline > 0);
+}
+
+#[test]
+fn get_commitment_view_reports_no_oracle_configuration() {
+    let s = setup(1_500, 1_500);
+    let v = s.contract.get_commitment_view();
+    assert_eq!(v.schema_version, COMMITMENT_VIEW_SCHEMA_VERSION);
+    assert!(!v.fx.configured);
+    assert!(!v.fx.resolved);
+    assert_eq!(v.fx.adjusted_total, 0);
+}
+
+#[test]
+fn get_commitment_view_is_not_found_before_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+    assert_eq!(
+        contract.try_get_commitment_view(),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+#[test]
+fn get_commitment_view_costs_the_same_order_as_the_storage_struct() {
+    let s = setup(1_500, 1_500);
+
+    s.contract.get_commitment();
+    let storage_cost = s.env.cost_estimate().budget().cpu_instruction_cost();
+
+    s.contract.get_commitment_view();
+    let view_cost = s.env.cost_estimate().budget().cpu_instruction_cost();
+
+    // The view is a reshaping of the same storage read, so it should cost
+    // close to the storage struct. A generous ceiling so normal ABI-encoding
+    // differences don't make this flaky, while still catching a view that
+    // starts re-reading storage or doing real work per field.
+    // Measured on the test host: get_commitment 218_476 vs
+    // get_commitment_view 223_471 CPU instructions (~2.3% more), i.e. both
+    // are dominated by the same storage read. The bound below is deliberately
+    // loose because host metering undercounts the WASM path and may drift
+    // across SDK versions; its job is to catch a view that re-reads storage.
+    assert!(
+        view_cost <= storage_cost.saturating_mul(2) + 50_000,
+        "view cost {view_cost} is far above storage-struct cost {storage_cost}"
+    );
 }
