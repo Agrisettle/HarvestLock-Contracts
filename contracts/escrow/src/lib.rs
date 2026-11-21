@@ -159,6 +159,19 @@ pub const MAX_GRADE_ENTRIES: u32 = 16;
 /// `AllocationTooLarge` error.
 pub const MAX_ALLOCATION_MEMBERS: u32 = 200;
 
+/// Largest `OracleConfig::denominated_amount` `initialize` accepts (#247):
+/// the biggest value for which `bps_amount(denominated_amount, 10_000)` —
+/// `denominated_amount * 10_000`, the largest multiply `resolve_fx_shortfall`
+/// performs on it, since `settlement_bps` never exceeds 10_000 — still fits
+/// in an `i128`. Anything above would make settlement trap on overflow
+/// rather than be refused up front with `InvalidOracleConfig`.
+///
+/// This bounds only the `bps_amount` step. The later
+/// `ngn_owed * rate.price` multiply depends on a live oracle value that
+/// `initialize` cannot know, and is the F4 finding pinned in
+/// `tests/oracle_fault_injection.rs`.
+pub const MAX_DENOMINATED_AMOUNT: i128 = i128::MAX / 10_000;
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -238,10 +251,14 @@ pub enum Error {
     InvalidAllocation = 22,
     /// `get_allocation` called before `set_allocation` ever ran.
     AllocationNotSet = 23,
-    /// `initialize`'s `oracle_config` was `Some` with `max_age_secs == 0`
-    /// — a zero staleness bound would reject every real quote, which is
-    /// never what a caller actually wants (that's what leaving
-    /// `oracle_config` as `None` is for).
+    /// `initialize`'s `oracle_config` was `Some` with either:
+    /// - `max_age_secs == 0`: a zero staleness bound would reject every
+    ///   real quote, which is never what a caller actually wants (that's
+    ///   what leaving `oracle_config` as `None` is for); or
+    /// - `denominated_amount <= 0` or `> MAX_DENOMINATED_AMOUNT` (#247):
+    ///   a non-positive value would make `resolve_fx_shortfall` owe the
+    ///   cooperative nothing after a full delivery, and an oversized one
+    ///   would overflow `bps_amount` and trap at settlement.
     InvalidOracleConfig = 24,
     /// `oracle_rate` or `resolve_fx_shortfall` called but `initialize`
     /// never set an `oracle_config` for this commitment — the only two
@@ -354,6 +371,15 @@ pub struct OracleConfig {
     /// oracle, read live at settlement and assumed immutable (see
     /// `docs/reflector-decimals-assumption.md`, issue #63); this field is
     /// the deal's value in the same 7-decimal units as `total_amount`.
+    ///
+    /// **Must be in `1..=MAX_DENOMINATED_AMOUNT`** (#247), or `initialize`
+    /// refuses with `InvalidOracleConfig`. Zero or negative would make
+    /// `resolve_fx_shortfall`'s `fx_adjusted_total <= 0`, so `settle` would
+    /// pay the cooperative nothing and refund everything to the buyer after
+    /// a full delivery. Above `MAX_DENOMINATED_AMOUNT` (`i128::MAX / 10_000`),
+    /// `bps_amount(denominated_amount, settlement_bps)` would overflow and
+    /// trap at settlement. Both mistakes are caught at deploy time instead
+    /// of only showing up when the deal settles.
     pub denominated_amount: i128,
 }
 
@@ -698,6 +724,19 @@ impl EscrowContract {
         }
         if let Some(oc) = &oracle_config {
             if oc.max_age_secs == 0 {
+                return Err(Error::InvalidOracleConfig);
+            }
+            // #247: `denominated_amount` is what decides the cooperative's
+            // payout on an oracle deal (`resolve_fx_shortfall` reprices it),
+            // so it gets the same "must be positive" bar `total_amount` gets
+            // above. Zero or negative would make `fx_adjusted_total <= 0`,
+            // clamp `owed_from_remainder` to 0, and let `settle` refund the
+            // whole escrow to the buyer after a full delivery. The upper
+            // bound rejects any value for which `bps_amount(_, 10_000)` —
+            // the largest multiplier `resolve_fx_shortfall` can apply, since
+            // `settlement_bps <= 10_000` — would overflow `i128` and trap at
+            // settlement instead of being refused here.
+            if oc.denominated_amount <= 0 || oc.denominated_amount > MAX_DENOMINATED_AMOUNT {
                 return Err(Error::InvalidOracleConfig);
             }
         }
