@@ -173,6 +173,41 @@ semantics of its own beyond mirroring the deployment line; if they ever diverge,
 the deployment line (§2, tied to the WASM hash) is authoritative and the Cargo
 field is the thing to correct.
 
+### The version embedded in the WASM (#246)
+
+Since #246, the Cargo `version` is also written into every build. The crate
+root (`contracts/escrow/src/lib.rs`) calls `soroban_sdk::contractmeta!`
+twice, and the values end up in the WASM's `contractmetav0` custom section:
+
+| key | value | source |
+| --- | --- | --- |
+| `version` | `escrow-vX.Y.Z` (this doc's tag format) | `concat!("escrow-v", env!("CARGO_PKG_VERSION"))`, i.e. `contracts/escrow/Cargo.toml` `version` |
+| `repository` | `https://github.com/agrisettle/HarvestLock-Contracts` | `env!("CARGO_PKG_REPOSITORY")`, i.e. the root `Cargo.toml` `[workspace.package] repository` |
+
+Each value has exactly one source, so bumping the Cargo `version` as
+described above is also what updates the embedded version. Nothing is
+hand-copied into `lib.rs`. To read it from a build:
+
+```sh
+stellar contract build --locked
+stellar contract info meta --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+#  • version: escrow-v0.1.0
+#  • repository: https://github.com/agrisettle/HarvestLock-Contracts
+#  • rsver / rssdkver / cliver: toolchain entries the CLI adds itself
+```
+
+For a contract that is already deployed, pass `--contract-id <C…> --network
+testnet` instead of `--wasm`. This works on any build from #246 onwards;
+older deployments still need the CHANGELOG hash lookup.
+
+The values are deliberately static: no timestamp, git commit, or hostname.
+Any of those would make two clean builds of the same commit differ and break
+the `build-wasm` job's reproducibility check. Two clean
+`stellar contract build --locked` runs were confirmed to produce
+byte-identical WASM with the metadata in place. The embedded `version` is
+only as accurate as the Cargo `version`: if they disagree with the
+deployment line, the WASM hash and CHANGELOG still win (§1).
+
 ## 6. Where this is enforced going forward
 
 This doc defines the scheme; it does not add CI to enforce it (repo policy:

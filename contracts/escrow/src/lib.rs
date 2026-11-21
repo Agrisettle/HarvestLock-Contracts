@@ -144,6 +144,25 @@ use soroban_sdk::{
     Env, Symbol, Vec,
 };
 
+// Build metadata embedded in the WASM's `contractmetav0` custom section (#246),
+// so a deployed contract can say which version and source it came from without
+// a lookup in CHANGELOG.md. Read it back with:
+//
+//   stellar contract info meta --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+//
+// Both values come from Cargo, so there is one place to change each:
+// `version` from `contracts/escrow/Cargo.toml`'s `version` (kept in step with
+// the deployment line per docs/versioning.md §5), `repository` from the
+// workspace `[workspace.package] repository`. Deliberately no timestamp, git
+// hash or other build-environment value: those would differ between two clean
+// builds of the same commit and break the `build-wasm` reproducibility check.
+// See docs/versioning.md §6.
+soroban_sdk::contractmeta!(
+    key = "version",
+    val = concat!("escrow-v", env!("CARGO_PKG_VERSION"))
+);
+soroban_sdk::contractmeta!(key = "repository", val = env!("CARGO_PKG_REPOSITORY"));
+
 /// Maximum number of entries `initialize` accepts in `grade_price_bps`.
 /// Deliberately generous — the PRD's grading examples are 3 tiers (A/B/C),
 /// so 16 leaves headroom for any realistic refinement while keeping the
