@@ -171,7 +171,12 @@ be smuggled in as a relaxed guard on `set_allocation`.
   chained raw `require_auth()` calls — the dedupe and replay-safety
   properties are test-pinned (`auth_entry_for_one_method_cannot_authorize_a_different_method`,
   `auth_entry_for_one_argument_set_cannot_authorize_a_different_argument_set`,
-  `expired_staged_auth_entry_fails_cleanly_with_no_partial_state`).
+  `cancel_auth_entry_for_one_instance_cannot_cancel_another`,
+  `resolve_dispute_auth_entry_for_one_instance_cannot_resolve_another`,
+  `expired_staged_auth_entry_fails_cleanly_with_no_partial_state`). The
+  two per-instance tests are the realistic one-contract-per-commitment case:
+  the same cooperative's consent for deal A cannot authorize deal B, even
+  when both deals name the same three parties.
 - **A permissionless function may not take an outcome parameter.** If a
   proposed function needs one, it is a party-gated action wearing the
   wrong clothes.
