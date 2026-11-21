@@ -180,8 +180,8 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Unreachable / panicking / garbage-returning / stale oracle against the
-      # documented OracleNotConfigured / OraclePriceUnavailable / OracleStale
-      # degradation paths.
+      # documented OracleNotConfigured / OraclePriceUnavailable / OracleStale /
+      # OraclePriceInvalid degradation paths.
       - name: cargo test --test oracle_fault_injection
         working-directory: contracts/escrow
         run: cargo test --test oracle_fault_injection --verbose
