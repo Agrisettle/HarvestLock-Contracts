@@ -17,6 +17,18 @@ hand-built code lives.
 
 ## 1. How to reproduce
 
+Issue #266 wired this into the repo. The in-tree script runs the two
+`stellar contract bindings typescript` invocations below and writes the
+output to [`bindings/typescript/`](../bindings/typescript/) — see that
+directory's own README for what the generated tree contains:
+
+```sh
+scripts/gen-bindings.sh            # regenerate bindings/typescript/
+scripts/gen-bindings.sh --check    # verify committed copy matches the current WASM
+```
+
+The raw commands the script wraps, for anyone reproducing by hand:
+
 ```sh
 stellar contract build                       # produce the deployable WASM this repo gates on
 stellar contract bindings typescript \
@@ -26,7 +38,8 @@ cd /tmp/escrow-bindings && npm install && npm run build
 node compare.mjs                             # the script below
 ```
 
-The generated package (checked with CLI 28.1.0) depends on
+The generated package (checked with CLI 28.1.0, the version
+[`scripts/gen-bindings.sh`](../scripts/gen-bindings.sh) pins) depends on
 `@stellar/stellar-sdk ^16.0.1`; the bindings embed the contract's own
 spec (29 functions, 38 error cases for the current WASM — a count that
 tracks `lib.rs` exactly, which is itself a useful regeneration check).

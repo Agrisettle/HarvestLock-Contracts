@@ -73,6 +73,30 @@ list in `deny.toml` (#59), whose first run surfaced and triaged
 `wasmparser`'s `Apache-2.0 WITH LLVM-exception`. Docs-only otherwise — no
 contract code changed.
 
+Four small Wave backlog items landed together — one test suite, two
+property/edge tests, and one script-and-vendor-tree chore. The
+non-standard SEP-41 token suite (#264,
+`contracts/escrow/tests/nonstandard_token.rs`) runs `lock`/`settle`/`cancel`
+against a fee-on-transfer token and a token that lies upward about its
+balance, pinning what the escrow actually does and extending threat-model
+entry 30 with the written-down "use a SAC" requirement. A new oracle-path
+test (#265) mirrors the existing non-oracle
+`severe_shortfall_does_not_claw_back_advances_already_claimed` on the
+`resolve_fx_shortfall` + `settle` path, where `fx_adjusted_total`
+collapses below the already-claimed advances. A property test (#267)
+proves that a dispute round-trip — `flag_dispute` followed by either
+`resolve_dispute` or `expire_dispute_window` — changes `Commitment` in
+exactly three fields (`status` restored, `dispute_pre_status` back to
+`Draft`, `dispute_deadline` back to 0) and moves no tokens, across every
+allowed pre-status, flagger and exit path (the `Commitment` struct gains
+a test-only `PartialEq`/`Eq`/`Debug` derive behind `cfg(test)` so the
+WASM pays nothing for it). The TypeScript bindings now live in-tree at
+[`bindings/typescript/`](./bindings/typescript/), produced from the
+WASM by [`scripts/gen-bindings.sh`](./scripts/gen-bindings.sh), with a
+`--check` drift mode a maintainer wires into CI separately per the PR
+template's "CI is maintainer-managed" note (#266). No contract code
+changed; no deployment entry until the next build goes to testnet.
+
 ## [Deployment 11] — 2026-10-20
 
 ### Added

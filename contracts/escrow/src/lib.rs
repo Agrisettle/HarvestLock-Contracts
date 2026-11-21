@@ -495,6 +495,14 @@ enum Tranche {
 /// Finding: retain struct fields as-is.
 #[contracttype]
 #[derive(Clone)]
+// `PartialEq`/`Eq`/`Debug` are test-only (#267): the dispute round-trip
+// property test compares `Commitment` byte-for-byte before `flag_dispute`
+// and after `resolve_dispute`/`expire_dispute_window`, which is why the
+// derive exists at all. Keeping it behind `cfg(test)` means the deployed
+// WASM pays nothing for it — a matching-logic trait that will never be
+// invoked at runtime shouldn't widen the on-chain binary (docs/gas-costs.md
+// treats every reserved byte as a product cost).
+#[cfg_attr(test, derive(PartialEq, Eq, Debug))]
 pub struct Commitment {
     pub buyer: Address,
     pub cooperative: Address,
@@ -685,6 +693,22 @@ impl EscrowContract {
     ///
     /// `grade_price_bps` must be non-empty, may hold at most
     /// `MAX_GRADE_ENTRIES` entries, and every entry must be ≤ 10_000.
+    ///
+    /// **`token` must have standard SEP-41 transfer semantics — ideally a
+    /// Stellar Asset Contract (SAC).** The contract calls `balance()` and
+    /// `transfer()` on `token` and relies on both to behave as SEP-41
+    /// specifies: `transfer(amount)` moves exactly `amount` from sender
+    /// to receiver with no fee skim, and `balance(id)` reports what `id`
+    /// actually holds. Non-standard tokens that implement the SEP-41
+    /// interface but misbehave — fee-on-transfer, lying `balance()` — do
+    /// not corrupt the escrow's accounting (`settle`/`cancel` either leave
+    /// money with the wrong party or trap mid-call, never over-pay), but
+    /// they do harm the cooperative, who did not pick the address. See
+    /// threat-model entry 30's sub-case and the pinned behavior in
+    /// `contracts/escrow/tests/nonstandard_token.rs`. The real HarvestLock
+    /// API deployments only ever pass a SAC (USDC testnet / USDC
+    /// mainnet); anything calling `initialize` directly (CLI, tests, a
+    /// future direct caller) must honor this requirement itself.
     ///
     /// **A commitment abandoned at Draft forever (#96)**: this call moves
     /// no funds, and `lock` is the first and only place in the whole
