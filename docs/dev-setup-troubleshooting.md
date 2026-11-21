@@ -10,6 +10,20 @@ places: [`HANDOFF.md`](../HANDOFF.md)'s toolchain section and
 comments. This page consolidates them; those two stay the originals, and
 neither should drift from what's here.
 
+## Fastest path — open it in the devcontainer
+
+The recommended setup for new contributors is the checked-in
+[`.devcontainer/`](../.devcontainer/devcontainer.json): it pins the Rust
+toolchain, adds the `wasm32v1-none` target, installs a prebuilt `stellar`
+binary (so neither Gotcha 1 nor Gotcha 2 can apply), adds Node for the
+bindings and examples, and installs `just` for the CI-mirroring recipes in
+the [justfile](../justfile). In VS Code use "Reopen in Container"; in Codespaces
+use "Create Codespace on …". The container's shell can run `cargo test` and
+`stellar contract build` immediately, with no extra steps.
+
+The rest of this page is for working outside the container, or for when the
+container itself breaks.
+
 ## What you actually need
 
 | Working on | Needs |

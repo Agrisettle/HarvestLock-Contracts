@@ -103,6 +103,15 @@ the *undisbursed* balance. For a full list, see
 [`dispute-scope.md`](./dispute-scope.md) §2; the correction that
 claim/reclaim are not blocked was added in this review.
 
+Four tests pin all four directions from both `Advance1Released` and
+`Advance2Released` pre-statuses, so a future refactor cannot add a status
+guard to claim/reclaim without failing them:
+`claim_advance_1_while_disputed_still_pays`,
+`reclaim_advance_1_while_disputed_still_refunds`,
+`claim_advance_2_while_disputed_still_pays`, and
+`reclaim_advance_2_while_disputed_still_refunds`
+(`contracts/escrow/src/test.rs`).
+
 ## 3. Who actually gains, with concrete scenarios
 
 Numbers follow [`terminal-outcomes.md`](./terminal-outcomes.md):
