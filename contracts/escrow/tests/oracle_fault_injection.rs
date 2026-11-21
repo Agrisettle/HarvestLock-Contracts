@@ -205,6 +205,7 @@ fn build_with(
     let warehouse = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let issuer = sac.issuer();
     let token_address = sac.address();
     let token = token::Client::new(&env, &token_address);
     let mint = token::StellarAssetClient::new(&env, &token_address);
@@ -243,6 +244,7 @@ fn build_with(
         cooperative,
         warehouse,
         total_amount: common::TOTAL_AMOUNT,
+        issuer,
     }
 }
 

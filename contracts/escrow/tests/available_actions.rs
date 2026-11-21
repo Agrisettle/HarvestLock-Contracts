@@ -109,6 +109,7 @@ fn oracle_world(denominated_amount: i128) -> World {
     let warehouse = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let issuer = sac.issuer();
     let token_address = sac.address();
     let token = token::Client::new(&env, &token_address);
     // FX scenarios need a third payment beyond deposit + remainder.
@@ -149,6 +150,7 @@ fn oracle_world(denominated_amount: i128) -> World {
         cooperative,
         warehouse,
         total_amount: TOTAL_AMOUNT,
+        issuer,
     }
 }
 

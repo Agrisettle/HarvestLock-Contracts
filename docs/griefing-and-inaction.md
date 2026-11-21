@@ -20,12 +20,18 @@ each status pays), [`dispute-stalling.md`](./dispute-stalling.md)
   There is no keeper, no bounty, and no permissionless rescue for the two
   paths that matter most (`reclaim_on_nondelivery` is buyer-gated;
   `confirm_delivery` has no substitute).
-- **One scenario is genuinely stuck: the cooperative never delivers and
-  the buyer never calls `reclaim_on_nondelivery`.** The contract then
-  holds the escrow forever. No third party, not even the operator, can
-  move it. The only unilateral exit is the buyer's, and it is the buyer
-  who benefits from using it — so this needs *both* the cooperative's
-  non-performance and the buyer's inaction (or disappearance).
+- **One scenario is genuinely stuck from the parties' own actions: the
+  cooperative never delivers and the buyer never calls
+  `reclaim_on_nondelivery`.** The contract then holds the escrow forever.
+  No third party, not even the operator, can move it. The only unilateral
+  exit is the buyer's, and it is the buyer who benefits from using it — so
+  this needs *both* the cooperative's non-performance and the buyer's
+  inaction (or disappearance).
+- **The settlement asset's issuer sits above every one of these paths**
+  (§4.5). For an issued stablecoin, the issuer can deauthorize the escrow
+  address — freezing every transfer, including every deadline rescue — or
+  deauthorize the cooperative, which makes `settle` revert forever once
+  the commitment reaches `Delivered`. Only the issuer can undo either.
 - **Two near-stuck scenarios are worse than they look because the
   griefer pays nothing:** a cooperative that never signals
   `ready_for_delivery`, and an operator that never marks the checkpoint
@@ -248,6 +254,37 @@ property — and it is also why the cooperative's hostage strategy in
 §4.2 has a negotiated ending: the buyer can offer to cancel, and the
 cooperative can accept without a penalty.
 
+### 4.5 The settlement-asset issuer can freeze a deal from outside
+
+This is not griefing by a named party, but it produces the same outcome and
+so belongs in this document. If the commitment settles in a classic asset
+whose issuer has `AUTH_REVOCABLE` / `AUTH_CLAWBACK_ENABLED` set:
+
+- **Deauthorizing the escrow contract address** freezes every transfer into
+  or out of escrow: claims, reclaims, `cancel`, `fund_remainder`, `settle`,
+  both expiry sweeps, and `reclaim_on_nondelivery`. Tokenless transitions
+  still run, so the commitment can reach `ReadyForDelivery` (or sit in
+  `Delivered`), but **no terminal status is reachable** and the balance
+  cannot move. The funds are frozen, not stolen — they are released by the
+  normal path after the issuer re-authorizes — but nothing in the contract
+  can force that, and every deadline rescue is dead until it happens.
+- **Deauthorizing the cooperative** blocks its claims but not the buyer's
+  reclaims. If delivery is confirmed anyway, `settle` reverts on its payout
+  to the cooperative, and `cancel` is unavailable from `Delivered`: the
+  commitment is **permanently stuck in `Delivered`** until the issuer
+  re-authorizes. This is the state to watch for operationally.
+- **Clawing back part of the balance** does not block `settle`. The split
+  is balance-based, so the cooperative — the residual claimant — absorbs
+  the loss at full delivery, the buyer's refund stays as computed (zero in
+  the pinned case), and the clawed-back tokens are simply burned. That is
+  an economic loss, not a stuck state.
+
+No contract change can prevent any of this; the issuer's powers are a
+property of the chosen settlement asset. A pilot should treat them as a
+counterparty-selection and monitoring item, not a code guarantee. See
+[`threat-model.md`](./threat-model.md) entry 31; the behavior is pinned in
+`contracts/escrow/tests/asset_issuer_controls.rs`.
+
 ## 5. What "recourse" actually means here
 
 | Scenario | Is there a path? | Who must act | Is the harmed party made whole? |
@@ -262,14 +299,18 @@ cooperative can accept without a penalty.
 | Operator never confirms delivery | Yes, but late | Buyer after `delivery_deadline`; or both via `cancel` | Remainder locked; no penalty for the operator |
 | Operator attests zero quantity | **No** | Nobody | Cooperative loses the remainder; no appeal on-chain |
 | Dispute never resolved | Yes | Anyone (`expire_dispute_window`) | Status restored; delay not compensated |
+| Issuer deauthorizes the escrow address | **No** | Issuer only | Funds frozen (not lost); every value-moving call, including the deadline rescues, is blocked |
+| Issuer deauthorizes the cooperative before `settle` | **No** | Issuer only | Commitment stuck non-terminal in `Delivered`; remainder frozen |
+| Issuer claws back part of the escrow balance | Yes (`settle`) | Anyone | Cooperative absorbs it at full delivery; no on-chain recourse |
 | Nobody calls `settle` | Yes, if there is money to move | Cooperative or buyer (self-interest) | Fine; no bounty needed |
 
 The pattern is consistent: **the contract's liveness is provided by the
 party who benefits, not by the protocol.** Where the beneficiary is
 absent, or where the only actor is the party who caused the problem,
-there is no rescue. Only one combination leaves funds with no path at
-all, but several leave a harmed party waiting out a window with no
-compensation.
+there is no rescue. Of the parties' own actions, only one combination
+leaves funds with no path at all (the issuer rows add two more that no
+party can undo), but several leave a harmed party waiting out a window
+with no compensation.
 
 ## 6. Off-chain reputation does not close the gap
 
@@ -324,6 +365,11 @@ value-for-complexity order:
    silence, repeated flags, abandoned commitments) if the product wants
    reputation to cover them. That is an API/product change, not a
    contract one, and `standing_events` already has the shape for it.
+7. **Choose the settlement asset deliberately** (§4.5). Issuer
+   deauthorization and clawback cannot be defended contract-side; agree
+   the issuer's freeze policy up front, monitor the escrow address's
+   authorization state, and treat a freeze as an off-chain incident. This
+   is counterparty due diligence, not code.
 
 None of these are implemented in this PR — this issue asked for the
 analysis, and the analysis is that the contract is safe against theft by
