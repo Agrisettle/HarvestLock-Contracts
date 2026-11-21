@@ -540,6 +540,14 @@ pub struct Commitment {
     /// for a total write-off, which is why `fx_resolved` is the actual
     /// "has this run" signal, not this field being nonzero).
     pub fx_adjusted_total: i128,
+    /// The price and timestamp of the Reflector quote recorded at
+    /// `confirm_delivery` — if an oracle is configured, `resolve_fx_shortfall`
+    /// uses this recorded snapshot instead of reading a live quote, fixing
+    /// the rate at the moment the delivery was attested (PRD §4.2 option (b)
+    /// first-caller fix). Set only when `confirm_delivery` runs with an
+    /// oracle configured; zero-valued when no oracle was in effect.
+    pub fx_recorded_price: i128,
+    pub fx_recorded_timestamp: u64,
     /// How much more the buyer owes beyond what's already escrowed, per
     /// `resolve_fx_shortfall`'s comparison. 0 means no top-up needed —
     /// `settle` can run without waiting on `fund_fx_shortfall` at all.
@@ -736,6 +744,8 @@ impl EscrowContract {
             fx_shortfall_funded: false,
             fx_shortfall_deadline: 0,
             fx_quote_stale: false,
+            fx_recorded_price: 0,
+            fx_recorded_timestamp: 0,
             dispute_pre_status: Status::Draft,
             dispute_deadline: 0,
         };
@@ -1201,6 +1211,32 @@ impl EscrowContract {
         c.grade_index = grade_index;
         c.settlement_bps = u32::try_from(i128::from(quantity_bps) * i128::from(grade_bps) / 10_000)
             .expect("settlement basis points are bounded by 10,000");
+        // Record the oracle rate at confirmation time, fixing the FX snapshot
+        // for the life of the commitment (PRD §4.2 option (b) first-caller fix).
+        // If the oracle is stale or unavailable at delivery time, skip recording
+        // the rate — `resolve_fx_shortfall` will fall back to reading a fresh
+        // quote. This keeps `confirm_delivery` from blocking delivery when the
+        // oracle is temporarily unavailable.
+        if env.storage().instance().has(&DataKey::OracleConfig) {
+            let oracle_config: OracleConfig = env
+                .storage()
+                .instance()
+                .get(&DataKey::OracleConfig)
+                .unwrap();
+            match Self::read_oracle_rate(&env, &oracle_config) {
+                Ok(rate) => {
+                    c.fx_recorded_price = rate.price;
+                    c.fx_recorded_timestamp = rate.timestamp;
+                }
+                Err(_) => {
+                    // If the oracle rate can't be read at confirmation time
+                    // (stale, unavailable, or contract error), skip recording the
+                    // rate. `resolve_fx_shortfall` will fall back to reading a
+                    // fresh quote. This keeps `confirm_delivery` from blocking
+                    // delivery when the oracle is temporarily unavailable.
+                }
+            }
+        }
         Self::set_status(&env, &mut c, Status::Delivered);
         Self::save(&env, &c);
         Ok(())
@@ -1374,8 +1410,24 @@ impl EscrowContract {
             .get(&DataKey::OracleConfig)
             .ok_or(Error::OracleNotConfigured)?;
 
-        let rate = Self::read_oracle_rate(&env, &oracle_config)?;
-        let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+        // Use the oracle rate recorded at confirm_delivery time, fixing the
+        // FX snapshot for the commitment's life (PRD §4.2 option (b) first-caller
+        // fix). Fall back to a live read only if no snapshot was recorded
+        // (e.g. confirm_delivery ran before the oracle had a valid quote).
+        let (rate, decimals) = if c.fx_recorded_price != 0 {
+            // Use the recorded snapshot; the timestamp is implicit in the
+            // fact that it was recorded at confirm_delivery time.
+            let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+            let rate = OracleRate {
+                price: c.fx_recorded_price,
+                timestamp: c.fx_recorded_timestamp,
+            };
+            (rate, decimals)
+        } else {
+            let rate = Self::read_oracle_rate(&env, &oracle_config)?;
+            let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+            (rate, decimals)
+        };
 
         let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
         let fx_adjusted_total = ngn_owed * rate.price / 10i128.pow(decimals);
@@ -1956,6 +2008,16 @@ impl EscrowContract {
 
     fn claim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
+        // After terminal statuses the balance has already been swept;
+        // a claim/reclaim would reach token.transfer and trap on insufficient
+        // balance. Reject with a clean contract error rather than a token-level
+        // trap. Disputed is deliberately excluded — see dispute-stalling.md §2.
+        match c.status {
+            Status::Cancelled | Status::Forfeited | Status::Defaulted => {
+                return Err(Error::InvalidState);
+            }
+            _ => {}
+        }
         c.cooperative.require_auth();
 
         if Self::tranche_deadline(&c, t) == 0 {
@@ -1987,6 +2049,16 @@ impl EscrowContract {
 
     fn reclaim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
+        // After terminal statuses the balance has already been swept;
+        // a claim/reclaim would reach token.transfer and trap on insufficient
+        // balance. Reject with a clean contract error rather than a token-level
+        // trap. Disputed is deliberately excluded — see dispute-stalling.md §2.
+        match c.status {
+            Status::Cancelled | Status::Forfeited | Status::Defaulted => {
+                return Err(Error::InvalidState);
+            }
+            _ => {}
+        }
         c.buyer.require_auth();
 
         if Self::tranche_deadline(&c, t) == 0 {
