@@ -3623,6 +3623,170 @@ fn auth_entry_for_one_argument_set_cannot_authorize_a_different_argument_set() {
     assert_eq!(s.contract.get_commitment().buyer, approved);
 }
 
+/// Two independent escrow instances with the same named parties — the shape
+/// the API actually deploys, since it creates one contract per commitment.
+/// They share one `Env` (so an auth descriptor naming A's address is a real
+/// registered contract from B's point of view) but have distinct contract IDs.
+fn setup_two_instances_same_parties() -> (Setup<'static>, Setup<'static>) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+
+    (
+        setup_in(
+            &env,
+            buyer.clone(),
+            cooperative.clone(),
+            warehouse.clone(),
+            1_500,
+            1_500,
+            WINDOW,
+        ),
+        setup_in(&env, buyer, cooperative, warehouse, 1_500, 1_500, WINDOW),
+    )
+}
+
+/// #279 — an auth entry is bound to the *contract address* it was signed for,
+/// not just to the method and arguments.
+///
+/// The API deploys one contract per commitment, so the same cooperative is a
+/// party to many instances. A `cancel` consent staged for instance A must not
+/// be usable to cancel instance B, even though B has the same named parties and
+/// the same method/argument shape.
+///
+/// Only the cooperative's entry is scoped to A; every other required signer is
+/// scoped correctly to B. That way the rejection can only be attributed to the
+/// wrong contract address, not to a missing signature.
+#[test]
+fn cancel_auth_entry_for_one_instance_cannot_cancel_another() {
+    let (a, b) = setup_two_instances_same_parties();
+    assert_eq!(a.buyer, b.buyer);
+    assert_eq!(a.cooperative, b.cooperative);
+    assert_eq!(a.warehouse, b.warehouse);
+    assert_ne!(a.contract.address, b.contract.address);
+
+    a.contract.lock();
+    b.contract.lock();
+
+    let before = b.contract.get_commitment();
+    let escrow_before = b.token.balance(&b.contract.address);
+    let buyer_before = b.token.balance(&b.buyer);
+
+    let for_b = mock_invoke(&b.contract.address, "cancel", ().into_val(&b.env));
+    let for_a = mock_invoke(&a.contract.address, "cancel", ().into_val(&a.env));
+    b.env.mock_auths(&[
+        MockAuth {
+            address: &b.buyer,
+            invoke: &for_b,
+        },
+        // Staged for instance A, presented to instance B.
+        MockAuth {
+            address: &b.cooperative,
+            invoke: &for_a,
+        },
+    ]);
+
+    let result = b.contract.try_cancel();
+    assert!(
+        matches!(result, Err(Err(_))),
+        "an A-scoped cancel entry must not authorize B as a host auth error: {result:?}"
+    );
+
+    // No partial state: B is still Locked and no funds moved.
+    let after = b.contract.get_commitment();
+    assert_eq!(after.status, Status::Locked);
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.created_at, before.created_at);
+    assert_eq!(after.delivery_deadline, before.delivery_deadline);
+    assert_eq!(b.token.balance(&b.contract.address), escrow_before);
+    assert_eq!(b.token.balance(&b.buyer), buyer_before);
+
+    // Positive control: identical invocation, with the cooperative's entry
+    // scoped to B, succeeds. The setup was never the reason for the rejection.
+    b.env.mock_auths(&[
+        MockAuth {
+            address: &b.buyer,
+            invoke: &for_b,
+        },
+        MockAuth {
+            address: &b.cooperative,
+            invoke: &for_b,
+        },
+    ]);
+    b.contract.cancel();
+    assert_eq!(b.contract.get_status(), Status::Cancelled);
+    assert_eq!(b.token.balance(&b.buyer), b.total_amount);
+}
+
+/// #279, the `resolve_dispute` half. Three-party consent is even more likely
+/// to be staged once and reused across several commitments. A cooperative
+/// entry signed for instance A must not resolve B's dispute, even with the
+/// buyer's and operator's entries correctly scoped to B.
+#[test]
+fn resolve_dispute_auth_entry_for_one_instance_cannot_resolve_another() {
+    let (a, b) = setup_two_instances_same_parties();
+    a.contract.lock();
+    b.contract.lock();
+    a.contract.flag_dispute(&a.buyer);
+    b.contract.flag_dispute(&b.buyer);
+
+    let before = b.contract.get_commitment();
+    assert_eq!(before.status, Status::Disputed);
+    let escrow_before = b.token.balance(&b.contract.address);
+
+    let for_b = mock_invoke(&b.contract.address, "resolve_dispute", ().into_val(&b.env));
+    let for_a = mock_invoke(&a.contract.address, "resolve_dispute", ().into_val(&a.env));
+    b.env.mock_auths(&[
+        MockAuth {
+            address: &b.buyer,
+            invoke: &for_b,
+        },
+        // The replayed entry: correct method and args, wrong contract.
+        MockAuth {
+            address: &b.cooperative,
+            invoke: &for_a,
+        },
+        MockAuth {
+            address: &b.warehouse,
+            invoke: &for_b,
+        },
+    ]);
+
+    let result = b.contract.try_resolve_dispute();
+    assert!(
+        matches!(result, Err(Err(_))),
+        "an A-scoped resolve_dispute entry must not authorize B: {result:?}"
+    );
+
+    // B stays frozen, with its pre-dispute status and deadline untouched.
+    let after = b.contract.get_commitment();
+    assert_eq!(after.status, Status::Disputed);
+    assert_eq!(after.dispute_pre_status, before.dispute_pre_status);
+    assert_eq!(after.dispute_deadline, before.dispute_deadline);
+    assert_eq!(b.token.balance(&b.contract.address), escrow_before);
+
+    // Positive control: only the cooperative's scope changes.
+    b.env.mock_auths(&[
+        MockAuth {
+            address: &b.buyer,
+            invoke: &for_b,
+        },
+        MockAuth {
+            address: &b.cooperative,
+            invoke: &for_b,
+        },
+        MockAuth {
+            address: &b.warehouse,
+            invoke: &for_b,
+        },
+    ]);
+    b.contract.resolve_dispute();
+    assert_eq!(b.contract.get_status(), before.dispute_pre_status);
+}
+
 #[test]
 fn commitment_struct_footprint_and_field_invariants() {
     let s = setup(1_500, 2_000);
