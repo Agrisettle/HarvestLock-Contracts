@@ -321,6 +321,20 @@ pub enum Error {
     /// cooperative scale, and unbounded storage the contract shouldn't
     /// accept.
     AllocationTooLarge = 38,
+    /// The configured oracle contract could not answer at all (#245): the
+    /// cross-contract `lastprice` or `decimals` call failed in a way the
+    /// host lets the caller recover from. That covers an
+    /// `oracle_config.oracle_contract` with no contract deployed behind it,
+    /// a callee that panics or traps, and a callee whose reply doesn't
+    /// decode as the expected type. Distinct from `OraclePriceUnavailable`,
+    /// which means the oracle *did* answer and quotes no such asset.
+    ///
+    /// Not every failure can become this error: the host still aborts the
+    /// whole invocation, with no contract error to return, when the
+    /// callee uses up the transaction's shared CPU/memory budget. See the
+    /// header of `tests/oracle_fault_injection.rs` for which failures are
+    /// recoverable and which still abort.
+    OracleUnavailable = 39,
 }
 
 #[contracttype]
@@ -822,10 +836,21 @@ impl EscrowContract {
     /// rather than re-reading storage, since `resolve_fx_shortfall`
     /// already has its own copy in hand and needs the rest of it
     /// (`denominated_amount`) right after this call.
+    ///
+    /// Uses the generated `try_lastprice`, not the panicking `lastprice`
+    /// (#245). A missing or crashing oracle, or a reply that doesn't decode
+    /// as `Option<PriceData>`, comes back as `Error::OracleUnavailable`
+    /// instead of aborting the caller's whole invocation.
     fn read_oracle_rate(env: &Env, config: &OracleConfig) -> Result<OracleRate, Error> {
         let client = ReflectorPulseClient::new(env, &config.oracle_contract);
-        let quote = client
-            .lastprice(&ReflectorAsset::Other(config.price_asset.clone()))
+        let quote =
+            match client.try_lastprice(&ReflectorAsset::Other(config.price_asset.clone())) {
+                Ok(Ok(quote)) => quote,
+                // Outer `Err`: the call itself failed (no contract there, the
+                // callee panicked or returned an error). Inner `Err`: it
+                // answered, but not with a value of the expected type.
+                Ok(Err(_)) | Err(_) => return Err(Error::OracleUnavailable),
+            }
             .ok_or(Error::OraclePriceUnavailable)?;
 
         let now = env.ledger().timestamp();
@@ -1414,7 +1439,14 @@ impl EscrowContract {
             .ok_or(Error::OracleNotConfigured)?;
 
         let rate = Self::read_oracle_rate(&env, &oracle_config)?;
-        let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+        // `try_decimals`, not `decimals` (#245): `lastprice` just succeeded
+        // above, but the oracle can still fail on this second call, and
+        // that should also be a contract error rather than a host abort.
+        let decimals =
+            match ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).try_decimals() {
+                Ok(Ok(decimals)) => decimals,
+                Ok(Err(_)) | Err(_) => return Err(Error::OracleUnavailable),
+            };
 
         let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
         let fx_adjusted_total = ngn_owed * rate.price / 10i128.pow(decimals);
@@ -1471,9 +1503,20 @@ impl EscrowContract {
     /// instead of setting anything: "the oracle doesn't quote this asset
     /// at all" is a permanent configuration gap, not "come back later",
     /// and conflating the two would tell a watcher to wait for something
-    /// that may never arrive. Host-level failures (unreachable/crashed
-    /// oracle) likewise write nothing — same fault-injection findings as
-    /// `oracle_rate` (F1).
+    /// that may never arrive.
+    ///
+    /// An unreachable or crashing oracle (#245) now comes back as
+    /// `Error::OracleUnavailable`, not a host abort, and like
+    /// `OraclePriceUnavailable` it also writes nothing. Two reasons to
+    /// return the error rather than set `fx_quote_stale` or add a new flag:
+    /// (a) `oracle_config` has no setter, so an address with no contract
+    /// behind it is just as permanent a misconfiguration as an unquoted
+    /// asset, and telling a watcher to wait would be wrong; (b) a new
+    /// `Commitment` field would change `get_commitment`'s return shape (an
+    /// ABI change under docs/versioning.md §2) for information the caller
+    /// already gets from the error code. What changes for callers is that
+    /// the probe now *returns* that error code instead of aborting, so the
+    /// API can record why settlement is stuck instead of just "unreadable".
     ///
     /// The flag is **informational only**: no guard reads it, and
     /// `resolve_fx_shortfall` still enforces staleness itself — its

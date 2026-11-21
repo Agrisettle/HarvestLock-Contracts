@@ -54,3 +54,4 @@ NotAParty = 35
 DisputeWindowNotPassed = 36
 GradeScheduleTooLong = 37
 AllocationTooLarge = 38
+OracleUnavailable = 39
