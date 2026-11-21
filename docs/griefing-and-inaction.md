@@ -50,6 +50,12 @@ each status pays), [`dispute-stalling.md`](./dispute-stalling.md)
 `R = 650,000`; delivery window 120 days. "Griefer cost" means what the
 party doing nothing loses by doing nothing.
 
+Clients no longer need to reproduce this table: the contract's
+`available_actions()` view returns the currently callable functions, each
+with its required `AuthParty` and bounding `ActionDeadline`, derived from
+the same private predicates the real guards use. This table remains the
+human-readable explanation of *why* each row is legal or not.
+
 | Required action | Who must act | What inaction blocks | Who can unstick, and how | Griefer cost | Verdict |
 | --- | --- | --- | --- | --- | --- |
 | `lock` (fund the deposit) | Buyer | Everything; the deal never starts | Nobody. Nothing is escrowed, so nothing is lost | 0 | Safe — no funds at risk |

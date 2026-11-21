@@ -106,9 +106,9 @@ the only funds at risk before then are the buyer's own.
 
 ## The authorization surface in one screen
 
-30 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
+31 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
 single-party gates, 8 permissionless state changes, 3 multi-party mutual
-actions, 1 caller-authenticated flag, 5 no-auth views. The full table with
+actions, 1 caller-authenticated flag, 6 no-auth views. The full table with
 PRD citations is [`authorization-matrix.md`](./authorization-matrix.md) §1;
 this doc only assumes its central invariant:
 
