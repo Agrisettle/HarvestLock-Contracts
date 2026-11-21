@@ -5,6 +5,7 @@ use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, BytesN as _, Events as _, Ledger as _,
     MockAuth, MockAuthInvoke,
 };
+use soroban_sdk::xdr::{Limits, ToXdr as _, WriteXdr as _};
 use soroban_sdk::{symbol_short, xdr, Env, Event as _, IntoVal, TryFromVal, Val};
 
 const WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days, arbitrary but realistic
@@ -18,6 +19,16 @@ const GRADE_PRICE_BPS: [u32; 3] = [10_000, 9_000, 7_500];
 /// The grade index tests default to unless they're specifically exercising
 /// grade adjustment — index 0 is `GRADE_PRICE_BPS`'s full-price tier.
 const FULL_PRICE_GRADE: u32 = 0;
+
+// This is the pinned SDK/test-host value for
+// `max_contract_data_entry_size_bytes`. Keep the measured worst-case instance
+// below half the limit so future fields or protocol overhead have room before
+// a deployed commitment approaches the network ceiling.
+const MAX_CONTRACT_DATA_ENTRY_SIZE_BYTES: usize = 65_536;
+const MAX_INSTANCE_ENTRY_FRACTION_PERCENT: usize = 50;
+const MAX_COMMITMENT_XDR_BYTES: usize = 4_096;
+const MAX_ORACLE_CONFIG_XDR_BYTES: usize = 512;
+const MAX_ALLOCATION_XDR_BYTES: usize = 24_000;
 
 fn create_token<'a>(
     env: &Env,
@@ -573,6 +584,166 @@ fn member(env: &Env, share_bps: u32) -> AllocationMember {
         member_hash: BytesN::random(env),
         share_bps,
     }
+}
+
+fn stored_instance_entry_size(env: &Env) -> usize {
+    env.to_ledger_snapshot()
+        .entries()
+        .into_iter()
+        .find_map(|(key, (entry, _))| match key.as_ref() {
+            xdr::LedgerKey::ContractData(key)
+                if matches!(key.key, xdr::ScVal::LedgerKeyContractInstance) =>
+            {
+                Some(entry.to_xdr(Limits::none()).unwrap().len())
+            }
+            _ => None,
+        })
+        .expect("the test environment must contain the contract instance entry")
+}
+
+fn set_oracle_config_for_size_measurement(s: &Setup<'static>, config: &OracleConfig) {
+    s.env.as_contract(&s.contract.address, || {
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::OracleConfig, config);
+    });
+}
+
+fn set_grade_schedule_for_size_measurement(s: &Setup<'static>, schedule: Vec<u32>) {
+    s.env.as_contract(&s.contract.address, || {
+        let mut commitment: Commitment = s
+            .env
+            .storage()
+            .instance()
+            .get(&DataKey::Commitment)
+            .expect("the initialized commitment must exist");
+        commitment.grade_price_bps = schedule;
+        s.env
+            .storage()
+            .instance()
+            .set(&DataKey::Commitment, &commitment);
+    });
+}
+
+fn assert_size_bounds(
+    stage: &str,
+    env: &Env,
+    commitment: &Commitment,
+    oracle_config: Option<&OracleConfig>,
+    allocation: Option<&Vec<AllocationMember>>,
+    instance_entry_size: usize,
+) {
+    let commitment_size = commitment.clone().to_xdr(env).len() as usize;
+    assert!(
+        commitment_size <= MAX_COMMITMENT_XDR_BYTES,
+        "{stage}: Commitment is {commitment_size} bytes, over {MAX_COMMITMENT_XDR_BYTES}"
+    );
+    if let Some(config) = oracle_config {
+        let config_size = config.clone().to_xdr(env).len() as usize;
+        assert!(
+            config_size <= MAX_ORACLE_CONFIG_XDR_BYTES,
+            "{stage}: OracleConfig is {config_size} bytes, over {MAX_ORACLE_CONFIG_XDR_BYTES}"
+        );
+    }
+    if let Some(members) = allocation {
+        let allocation_size = members.clone().to_xdr(env).len() as usize;
+        assert!(
+            allocation_size <= MAX_ALLOCATION_XDR_BYTES,
+            "{stage}: 200-member allocation is {allocation_size} bytes, over {MAX_ALLOCATION_XDR_BYTES}"
+        );
+    }
+    let max_instance_size =
+        MAX_CONTRACT_DATA_ENTRY_SIZE_BYTES * MAX_INSTANCE_ENTRY_FRACTION_PERCENT / 100;
+    assert!(
+        instance_entry_size <= max_instance_size,
+        "{stage}: instance entry is {instance_entry_size} bytes, over {max_instance_size} ({MAX_INSTANCE_ENTRY_FRACTION_PERCENT}% of {MAX_CONTRACT_DATA_ENTRY_SIZE_BYTES})"
+    );
+}
+
+#[test]
+fn instance_storage_layout_stays_well_below_the_entry_size_limit() {
+    let s = setup(1_500, 1_500);
+    let commitment = s.contract.get_commitment();
+    let base_size = stored_instance_entry_size(&s.env);
+    assert_size_bounds("fresh Draft", &s.env, &commitment, None, None, base_size);
+
+    let oracle_config = OracleConfig {
+        oracle_contract: Address::generate(&s.env),
+        price_asset: Symbol::new(&s.env, "NGN"),
+        max_age_secs: 3_600,
+        denominated_amount: 2_000_000,
+    };
+    set_oracle_config_for_size_measurement(&s, &oracle_config);
+    let with_oracle_size = stored_instance_entry_size(&s.env);
+    assert_size_bounds(
+        "with OracleConfig",
+        &s.env,
+        &commitment,
+        Some(&oracle_config),
+        None,
+        with_oracle_size,
+    );
+
+    let mut allocation = Vec::new(&s.env);
+    for _ in 0..200 {
+        allocation.push_back(member(&s.env, 50));
+    }
+    s.contract.set_allocation(&allocation);
+    let with_allocation_size = stored_instance_entry_size(&s.env);
+    assert_size_bounds(
+        "with 200-member allocation",
+        &s.env,
+        &commitment,
+        Some(&oracle_config),
+        Some(&allocation),
+        with_allocation_size,
+    );
+
+    let grade_schedule = Vec::from_array(
+        &s.env,
+        [
+            10_000, 9_900, 9_800, 9_700, 9_600, 9_500, 9_400, 9_300, 9_200, 9_100, 9_000, 8_900,
+            8_800, 8_700, 8_600, 8_500,
+        ],
+    );
+    set_grade_schedule_for_size_measurement(&s, grade_schedule);
+    let final_commitment = s.contract.get_commitment();
+    let with_grade_schedule_size = stored_instance_entry_size(&s.env);
+    assert_size_bounds(
+        "with 16-entry grade schedule",
+        &s.env,
+        &final_commitment,
+        Some(&oracle_config),
+        Some(&allocation),
+        with_grade_schedule_size,
+    );
+
+    std::println!(
+        "\nStorage layout (XDR bytes; entry limit {MAX_CONTRACT_DATA_ENTRY_SIZE_BYTES}, bound {MAX_INSTANCE_ENTRY_FRACTION_PERCENT}%):"
+    );
+    std::println!("stage | Commitment | OracleConfig | allocation (200) | instance entry");
+    std::println!(
+        "fresh Draft | {} | — | — | {base_size}",
+        commitment.clone().to_xdr(&s.env).len()
+    );
+    std::println!(
+        "with OracleConfig | {} | {} | — | {with_oracle_size}",
+        commitment.clone().to_xdr(&s.env).len(),
+        oracle_config.clone().to_xdr(&s.env).len(),
+    );
+    std::println!(
+        "with 200-member allocation | {} | {} | {} | {with_allocation_size}",
+        commitment.clone().to_xdr(&s.env).len(),
+        oracle_config.clone().to_xdr(&s.env).len(),
+        allocation.clone().to_xdr(&s.env).len(),
+    );
+    std::println!(
+        "with 16-entry grade schedule | {} | {} | {} | {with_grade_schedule_size}",
+        final_commitment.clone().to_xdr(&s.env).len(),
+        oracle_config.to_xdr(&s.env).len(),
+        allocation.to_xdr(&s.env).len(),
+    );
 }
 
 #[test]

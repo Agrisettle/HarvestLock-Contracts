@@ -110,6 +110,40 @@ table still answers the issue's "every key" framing.
   touched, so all 191 pre-existing tests kept passing unchanged (see
   Tests).
 
+## Storage layout
+
+All three logical keys share the contract instance entry, so the size that
+matters for the network limit is the serialized `LedgerEntry`, not just the
+size of an individual Rust value. The measurement test uses
+[`soroban_sdk::xdr::ToXdr`](https://docs.rs/soroban-sdk/29.0.1/soroban_sdk/xdr/trait.ToXdr.html)
+for each stored value and the ledger snapshot's XDR for the complete instance
+entry. The test-host limit is **65,536 bytes**
+(`max_contract_data_entry_size_bytes` in the pinned SDK's resource-limit
+configuration; see the [official SDK source](https://github.com/stellar/rs-soroban-sdk/blob/v29.0.1/soroban-sdk/src/testutils/cost_estimate.rs#L150-L160)).
+Network configuration can change, so the 65,536-byte value is the documented
+reference for this pinned SDK and the live network should still be checked
+before a deployment.
+
+The rows are cumulative: the allocation row includes the oracle config, and
+the final row includes the oracle config, the 200-member allocation, and the
+16-entry grade schedule. “Instance entry” includes the ledger-entry framing;
+the other columns are the individual stored ScVal XDR values.
+
+| Stage | `Commitment` | `OracleConfig` | 200-member allocation | Total instance entry |
+|---|---:|---:|---:|---:|
+| Fresh `Draft` | 1,348 B | — | — | 1,488 B |
+| With oracle config | 1,348 B | 188 B | — | 1,708 B |
+| With full allocation | 1,348 B | 188 B | 20,012 B | 21,752 B |
+| With 16-entry grade schedule | 1,452 B | 188 B | 20,012 B | 21,856 B |
+
+The test keeps the worst-case instance below **50%** of the 65,536-byte
+reference limit (32,768 B), and also asserts component bounds of 4,096 B for
+`Commitment`, 512 B for `OracleConfig`, and 24,000 B for a 200-member
+allocation. The 200-member allocation is the dominant addition: it contributes
+about 20 KB by itself. Expanding the grade schedule from the ordinary
+three-entry fixture to the allowed sixteen entries adds 104 B to the
+`Commitment`; the oracle config is comparatively small.
+
 ## Residual risk, documented instead of hidden
 
 The fix makes *any* activity keep the deal alive, but it cannot make the

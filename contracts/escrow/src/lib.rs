@@ -136,6 +136,9 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 mod reflector;
 
 use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
