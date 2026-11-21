@@ -121,11 +121,12 @@ remaining handling is operational:
 
 1. **Prevention**: the app/API already polls `get_status` /
    `get_commitment` for cache display; with `load()` bumping, that
-   polling *is* the keeper job, for free up to the threshold. A
-   dedicated cron calling `get_status` on every live commitment (or
-   `stellar contract extend --id <contract> --ledgers-to-extend N
-   --source <keeper>` from outside) bounds dormancy below the max
-   lifetime and prevents eviction outright.
+   polling *is* the keeper job, for free up to the threshold. For a
+   separate operational keeper, use the [TTL keeper tool](../tools/ttl-keeper/README.md)
+   from a funded cron identity. It reads both the contract instance and
+   Wasm-code TTL, reports contracts below the configured threshold, and
+   runs `stellar contract extend` for those contracts. This bounds dormancy
+   below the max lifetime and prevents eviction outright.
 2. **Recovery if eviction already happened**: the archived instance
    entry stays restorable for the network's archive/bucket window —
    `stellar contract restore` (a subcommand of the same CLI this repo's
