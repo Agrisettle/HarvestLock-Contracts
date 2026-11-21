@@ -373,6 +373,9 @@ pub enum Error {
     /// would overflow, and therefore one that could never be locked or
     /// settled. Refused at the call that supplied the value (#249).
     AmountTooLarge = 39,
+    /// The configured Reflector oracle returned a zero or negative price;
+    /// non-positive exchange rates cannot produce a valid settlement amount.
+    OraclePriceInvalid = 40,
 }
 
 #[contracttype]
@@ -862,6 +865,9 @@ impl EscrowContract {
         let quote = client
             .lastprice(&ReflectorAsset::Other(config.price_asset.clone()))
             .ok_or(Error::OraclePriceUnavailable)?;
+        if quote.price <= 0 {
+            return Err(Error::OraclePriceInvalid);
+        }
 
         let now = env.ledger().timestamp();
         let age = now.saturating_sub(quote.timestamp);

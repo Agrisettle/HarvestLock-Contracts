@@ -309,7 +309,6 @@
     [],
     [],
     [],
-    [],
     []
   ],
   "ledger": {
@@ -385,7 +384,7 @@
                       "val": {
                         "vec": [
                           {
-                            "i128": "-175000000000000"
+                            "i128": "0"
                           },
                           {
                             "u64": "0"
@@ -752,7 +751,7 @@
                               "symbol": "fx_adjusted_total"
                             },
                             "val": {
-                              "i128": "-875000"
+                              "i128": "0"
                             }
                           },
                           {
@@ -768,7 +767,7 @@
                               "symbol": "fx_resolved"
                             },
                             "val": {
-                              "bool": true
+                              "bool": false
                             }
                           },
                           {
@@ -792,7 +791,7 @@
                               "symbol": "fx_shortfall_funded"
                             },
                             "val": {
-                              "bool": true
+                              "bool": false
                             }
                           },
                           {
@@ -860,7 +859,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "Settled"
+                                  "symbol": "Delivered"
                                 }
                               ]
                             }
@@ -971,7 +970,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "2700000"
+                      "i128": "2000000"
                     }
                   },
                   {
@@ -1075,7 +1074,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "0"
+                      "i128": "700000"
                     }
                   },
                   {
