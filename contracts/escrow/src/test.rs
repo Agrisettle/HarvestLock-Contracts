@@ -2,9 +2,10 @@
 
 use super::*;
 use soroban_sdk::testutils::{
-    Address as _, BytesN as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke,
+    Address as _, AuthorizedFunction, AuthorizedInvocation, BytesN as _, Events as _, Ledger as _,
+    MockAuth, MockAuthInvoke,
 };
-use soroban_sdk::{xdr, Env, Event as _, IntoVal, Val};
+use soroban_sdk::{symbol_short, xdr, Env, Event as _, IntoVal, TryFromVal, Val};
 
 const WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days, arbitrary but realistic
 const REMAINDER_WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days — matches the app-level default
@@ -456,6 +457,96 @@ fn advance_bps_over_10000_rejected_at_initialize() {
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidBps)));
+}
+
+/// `MAX_TOTAL_AMOUNT` itself is accepted — the bound is inclusive, so the
+/// largest value whose `bps_amount` arithmetic cannot overflow is usable.
+#[test]
+fn max_total_amount_is_accepted_at_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    contract.initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &MAX_TOTAL_AMOUNT,
+        &10_000,
+        &0,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
+    );
+    assert_eq!(
+        contract.get_commitment().total_amount,
+        MAX_TOTAL_AMOUNT,
+        "the bound is inclusive; the value must round-trip unchanged"
+    );
+}
+
+/// One stroop over `MAX_TOTAL_AMOUNT` would make `bps_amount`'s
+/// `total * 10_000` overflow (with `overflow-checks = true`, a trap in
+/// `lock`/`claim_*`/`settle`). `initialize` refuses it at the call that
+/// supplied it instead (#249).
+#[test]
+fn total_amount_over_max_is_rejected_at_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let (token_address, _token, _admin) = create_token(&env, &token_admin);
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &(MAX_TOTAL_AMOUNT + 1),
+        &1_000,
+        &1_000,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(Error::AmountTooLarge)));
+}
+
+/// The largest accepted `total_amount` times the largest possible bps value
+/// (`10_000`, the ceiling `initialize` enforces on
+/// `advance1_bps + advance2_bps`) must not overflow. The test harness runs
+/// with overflow checks on, so this asserting a concrete value is also the
+/// proof that the multiplication is in range — the "every `bps_amount` call
+/// site is provably safe" half of #249.
+#[test]
+fn bps_amount_at_the_maximum_total_does_not_overflow() {
+    assert_eq!(
+        EscrowContract::bps_amount(MAX_TOTAL_AMOUNT, 10_000),
+        MAX_TOTAL_AMOUNT
+    );
+    assert_eq!(
+        EscrowContract::bps_amount(MAX_TOTAL_AMOUNT, 1),
+        MAX_TOTAL_AMOUNT / 10_000
+    );
 }
 
 #[test]
@@ -4469,4 +4560,217 @@ fn kitchen_sink_all_optional_features_on_one_commitment() {
     // Verify allocation was recorded
     let alloc = s.contract.get_allocation();
     assert_eq!(alloc.len(), 2);
+}
+
+// ---------- what the buyer's wallet actually signs (#253) ----------
+//
+// `lock`, `fund_remainder` and `fund_fx_shortfall` each move money through a
+// *nested* `token.transfer(buyer, contract, amount)` inside a buyer-signed
+// call. The buyer's signature covers that nested invocation as well as the
+// top-level one, so these tests read the recorded auth tree back and assert
+// the transfer carries exactly the amount the call moves. A drift between
+// what the UI shows and what `deposit_amount`/`remainder` computes would
+// otherwise be signed silently — the existing auth tests only checked the
+// top-level invocation.
+
+/// The buyer's recorded `AuthorizedInvocation` for `top_level`, with the
+/// contract/function half of the binding asserted on the way through.
+fn buyer_auth_invocation(s: &Setup, top_level: &str) -> AuthorizedInvocation {
+    let auths = s.env.auths();
+    let mut found: Option<AuthorizedInvocation> = None;
+    for (addr, invocation) in auths.iter() {
+        if *addr == s.buyer {
+            match &invocation.function {
+                AuthorizedFunction::Contract((contract, fn_name, _)) => {
+                    assert_eq!(*contract, s.contract.address);
+                    assert_eq!(*fn_name, Symbol::new(&s.env, top_level));
+                }
+                other => panic!("expected a contract invocation for {top_level}, got {other:?}"),
+            }
+            found = Some(invocation.clone());
+        }
+    }
+    found.unwrap_or_else(|| panic!("expected the buyer's auth entry for {top_level}"))
+}
+
+/// Asserts the buyer's auth tree for `top_level` contains exactly one nested
+/// invocation — the token transfer — with exactly `amount` as its third
+/// argument, `buyer` as the sender and the escrow contract as the recipient.
+fn assert_exact_buyer_transfer(s: &Setup, top_level: &str, amount: i128) {
+    let invocation = buyer_auth_invocation(s, top_level);
+    assert_eq!(
+        invocation.sub_invocations.len(),
+        1,
+        "{top_level} should make exactly one nested token transfer"
+    );
+    let transfer = invocation
+        .sub_invocations
+        .first()
+        .expect("the nested token transfer");
+    let (contract, fn_name, args) = match &transfer.function {
+        AuthorizedFunction::Contract(call) => call.clone(),
+        other => panic!("expected the nested token transfer, got {other:?}"),
+    };
+    assert_eq!(contract, s.token.address);
+    assert_eq!(fn_name, symbol_short!("transfer"));
+    assert_eq!(args.len(), 3);
+    let from = Address::try_from_val(&s.env, &args.get(0).unwrap()).unwrap();
+    let to = Address::try_from_val(&s.env, &args.get(1).unwrap()).unwrap();
+    let signed_amount = i128::try_from_val(&s.env, &args.get(2).unwrap()).unwrap();
+    assert_eq!(from, s.buyer, "{top_level} must transfer from the buyer");
+    assert_eq!(
+        to, s.contract.address,
+        "{top_level} must transfer to the escrow contract"
+    );
+    assert_eq!(
+        signed_amount, amount,
+        "{top_level}'s auth tree must carry exactly the amount it moves"
+    );
+}
+
+#[test]
+fn lock_auth_tree_carries_exactly_the_deposit() {
+    let s = setup(1_500, 2_000); // 35% deposit: 350_000 of 1_000_000
+    s.contract.lock();
+
+    let deposit = deposit_amount(s.total_amount, 1_500, 2_000);
+    assert_eq!(deposit, 350_000);
+    assert_exact_buyer_transfer(&s, "lock", deposit);
+}
+
+#[test]
+fn fund_remainder_auth_tree_carries_exactly_the_remainder() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+
+    let remainder = s.total_amount - deposit_amount(s.total_amount, 1_500, 1_500);
+    assert_eq!(remainder, 700_000);
+    assert_exact_buyer_transfer(&s, "fund_remainder", remainder);
+}
+
+#[test]
+fn fund_fx_shortfall_auth_tree_carries_exactly_the_shortfall() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+    assert_eq!(
+        s.contract.get_commitment().fx_shortfall_amount,
+        EXPECTED_SHORTFALL
+    );
+    s.contract.fund_fx_shortfall();
+
+    assert_exact_buyer_transfer(&s, "fund_fx_shortfall", EXPECTED_SHORTFALL);
+}
+
+#[test]
+fn lock_rejects_a_buyer_auth_tree_signed_for_a_different_deposit() {
+    let s = setup(1_500, 1_500);
+    let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
+
+    // The buyer consents to `lock` whose nested transfer is one stroop more
+    // than the contract will actually move.
+    let sub = [MockAuthInvoke {
+        contract: &s.token.address,
+        fn_name: "transfer",
+        args: (s.buyer.clone(), s.contract.address.clone(), deposit + 1).into_val(&s.env),
+        sub_invokes: &[],
+    }];
+    let top = MockAuthInvoke {
+        contract: &s.contract.address,
+        fn_name: "lock",
+        args: ().into_val(&s.env),
+        sub_invokes: &sub,
+    };
+    s.env.mock_auths(&[MockAuth {
+        address: &s.buyer,
+        invoke: &top,
+    }]);
+
+    let result = s.contract.try_lock();
+    assert!(
+        result.is_err(),
+        "a signature covering a different amount must not authorize lock: {result:?}"
+    );
+    assert_eq!(s.contract.get_status(), Status::Draft);
+}
+
+#[test]
+fn fund_remainder_rejects_a_buyer_auth_tree_signed_for_a_different_amount() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.ready_for_delivery();
+
+    let remainder = s.total_amount - deposit_amount(s.total_amount, 1_500, 1_500);
+    let sub = [MockAuthInvoke {
+        contract: &s.token.address,
+        fn_name: "transfer",
+        args: (s.buyer.clone(), s.contract.address.clone(), remainder - 1).into_val(&s.env),
+        sub_invokes: &[],
+    }];
+    let top = MockAuthInvoke {
+        contract: &s.contract.address,
+        fn_name: "fund_remainder",
+        args: ().into_val(&s.env),
+        sub_invokes: &sub,
+    };
+    s.env.mock_auths(&[MockAuth {
+        address: &s.buyer,
+        invoke: &top,
+    }]);
+
+    let result = s.contract.try_fund_remainder();
+    assert!(
+        result.is_err(),
+        "a signature covering a different amount must not authorize fund_remainder: {result:?}"
+    );
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+    assert!(!s.contract.get_commitment().remainder_funded);
+}
+
+#[test]
+fn fund_fx_shortfall_rejects_a_buyer_auth_tree_signed_for_a_different_amount() {
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    advance_to_delivered_with_shortfall(&s);
+    s.contract.resolve_fx_shortfall();
+
+    let sub = [MockAuthInvoke {
+        contract: &s.token.address,
+        fn_name: "transfer",
+        args: (
+            s.buyer.clone(),
+            s.contract.address.clone(),
+            EXPECTED_SHORTFALL - 1,
+        )
+            .into_val(&s.env),
+        sub_invokes: &[],
+    }];
+    let top = MockAuthInvoke {
+        contract: &s.contract.address,
+        fn_name: "fund_fx_shortfall",
+        args: ().into_val(&s.env),
+        sub_invokes: &sub,
+    };
+    s.env.mock_auths(&[MockAuth {
+        address: &s.buyer,
+        invoke: &top,
+    }]);
+
+    let result = s.contract.try_fund_fx_shortfall();
+    assert!(
+        result.is_err(),
+        "a signature covering a different amount must not authorize fund_fx_shortfall: {result:?}"
+    );
+    assert!(!s.contract.get_commitment().fx_shortfall_funded);
 }

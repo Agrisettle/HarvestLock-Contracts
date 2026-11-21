@@ -41,6 +41,32 @@ lifetime has decayed below half the network max, closing the gap where
 a dormant `Locked` escrow's own state could be archived while still
 needed (`docs/storage-ttl.md`; #98).
 
+`initialize` now bounds `total_amount` at `MAX_TOTAL_AMOUNT`
+(`i128::MAX / 10_000`) and rejects anything above it with the new
+`Error::AmountTooLarge` (#249). Previously it only rejected non-positive
+amounts, so it would accept a commitment whose `bps_amount` multiply
+(`total * bps`) overflows — with `overflow-checks = true` in the release
+profile that is a trap in `lock`, `claim_*`, `deposit_amount` or `settle`,
+three calls after the value was supplied. Every `bps_amount` call site is
+safe by construction once the bound holds; tests cover the bound itself,
+one stroop over it, and the multiply at the bound. An absurd total that
+could never have been locked is now refused at the call that took it.
+
+Two reference docs for operating across the ten live WASM builds:
+`docs/commitment-schema-history.md` (#248) records, per deployment, the
+`Commitment`/`OracleConfig`/`AllocationMember`/`Status`/`Error` shape,
+its ScMap key order and the functions that build added, cross-checked
+against `git log -p contracts/escrow/src/lib.rs`, and states which
+differences break a decoder built against the latest bindings;
+`docs/migration-runbook.md` (#250) covers what a new hash means for deals
+that are already open, the per-status cost of unwinding one with `cancel`,
+and the exact signing sequence for replacing it. Both are linked from
+`docs/versioning.md`. What a buyer's signature covers at the token-transfer
+level is now pinned too — `lock`, `fund_remainder` and `fund_fx_shortfall`
+assert their exact nested `transfer` amount and reject a `mock_auths` entry
+scoped to a different one (#253), with the amounts documented in
+`docs/authorization-matrix.md` §1.1.
+
 Security review of the permissionless tranche-opening calls, on the
 record (#2): `docs/permissionless-release-review.md` answers the open
 "is this actually safe?" question with a full reader audit of
