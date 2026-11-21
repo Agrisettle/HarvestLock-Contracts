@@ -471,7 +471,12 @@ pause, and no upgrade function — nothing exists to steal or extend, which
 is the strongest form of PRD §4.5's "no unilateral drain, pause, or
 redirect" and §16.3's "no upgrade key" answer. No test is possible or
 needed for a capability that doesn't exist; the guard is that any PR adding
-one violates authorization-matrix §4 and PRD §4.5 explicitly. Consequence
+one violates authorization-matrix §4 and PRD §4.5 explicitly. Since #244
+that guard is mechanical as well as a reviewer's judgement:
+`contracts/escrow/interface.snapshot` pins every exported function, and
+`.github/scripts/check_interface_snapshot.sh` fails on any new entry point
+and names it, so an `upgrade`/`set_admin`/`pause` can't be added without a
+visible diff to that file (docs/versioning.md §6). Consequence
 accepted in exchange: a deployed instance can't be patched in place — a
 change means a new WASM and a new contract ID.
 
