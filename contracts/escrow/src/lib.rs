@@ -186,6 +186,57 @@ pub enum Status {
     Disputed,
 }
 
+/// Whose authorization a callable action needs, as advertised by
+/// [`Self::available_actions`].
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthParty {
+    /// No `require_auth()` at all — anyone may submit the call.
+    Anyone,
+    /// The commitment's current `buyer`.
+    Buyer,
+    /// The commitment's `cooperative`.
+    Cooperative,
+    /// The commitment's `warehouse_operator`.
+    WarehouseOperator,
+    /// Both the buyer and the cooperative (deduplicated by address).
+    BuyerAndCooperative,
+    /// All three named parties (buyer, cooperative, warehouse operator),
+    /// deduplicated by address.
+    AllParties,
+    /// Any one of the three named parties, authenticating as the `flagger`
+    /// it passes. Strangers are refused with `Error::NotAParty`.
+    AnyNamedParty,
+    /// Current buyer, cooperative, **and** the incoming buyer supplied as
+    /// `new_buyer` — the three signatures `reassign_buyer` requires.
+    BuyerCooperativeAndNewBuyer,
+}
+
+/// The timestamp, if any, that bounds a callable action. The variant says
+/// which side of the boundary the action lives on, so a client can tell
+/// "claim closes at T" from "expiry opens just after T" without knowing
+/// each function's guard by heart.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionDeadline {
+    /// No deadline gates this action in the current state.
+    None,
+    /// Legal while `env.ledger().timestamp() <= T`.
+    Inclusive(u64),
+    /// Legal once `env.ledger().timestamp() > T`.
+    Exclusive(u64),
+}
+
+/// One state-changing call that the current commitment permits.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Action {
+    /// The public function to invoke, as a Soroban symbol.
+    pub function: Symbol,
+    pub auth: AuthParty,
+    pub deadline: ActionDeadline,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -831,12 +882,7 @@ impl EscrowContract {
     /// quality pricing schedule `grade_price_bps`).
     pub fn set_allocation(env: Env, members: Vec<AllocationMember>) -> Result<(), Error> {
         let c = Self::load(&env)?;
-        if c.status != Status::Draft {
-            return Err(Error::InvalidState);
-        }
-        if env.storage().instance().has(&DataKey::Allocation) {
-            return Err(Error::AllocationAlreadySet);
-        }
+        Self::can_set_allocation(&env, &c)?;
         if members.is_empty() {
             return Err(Error::InvalidAllocation);
         }
@@ -883,9 +929,7 @@ impl EscrowContract {
     /// replaces it with what was actually verified.)
     pub fn lock(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Draft {
-            return Err(Error::InvalidState);
-        }
+        Self::can_lock(&c)?;
         c.buyer.require_auth();
 
         let deposit = Self::deposit_amount(&c);
@@ -933,7 +977,7 @@ impl EscrowContract {
     /// deliberately gives nobody (PRD §4.5) while adding a liveness
     /// dependency, not safety.
     pub fn release_advance_1(env: Env) -> Result<(), Error> {
-        Self::open_tranche(&env, Tranche::One, Status::Locked, Status::Advance1Released)
+        Self::open_tranche(&env, Tranche::One)
     }
 
     /// Cooperative claims tranche 1, if within the window. Requires
@@ -966,9 +1010,7 @@ impl EscrowContract {
     /// claimed yet — crop progress doesn't wait on paperwork.
     pub fn mark_checkpoint(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Advance1Released {
-            return Err(Error::InvalidState);
-        }
+        Self::can_mark_checkpoint(&c)?;
         c.warehouse_operator.require_auth();
         Self::set_status(&env, &mut c, Status::CheckpointPassed);
         Self::save(&env, &c);
@@ -985,12 +1027,7 @@ impl EscrowContract {
     /// `CheckpointPassed` requires the warehouse operator's auth-gated
     /// `mark_checkpoint` first.
     pub fn release_advance_2(env: Env) -> Result<(), Error> {
-        Self::open_tranche(
-            &env,
-            Tranche::Two,
-            Status::CheckpointPassed,
-            Status::Advance2Released,
-        )
+        Self::open_tranche(&env, Tranche::Two)
     }
 
     /// Cooperative claims tranche 2, if within the window. Requires
@@ -1015,9 +1052,7 @@ impl EscrowContract {
     /// triggerable by just anyone.
     pub fn ready_for_delivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Advance2Released {
-            return Err(Error::InvalidState);
-        }
+        Self::can_ready_for_delivery(&c)?;
         c.cooperative.require_auth();
         c.remainder_deadline = env.ledger().timestamp() + c.remainder_window_secs;
         Self::set_status(&env, &mut c, Status::ReadyForDelivery);
@@ -1039,15 +1074,7 @@ impl EscrowContract {
     /// calls are never both legal at the same timestamp.
     pub fn fund_remainder(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
-        if c.remainder_funded {
-            return Err(Error::RemainderAlreadyFunded);
-        }
-        if env.ledger().timestamp() > c.remainder_deadline {
-            return Err(Error::RemainderWindowPassed);
-        }
+        Self::can_fund_remainder(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
         let remainder = c.total_amount - Self::deposit_amount(&c);
@@ -1084,15 +1111,7 @@ impl EscrowContract {
     /// the matter (deadline passed, unfunded) is true.
     pub fn expire_remainder_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
-        if c.remainder_funded {
-            return Err(Error::RemainderAlreadyFunded);
-        }
-        if env.ledger().timestamp() <= c.remainder_deadline {
-            return Err(Error::RemainderWindowNotPassed);
-        }
+        Self::can_expire_remainder_window(&c, env.ledger().timestamp())?;
 
         // Effects before interaction — see `lock`'s comment for why.
         Self::set_status(&env, &mut c, Status::Defaulted);
@@ -1121,17 +1140,7 @@ impl EscrowContract {
     /// occurred worth recording as a forfeiture.
     pub fn reclaim_on_nondelivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery => {}
-            _ => return Err(Error::InvalidState),
-        }
-        if env.ledger().timestamp() <= c.delivery_deadline {
-            return Err(Error::DeliveryDeadlineNotPassed);
-        }
+        Self::can_reclaim_on_nondelivery(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
         // Effects before interaction — see `lock`'s comment for why.
@@ -1181,12 +1190,7 @@ impl EscrowContract {
         grade_index: u32,
     ) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
-        if !c.remainder_funded {
-            return Err(Error::RemainderNotFunded);
-        }
+        Self::can_confirm_delivery(&c)?;
         let Some(grade_bps) = c.grade_price_bps.get(grade_index) else {
             return Err(Error::InvalidGradeIndex);
         };
@@ -1251,24 +1255,8 @@ impl EscrowContract {
     /// already-recorded state, not on who triggers it.
     pub fn settle(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
-        if !c.advance1_claimed && !c.advance1_expired {
-            return Err(Error::TrancheUnresolved);
-        }
-        if !c.advance2_claimed && !c.advance2_expired {
-            return Err(Error::TrancheUnresolved);
-        }
+        Self::can_settle(&env, &c)?;
         let has_oracle = env.storage().instance().has(&DataKey::OracleConfig);
-        if has_oracle {
-            if !c.fx_resolved {
-                return Err(Error::FxNotResolved);
-            }
-            if c.fx_shortfall_amount > 0 && !c.fx_shortfall_funded {
-                return Err(Error::FxShortfallUnfunded);
-            }
-        }
 
         let adjusted_total = if has_oracle {
             c.fx_adjusted_total
@@ -1356,18 +1344,7 @@ impl EscrowContract {
     /// exactly what `refresh_fx_quote_status` exists for.)
     pub fn resolve_fx_shortfall(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
-        if !c.advance1_claimed && !c.advance1_expired {
-            return Err(Error::TrancheUnresolved);
-        }
-        if !c.advance2_claimed && !c.advance2_expired {
-            return Err(Error::TrancheUnresolved);
-        }
-        if c.fx_resolved {
-            return Err(Error::FxAlreadyResolved);
-        }
+        Self::can_resolve_fx_shortfall(&env, &c)?;
         let oracle_config: OracleConfig = env
             .storage()
             .instance()
@@ -1462,12 +1439,7 @@ impl EscrowContract {
     /// has run — there is nothing left to wait for.
     pub fn refresh_fx_quote_status(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
-        if c.fx_resolved {
-            return Err(Error::FxAlreadyResolved);
-        }
+        Self::can_refresh_fx_quote_status(&env, &c)?;
         let oracle_config: OracleConfig = env
             .storage()
             .instance()
@@ -1493,21 +1465,7 @@ impl EscrowContract {
     /// deadline second itself is still the buyer's to pay in.
     pub fn fund_fx_shortfall(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
-        if !c.fx_resolved {
-            return Err(Error::FxNotResolved);
-        }
-        if c.fx_shortfall_amount == 0 {
-            return Err(Error::NoFxShortfall);
-        }
-        if c.fx_shortfall_funded {
-            return Err(Error::FxShortfallAlreadyFunded);
-        }
-        if env.ledger().timestamp() > c.fx_shortfall_deadline {
-            return Err(Error::FxShortfallWindowPassed);
-        }
+        Self::can_fund_fx_shortfall(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
         let amount = c.fx_shortfall_amount;
@@ -1538,21 +1496,7 @@ impl EscrowContract {
     /// deadline has passed.
     pub fn expire_fx_shortfall_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
-        if !c.fx_resolved {
-            return Err(Error::FxNotResolved);
-        }
-        if c.fx_shortfall_amount == 0 {
-            return Err(Error::NoFxShortfall);
-        }
-        if c.fx_shortfall_funded {
-            return Err(Error::FxShortfallAlreadyFunded);
-        }
-        if env.ledger().timestamp() <= c.fx_shortfall_deadline {
-            return Err(Error::FxShortfallWindowNotPassed);
-        }
+        Self::can_expire_fx_shortfall_window(&c, env.ledger().timestamp())?;
 
         // Effects before interaction — see `lock`'s comment for why.
         Self::set_status(&env, &mut c, Status::Defaulted);
@@ -1590,15 +1534,7 @@ impl EscrowContract {
     /// to inspect the balance change.
     pub fn cancel(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        match c.status {
-            Status::Draft
-            | Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::can_cancel(&c)?;
         Self::require_once_each(&[&c.buyer, &c.cooperative]);
 
         // Effects before interaction — see `lock`'s comment for why.
@@ -1637,15 +1573,7 @@ impl EscrowContract {
     /// dressed up as a real transfer.
     pub fn reassign_buyer(env: Env, new_buyer: Address) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        match c.status {
-            Status::Draft
-            | Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::can_reassign_buyer(&c)?;
         Self::require_once_each(&[&c.buyer, &c.cooperative, &new_buyer]);
 
         c.buyer = new_buyer;
@@ -1691,18 +1619,7 @@ impl EscrowContract {
     /// operator.
     pub fn flag_dispute(env: Env, flagger: Address) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery
-            | Status::Delivered => {}
-            _ => return Err(Error::InvalidState),
-        }
-        if flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator {
-            return Err(Error::NotAParty);
-        }
+        Self::can_flag_dispute(&c, &flagger)?;
         flagger.require_auth();
 
         c.dispute_pre_status = c.status;
@@ -1730,9 +1647,7 @@ impl EscrowContract {
     /// the decision away from three parties who have already agreed.
     pub fn resolve_dispute(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Disputed {
-            return Err(Error::InvalidState);
-        }
+        Self::can_resolve_dispute(&c)?;
         Self::require_once_each(&[&c.buyer, &c.cooperative, &c.warehouse_operator]);
 
         let restored = c.dispute_pre_status;
@@ -1763,12 +1678,7 @@ impl EscrowContract {
     /// works.
     pub fn expire_dispute_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        if c.status != Status::Disputed {
-            return Err(Error::InvalidState);
-        }
-        if env.ledger().timestamp() <= c.dispute_deadline {
-            return Err(Error::DisputeWindowNotPassed);
-        }
+        Self::can_expire_dispute_window(&c, env.ledger().timestamp())?;
 
         let restored = c.dispute_pre_status;
         c.dispute_pre_status = Status::Draft;
@@ -1786,6 +1696,240 @@ impl EscrowContract {
     /// No auth required — read-only view, returns the full commitment state.
     pub fn get_commitment(env: Env) -> Result<Commitment, Error> {
         Self::load(&env)
+    }
+
+    /// No auth required — read-only view, callable by anyone.
+    ///
+    /// Returns every *state-changing* call the current commitment permits,
+    /// each with the auth it needs and the timestamp that bounds it (if
+    /// any). This is the contract's answer to the hand-written "who can
+    /// call what, when" table in `docs/griefing-and-inaction.md` §1: a
+    /// client can render exactly the legal buttons instead of rebuilding
+    /// the state machine.
+    ///
+    /// Every entry is produced by the same private predicate the real
+    /// guard calls (`can_lock`, `can_claim_tranche`, `can_settle`, ...), so
+    /// the view cannot drift from the checks that actually authorize the
+    /// call. A predicate is `Ok` only when every state-derived guard would
+    /// pass; argument-specific validation (a valid `grade_index`, a
+    /// non-empty allocation list, a `new_buyer` address, a `flagger` that
+    /// is one of the named parties) remains at the call site because it
+    /// isn't knowable from the commitment.
+    ///
+    /// Two deliberate exclusions: `initialize` (there is no commitment to
+    /// derive actions from before it runs — the view returns an empty list
+    /// in that case) and the read-only getters/`oracle_rate` (they don't
+    /// change state and are always callable). Oracle-backed actions are
+    /// advertised purely from local state — a configured oracle and an
+    /// unresolved FX step — since quote freshness is an external read, not
+    /// a guard predicate. The `fx_quote_stale` flag on `Commitment` is the
+    /// companion signal for "waiting on a fresh quote"; an advertised
+    /// `resolve_fx_shortfall` can still return `Error::OracleStale` until
+    /// Reflector publishes one.
+    pub fn available_actions(env: Env) -> Vec<Action> {
+        let Ok(c) = Self::load(&env) else {
+            // No commitment yet: there is no state-derived action to name.
+            return Vec::new(&env);
+        };
+        let now = env.ledger().timestamp();
+        let mut actions = Vec::new(&env);
+
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_set_allocation(&env, &c),
+            "set_allocation",
+            AuthParty::Cooperative,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_lock(&c),
+            "lock",
+            AuthParty::Buyer,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_open_tranche(&c, Tranche::One),
+            "release_advance_1",
+            AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_claim_tranche(&c, Tranche::One, now),
+            "claim_advance_1",
+            AuthParty::Cooperative,
+            ActionDeadline::Inclusive(c.advance1_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_reclaim_tranche(&c, Tranche::One, now),
+            "reclaim_advance_1",
+            AuthParty::Buyer,
+            ActionDeadline::Exclusive(c.advance1_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_mark_checkpoint(&c),
+            "mark_checkpoint",
+            AuthParty::WarehouseOperator,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_open_tranche(&c, Tranche::Two),
+            "release_advance_2",
+            AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_claim_tranche(&c, Tranche::Two, now),
+            "claim_advance_2",
+            AuthParty::Cooperative,
+            ActionDeadline::Inclusive(c.advance2_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_reclaim_tranche(&c, Tranche::Two, now),
+            "reclaim_advance_2",
+            AuthParty::Buyer,
+            ActionDeadline::Exclusive(c.advance2_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_ready_for_delivery(&c),
+            "ready_for_delivery",
+            AuthParty::Cooperative,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_fund_remainder(&c, now),
+            "fund_remainder",
+            AuthParty::Buyer,
+            ActionDeadline::Inclusive(c.remainder_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_expire_remainder_window(&c, now),
+            "expire_remainder_window",
+            AuthParty::Anyone,
+            ActionDeadline::Exclusive(c.remainder_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_reclaim_on_nondelivery(&c, now),
+            "reclaim_on_nondelivery",
+            AuthParty::Buyer,
+            ActionDeadline::Exclusive(c.delivery_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_confirm_delivery(&c),
+            "confirm_delivery",
+            AuthParty::WarehouseOperator,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_settle(&env, &c),
+            "settle",
+            AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_resolve_fx_shortfall(&env, &c),
+            "resolve_fx_shortfall",
+            AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_refresh_fx_quote_status(&env, &c),
+            "refresh_fx_quote_status",
+            AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_fund_fx_shortfall(&c, now),
+            "fund_fx_shortfall",
+            AuthParty::Buyer,
+            ActionDeadline::Inclusive(c.fx_shortfall_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_expire_fx_shortfall_window(&c, now),
+            "expire_fx_shortfall_window",
+            AuthParty::Anyone,
+            ActionDeadline::Exclusive(c.fx_shortfall_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_cancel(&c),
+            "cancel",
+            AuthParty::BuyerAndCooperative,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_reassign_buyer(&c),
+            "reassign_buyer",
+            AuthParty::BuyerCooperativeAndNewBuyer,
+            ActionDeadline::None,
+        );
+        // The buyer is always one of the three named parties, so passing it
+        // as the representative flagger makes this the same predicate the
+        // real call uses (which also checks the caller-supplied address).
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_flag_dispute(&c, &c.buyer),
+            "flag_dispute",
+            AuthParty::AnyNamedParty,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_resolve_dispute(&c),
+            "resolve_dispute",
+            AuthParty::AllParties,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_expire_dispute_window(&c, now),
+            "expire_dispute_window",
+            AuthParty::Anyone,
+            ActionDeadline::Exclusive(c.dispute_deadline),
+        );
+        actions
     }
 
     // -- internal --
@@ -1839,6 +1983,273 @@ impl EscrowContract {
 
     fn save(env: &Env, c: &Commitment) {
         env.storage().instance().set(&DataKey::Commitment, c);
+    }
+
+    // -- shared guard predicates --
+    //
+    // Every state-derived guard on a state-changing call lives in exactly
+    // one of the `can_*` functions below. The public function calls the same
+    // predicate (and maps its `Err` straight through), and `available_actions`
+    // calls it to decide whether to advertise the action. That shared call
+    // is what stops the view from drifting from the real checks — including
+    // which error wins when several guards fail at once.
+    //
+    // Caller-supplied argument validation that cannot be derived from the
+    // commitment (a valid `grade_index`, a non-empty allocation list, a
+    // `new_buyer`, a `flagger` that belongs to the deal) stays at the call
+    // site; the predicates cover everything the view can actually know.
+
+    fn push_action(
+        env: &Env,
+        actions: &mut Vec<Action>,
+        allowed: Result<(), Error>,
+        name: &str,
+        auth: AuthParty,
+        deadline: ActionDeadline,
+    ) {
+        if allowed.is_ok() {
+            actions.push_back(Action {
+                function: Symbol::new(env, name),
+                auth,
+                deadline,
+            });
+        }
+    }
+
+    fn can_set_allocation(env: &Env, c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Draft {
+            return Err(Error::InvalidState);
+        }
+        if env.storage().instance().has(&DataKey::Allocation) {
+            return Err(Error::AllocationAlreadySet);
+        }
+        Ok(())
+    }
+
+    fn can_lock(c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Draft {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_mark_checkpoint(c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Advance1Released {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_ready_for_delivery(c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Advance2Released {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_fund_remainder(c: &Commitment, now: u64) -> Result<(), Error> {
+        if c.status != Status::ReadyForDelivery {
+            return Err(Error::InvalidState);
+        }
+        if c.remainder_funded {
+            return Err(Error::RemainderAlreadyFunded);
+        }
+        if now > c.remainder_deadline {
+            return Err(Error::RemainderWindowPassed);
+        }
+        Ok(())
+    }
+
+    fn can_expire_remainder_window(c: &Commitment, now: u64) -> Result<(), Error> {
+        if c.status != Status::ReadyForDelivery {
+            return Err(Error::InvalidState);
+        }
+        if c.remainder_funded {
+            return Err(Error::RemainderAlreadyFunded);
+        }
+        if now <= c.remainder_deadline {
+            return Err(Error::RemainderWindowNotPassed);
+        }
+        Ok(())
+    }
+
+    fn can_reclaim_on_nondelivery(c: &Commitment, now: u64) -> Result<(), Error> {
+        match c.status {
+            Status::Locked
+            | Status::Advance1Released
+            | Status::CheckpointPassed
+            | Status::Advance2Released
+            | Status::ReadyForDelivery => {}
+            _ => return Err(Error::InvalidState),
+        }
+        if now <= c.delivery_deadline {
+            return Err(Error::DeliveryDeadlineNotPassed);
+        }
+        Ok(())
+    }
+
+    fn can_confirm_delivery(c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::ReadyForDelivery {
+            return Err(Error::InvalidState);
+        }
+        if !c.remainder_funded {
+            return Err(Error::RemainderNotFunded);
+        }
+        Ok(())
+    }
+
+    fn tranches_resolved(c: &Commitment) -> Result<(), Error> {
+        if !c.advance1_claimed && !c.advance1_expired {
+            return Err(Error::TrancheUnresolved);
+        }
+        if !c.advance2_claimed && !c.advance2_expired {
+            return Err(Error::TrancheUnresolved);
+        }
+        Ok(())
+    }
+
+    fn can_settle(env: &Env, c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        Self::tranches_resolved(c)?;
+        if env.storage().instance().has(&DataKey::OracleConfig) {
+            if !c.fx_resolved {
+                return Err(Error::FxNotResolved);
+            }
+            if c.fx_shortfall_amount > 0 && !c.fx_shortfall_funded {
+                return Err(Error::FxShortfallUnfunded);
+            }
+        }
+        Ok(())
+    }
+
+    fn can_resolve_fx_shortfall(env: &Env, c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        Self::tranches_resolved(c)?;
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        if !env.storage().instance().has(&DataKey::OracleConfig) {
+            return Err(Error::OracleNotConfigured);
+        }
+        Ok(())
+    }
+
+    fn can_refresh_fx_quote_status(env: &Env, c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        if !env.storage().instance().has(&DataKey::OracleConfig) {
+            return Err(Error::OracleNotConfigured);
+        }
+        Ok(())
+    }
+
+    fn can_fund_fx_shortfall(c: &Commitment, now: u64) -> Result<(), Error> {
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if !c.fx_resolved {
+            return Err(Error::FxNotResolved);
+        }
+        if c.fx_shortfall_amount == 0 {
+            return Err(Error::NoFxShortfall);
+        }
+        if c.fx_shortfall_funded {
+            return Err(Error::FxShortfallAlreadyFunded);
+        }
+        if now > c.fx_shortfall_deadline {
+            return Err(Error::FxShortfallWindowPassed);
+        }
+        Ok(())
+    }
+
+    fn can_expire_fx_shortfall_window(c: &Commitment, now: u64) -> Result<(), Error> {
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if !c.fx_resolved {
+            return Err(Error::FxNotResolved);
+        }
+        if c.fx_shortfall_amount == 0 {
+            return Err(Error::NoFxShortfall);
+        }
+        if c.fx_shortfall_funded {
+            return Err(Error::FxShortfallAlreadyFunded);
+        }
+        if now <= c.fx_shortfall_deadline {
+            return Err(Error::FxShortfallWindowNotPassed);
+        }
+        Ok(())
+    }
+
+    fn is_pre_delivery_status(status: Status) -> bool {
+        matches!(
+            status,
+            Status::Draft
+                | Status::Locked
+                | Status::Advance1Released
+                | Status::CheckpointPassed
+                | Status::Advance2Released
+                | Status::ReadyForDelivery
+        )
+    }
+
+    fn can_cancel(c: &Commitment) -> Result<(), Error> {
+        if !Self::is_pre_delivery_status(c.status) {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_reassign_buyer(c: &Commitment) -> Result<(), Error> {
+        if !Self::is_pre_delivery_status(c.status) {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_flag_dispute(c: &Commitment, flagger: &Address) -> Result<(), Error> {
+        match c.status {
+            Status::Locked
+            | Status::Advance1Released
+            | Status::CheckpointPassed
+            | Status::Advance2Released
+            | Status::ReadyForDelivery
+            | Status::Delivered => {}
+            _ => return Err(Error::InvalidState),
+        }
+        // Kept as the same Address PartialEq expression the #122 audit pins
+        // in tests/address_equality.rs, now in one place for the view and the
+        // real guard.
+        let flagger = flagger.clone();
+        if flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator {
+            return Err(Error::NotAParty);
+        }
+        Ok(())
+    }
+
+    fn can_resolve_dispute(c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Disputed {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_expire_dispute_window(c: &Commitment, now: u64) -> Result<(), Error> {
+        if c.status != Status::Disputed {
+            return Err(Error::InvalidState);
+        }
+        if now <= c.dispute_deadline {
+            return Err(Error::DisputeWindowNotPassed);
+        }
+        Ok(())
     }
 
     /// The one place `status` is assigned after `initialize` — assigns and
@@ -1942,14 +2353,65 @@ impl EscrowContract {
         }
     }
 
-    fn open_tranche(env: &Env, t: Tranche, required: Status, next: Status) -> Result<(), Error> {
-        let mut c = Self::load(env)?;
-        if c.status != required {
+    fn tranche_required_status(t: Tranche) -> Status {
+        match t {
+            Tranche::One => Status::Locked,
+            Tranche::Two => Status::CheckpointPassed,
+        }
+    }
+
+    fn tranche_next_status(t: Tranche) -> Status {
+        match t {
+            Tranche::One => Status::Advance1Released,
+            Tranche::Two => Status::Advance2Released,
+        }
+    }
+
+    fn can_open_tranche(c: &Commitment, t: Tranche) -> Result<(), Error> {
+        if c.status != Self::tranche_required_status(t) {
             return Err(Error::InvalidState);
         }
+        Ok(())
+    }
+
+    fn can_claim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+        if Self::tranche_deadline(c, t) == 0 {
+            return Err(Error::NotYetOpened);
+        }
+        if Self::tranche_claimed(c, t) {
+            return Err(Error::AlreadyClaimed);
+        }
+        if Self::tranche_expired(c, t) {
+            return Err(Error::AlreadyExpired);
+        }
+        if now > Self::tranche_deadline(c, t) {
+            return Err(Error::ClaimWindowPassed);
+        }
+        Ok(())
+    }
+
+    fn can_reclaim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+        if Self::tranche_deadline(c, t) == 0 {
+            return Err(Error::NotYetOpened);
+        }
+        if Self::tranche_claimed(c, t) {
+            return Err(Error::AlreadyClaimed);
+        }
+        if Self::tranche_expired(c, t) {
+            return Err(Error::AlreadyExpired);
+        }
+        if now <= Self::tranche_deadline(c, t) {
+            return Err(Error::ClaimWindowNotPassed);
+        }
+        Ok(())
+    }
+
+    fn open_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
+        let mut c = Self::load(env)?;
+        Self::can_open_tranche(&c, t)?;
         let deadline = env.ledger().timestamp() + c.claim_window_secs;
         Self::set_tranche_deadline(&mut c, t, deadline);
-        Self::set_status(env, &mut c, next);
+        Self::set_status(env, &mut c, Self::tranche_next_status(t));
         Self::save(env, &c);
         Ok(())
     }
@@ -1957,19 +2419,7 @@ impl EscrowContract {
     fn claim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
         c.cooperative.require_auth();
-
-        if Self::tranche_deadline(&c, t) == 0 {
-            return Err(Error::NotYetOpened);
-        }
-        if Self::tranche_claimed(&c, t) {
-            return Err(Error::AlreadyClaimed);
-        }
-        if Self::tranche_expired(&c, t) {
-            return Err(Error::AlreadyExpired);
-        }
-        if env.ledger().timestamp() > Self::tranche_deadline(&c, t) {
-            return Err(Error::ClaimWindowPassed);
-        }
+        Self::can_claim_tranche(&c, t, env.ledger().timestamp())?;
 
         let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
@@ -1988,19 +2438,7 @@ impl EscrowContract {
     fn reclaim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
         c.buyer.require_auth();
-
-        if Self::tranche_deadline(&c, t) == 0 {
-            return Err(Error::NotYetOpened);
-        }
-        if Self::tranche_claimed(&c, t) {
-            return Err(Error::AlreadyClaimed);
-        }
-        if Self::tranche_expired(&c, t) {
-            return Err(Error::AlreadyExpired);
-        }
-        if env.ledger().timestamp() <= Self::tranche_deadline(&c, t) {
-            return Err(Error::ClaimWindowNotPassed);
-        }
+        Self::can_reclaim_tranche(&c, t, env.ledger().timestamp())?;
 
         let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
