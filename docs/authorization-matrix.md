@@ -80,6 +80,10 @@ that address signs once (tests: `cancel_succeeds_when_buyer_and_cooperative_shar
 `reassign_buyer_succeeds_when_buyer_and_cooperative_share_one_address`,
 `all_three_identical_parties_accept_only_that_principals_signature`,
 `two_of_three_identical_parties_still_require_the_distinct_partys_auth`).
+For a runnable client-side walkthrough of collecting those signatures —
+including the shared-address case — see
+[`examples/ts/cancel-multiparty.ts`](../examples/ts/cancel-multiparty.ts) and
+its [README](../examples/ts/README.md).
 
 ## 2. Why "permissionless" is safe here, not sloppy
 
