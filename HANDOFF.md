@@ -968,7 +968,81 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 20 Nov 2026 — pinned the toolchain: new root
+*Last updated: 21 Nov 2026 — four-issue bundle (#254, #256, #258, #259):
+one new contract read view, a real FX-decimals bug fix, rounding-dust tests,
+and a new WASM-capability guard. **No workflow files touched** (maintainer
+policy), and the contract's storage `Commitment` struct is unchanged.
+
+- **#254 — compiled-artifact import guard.** New standalone crate
+  `tools/wasm-imports` (deliberately outside the contract workspace, so it
+  cannot change what `stellar contract build` compiles) reads the release
+  WASM's import section with `wasmparser`, maps each short import name to its
+  Soroban host function using a vendored copy of `soroban-env-common` 29.0.1's
+  `env.json`, prints the list, and **fails** on denylisted capabilities
+  (`update_current_contract_wasm`,
+  `update_current_contract_executable_ref`, `upload_wasm`, `create_contract`,
+  `create_contract_with_constructor`, `create_asset_contract`,
+  `create_external_ref_contract`). The full list is committed as
+  `tools/wasm-imports/imports.snapshot` — currently 27 imports, all ordinary
+  Soroban surface (auth, instance storage/TTL, `call`, events, ledger facts,
+  value/collection helpers), with no upgrade/deploy import among them. A new
+  capability therefore shows up as a review diff even before it is
+  denylisted. Tests assemble WAT fixtures, including one importing `l6`
+  (`update_current_contract_wasm`) and one importing `l3` (`create_contract`),
+  and assert `check_denied` fails; another pins the bug found while building
+  the tool — the first map-shaped implementation kept only one import per
+  module, swallowing 19 of the real artifact's 27 imports. Docs:
+  `tools/wasm-imports/README.md` (usage, denylist, `env.json` refresh, limits)
+  and threat-model entry 26 now cites it as the artifact-level guard. CI
+  wiring is documented in the README but deliberately **not** applied to
+  `.github/workflows/test.yml`; maintainers own that change.
+- **#256 — versioned read view.** New `get_commitment_view()` returns
+  `CommitmentView` with `schema_version = 1`
+  (`COMMITMENT_VIEW_SCHEMA_VERSION`), `status`/`created_at` at the top level,
+  and semantic groups `parties`, `terms`, `tranches` (per-tranche deadline /
+  claimed / expired), `funding`, `delivery`, `fx` (including `configured`, so
+  "no oracle" is distinguishable from "resolved to zero"), and `dispute`. It
+  is a total projection of all 33 `Commitment` fields; `get_commitment` is
+  kept unchanged for backward compatibility. Added a `docs/versioning.md`
+  §2.1 stability promise (view-shape changes bump the version; storage-only
+  changes do not), updated `docs/0002-interface-spec.md` (29 → 30 methods,
+  18 → 19 permissionless, 7 → 8 reads) and `docs/authorization-matrix.md`
+  (30 → 31 public functions, 5 → 6 views). Measured on the test host:
+  `get_commitment` 218,476 CPU instructions vs `get_commitment_view` 223,471
+  (~2.3% more, same single storage read); a test pins that the view does not
+  start re-reading storage. New tests: all-field mapping, oracle-unconfigured
+  reporting, pre-initialize `NotInitialized`, and the cost bound.
+- **#258 — settlement-token decimals.** `resolve_fx_shortfall` now reads
+  `token.decimals()` and rescales the 7-decimal FX result into the token's own
+  units instead of assuming the token is 7-decimal like native XLM/USDC. The
+  fix was explicit scaling rather than rejecting non-7-decimal tokens in
+  `initialize`, because a real pilot would settle in 6-decimal USDC; no new
+  `Error` variant, so the discriminant snapshot is unchanged. Regression test
+  uses a 6-decimal SEP-41 mock token and asserts `fx_adjusted_total = 700_000`
+  where the old formula would produce `7_000_000`; it also follows the money
+  through `settle`. `OracleConfig`/`resolve_fx_shortfall` doc comments and
+  `docs/reflector-decimals-assumption.md` §5 record the choice and the
+  remaining token-provider trust assumption.
+- **#259 — rounding dust.** New `contracts/escrow/tests/rounding_dust.rs`
+  (7 tests) uses `total_amount = 199`, `advance1_bps = advance2_bps = 1_500`:
+  the deposit floors to 59 while the tranches pay 29 + 29, leaving exactly one
+  unit in the contract. The suite follows that unit through `cancel` (buyer),
+  `expire_remainder_window` (cooperative), `reclaim_on_nondelivery` (buyer),
+  full `settle` (cooperative, because the obligation still exceeds the
+  balance), partial `settle` (buyer), and `expire_fx_shortfall_window`
+  (cooperative). `deposit_amount`'s doc comment now names the recipient on
+  every terminal path.
+
+Verified: `cargo fmt --check` clean; both guard scripts green (discriminants
+1..38; all 31 public-method doc comments name their auth party); `cargo test`
+**238 passing** (174 unit + 64 integration across the eight suites);
+`cargo test --manifest-path tools/wasm-imports/Cargo.toml` 9 passing; the
+tool's default check exits 0 against a fresh `stellar contract build`
+artifact. Test-snapshot policy unchanged: the new tests' snapshots are left
+untracked, and the 9 tracked files a local re-run re-recorded (random member
+hashes) were restored to HEAD rather than committed.
+
+Prior entry: 20 Nov 2026 — pinned the toolchain: new root
 `rust-toolchain.toml` (`channel = "1.97.1"`, `targets =
 ["wasm32v1-none"]`, `components = ["rustfmt", "clippy"]`). **No contract
 code changed, no test added or removed.** The problem it closes: the WASM

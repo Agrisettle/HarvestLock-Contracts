@@ -445,10 +445,11 @@ pub struct OracleConfig {
     /// *at whatever rate happened to hold when the deal was funded*.
     /// `resolve_fx_shortfall` reprices this at a fresh rate; the gap
     /// between that and what's actually escrowed is PRD §4.2's FX risk,
-    /// make concrete. Using the same 7-decimal convention on both sides
-    /// of the multiplication is what lets `resolve_fx_shortfall`'s
-    /// conversion formula skip a separate unit-normalization step — see
-    /// its doc comment for the worked example.
+    /// make concrete. This field always uses the 7-decimal convention;
+    /// `resolve_fx_shortfall` converts the result to the settlement token's
+    /// own `decimals()` (which is not necessarily 7 — see #258) before
+    /// comparing it with the escrowed balance. See that function's doc
+    /// comment for the worked example.
     ///
     /// **Not** the oracle's `decimals()` — that is a property of the
     /// oracle, read live at settlement and assumed immutable (see
@@ -689,6 +690,195 @@ pub struct Commitment {
     /// (unanimous consent) does not — good-faith resolution should not
     /// shorten the window for future disputes.
     pub dispute_count: u32,
+}
+
+/// The version of the [`CommitmentView`] read shape.
+///
+/// Bumped whenever a field is added, removed, renamed, or changes meaning —
+/// see `docs/versioning.md` §2. Storage-only changes to [`Commitment`] do
+/// **not** bump it; that is the whole point of the view.
+pub const COMMITMENT_VIEW_SCHEMA_VERSION: u32 = 1;
+
+/// The three named parties plus the settlement token.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentParties {
+    pub buyer: Address,
+    pub cooperative: Address,
+    pub warehouse_operator: Address,
+    pub token: Address,
+}
+
+/// The deal's agreed terms and windows, fixed at `initialize`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentTerms {
+    pub total_amount: i128,
+    pub advance1_bps: u32,
+    pub advance2_bps: u32,
+    pub claim_window_secs: u64,
+    pub remainder_window_secs: u64,
+    pub delivery_deadline: u64,
+    pub contracted_quantity: u32,
+    pub grade_price_bps: Vec<u32>,
+}
+
+/// One advance tranche's claim state. `deadline == 0` means not opened yet.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrancheView {
+    pub deadline: u64,
+    pub claimed: bool,
+    pub expired: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentTranches {
+    pub advance1: TrancheView,
+    pub advance2: TrancheView,
+}
+
+/// Two-phase funding state: the deposit is escrowed by `lock`, the remainder
+/// by `fund_remainder` once `ready_for_delivery` opens its window.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentFunding {
+    pub remainder_deadline: u64,
+    pub remainder_funded: bool,
+}
+
+/// The warehouse operator's delivery attestation, consumed by `settle`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentDelivery {
+    pub delivered_quantity: u32,
+    pub grade_index: u32,
+    pub settlement_bps: u32,
+}
+
+/// PRD §4.2 option (b)'s FX-resolution state. All fields are zero/false for a
+/// commitment initialized without an `oracle_config`; `configured` tells the
+/// two apart without a second storage read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentFx {
+    pub configured: bool,
+    pub resolved: bool,
+    pub adjusted_total: i128,
+    pub shortfall_amount: i128,
+    pub shortfall_funded: bool,
+    pub shortfall_deadline: u64,
+    pub quote_stale: bool,
+}
+
+/// Dispute freeze state; `pre_status` is `Draft` when not disputed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentDispute {
+    pub pre_status: Status,
+    pub deadline: u64,
+}
+
+/// A stable, versioned read model for a commitment (#256).
+///
+/// [`Commitment`] is the storage struct: every field exists because some guard
+/// or payout needs it on chain, and its shape is free to change for storage
+/// reasons. Off-chain clients read this view instead, so a storage-layout
+/// change does not rewrite their ABI.
+///
+/// **Stability promise.** Fields are only added, or their meaning changed, in
+/// a release that increments [`COMMITMENT_VIEW_SCHEMA_VERSION`]; readers
+/// should refuse a `schema_version` newer than they understand and may assume
+/// that a `schema_version` they do understand keeps the same field meanings.
+/// The storage struct can change without a version bump — only this view's
+/// shape is contractual.
+///
+/// The grouping is semantic, not storage order: `parties` (who), `terms`
+/// (agreed before funding), `tranches` (advance claim state), `funding`
+/// (two-phase payment), `delivery` (the operator's attestation), `fx` (oracle
+/// conversion), and `dispute` (the bounded freeze). `status` and `created_at`
+/// stay top-level because they describe the commitment as a whole.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentView {
+    pub schema_version: u32,
+    pub status: Status,
+    pub created_at: u64,
+    pub parties: CommitmentParties,
+    pub terms: CommitmentTerms,
+    pub tranches: CommitmentTranches,
+    pub funding: CommitmentFunding,
+    pub delivery: CommitmentDelivery,
+    pub fx: CommitmentFx,
+    pub dispute: CommitmentDispute,
+}
+
+impl CommitmentView {
+    /// Projects the storage struct into the read model: every `Commitment`
+    /// field appears exactly once, unchanged. The one extra field,
+    /// `fx.configured`, is not storage state of its own — it reports whether
+    /// the `DataKey::OracleConfig` entry exists. The view is a reshaping, not
+    /// a second source of truth. Kept private: the only supported construction
+    /// path is the contract's own `get_commitment_view`, so no client can
+    /// build a view that disagrees with stored state.
+    fn from_commitment(c: &Commitment, oracle_configured: bool) -> Self {
+        Self {
+            schema_version: COMMITMENT_VIEW_SCHEMA_VERSION,
+            status: c.status,
+            created_at: c.created_at,
+            parties: CommitmentParties {
+                buyer: c.buyer.clone(),
+                cooperative: c.cooperative.clone(),
+                warehouse_operator: c.warehouse_operator.clone(),
+                token: c.token.clone(),
+            },
+            terms: CommitmentTerms {
+                total_amount: c.total_amount,
+                advance1_bps: c.advance1_bps,
+                advance2_bps: c.advance2_bps,
+                claim_window_secs: c.claim_window_secs,
+                remainder_window_secs: c.remainder_window_secs,
+                delivery_deadline: c.delivery_deadline,
+                contracted_quantity: c.contracted_quantity,
+                grade_price_bps: c.grade_price_bps.clone(),
+            },
+            tranches: CommitmentTranches {
+                advance1: TrancheView {
+                    deadline: c.advance1_deadline,
+                    claimed: c.advance1_claimed,
+                    expired: c.advance1_expired,
+                },
+                advance2: TrancheView {
+                    deadline: c.advance2_deadline,
+                    claimed: c.advance2_claimed,
+                    expired: c.advance2_expired,
+                },
+            },
+            funding: CommitmentFunding {
+                remainder_deadline: c.remainder_deadline,
+                remainder_funded: c.remainder_funded,
+            },
+            delivery: CommitmentDelivery {
+                delivered_quantity: c.delivered_quantity,
+                grade_index: c.grade_index,
+                settlement_bps: c.settlement_bps,
+            },
+            fx: CommitmentFx {
+                configured: oracle_configured,
+                resolved: c.fx_resolved,
+                adjusted_total: c.fx_adjusted_total,
+                shortfall_amount: c.fx_shortfall_amount,
+                shortfall_funded: c.fx_shortfall_funded,
+                shortfall_deadline: c.fx_shortfall_deadline,
+                quote_stale: c.fx_quote_stale,
+            },
+            dispute: CommitmentDispute {
+                pre_status: c.dispute_pre_status,
+                deadline: c.dispute_deadline,
+            },
+        }
+    }
 }
 
 /// Published on every real status transition — `lock`, both advance
@@ -1658,16 +1848,25 @@ impl EscrowContract {
     /// 6_500_000_000 (650 USDC) — a genuine 17 USDC shortfall the buyer
     /// now owes, exactly the FX-risk gap PRD §4.2 names.
     ///
-    /// **The `decimals` divisor is trusted to be constant** (#63): it is read
-    /// live from the oracle rather than pinned in `OracleConfig`, because it
-    /// is a property of the oracle, not the commitment. Reflector's real
-    /// contract makes `decimals` immutable (write-once at `config`, no
+    /// **The oracle's `decimals` divisor is trusted to be constant** (#63): it
+    /// is read live from the oracle rather than pinned in `OracleConfig`,
+    /// because it is a property of the oracle, not the commitment. Reflector's
+    /// real contract makes `decimals` immutable (write-once at `config`, no
     /// setter; SEP-40 likewise says it "should never change"), so the trust
     /// is well-placed for the deployed oracle. If it were ever violated the
     /// conversion would silently rescale by a power of ten rather than
     /// error — see `docs/reflector-decimals-assumption.md` and the
     /// `a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall`
     /// test that pins it.
+    ///
+    /// **The settlement token's decimals are read, not assumed** (#258).
+    /// `denominated_amount` is in the 7-decimal convention `total_amount`
+    /// uses for native XLM; a SEP-41 token may use 6, 18, or any other
+    /// `decimals()`. The conversion therefore rescales the 7-decimal result
+    /// to the token's live `decimals()` before comparing it against escrowed
+    /// balances. Unlike the oracle's scale this is a property of the token
+    /// contract, read per call — a token proxy that changed its decimals
+    /// would be a different, equally trust-the-provider assumption.
     ///
     /// Requires both tranches already resolved (same guard `settle`
     /// itself has) before reading `claimed_by_coop` — computing this
@@ -1693,10 +1892,27 @@ impl EscrowContract {
             .ok_or(Error::OracleNotConfigured)?;
 
         let rate = Self::read_oracle_rate(&env, &oracle_config)?;
-        let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+        let oracle_decimals =
+            ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+        let token_decimals = token::Client::new(&env, &c.token).decimals();
 
         let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
-        let fx_adjusted_total = ngn_owed * rate.price / 10i128.pow(decimals);
+        // `ngn_owed` is in `denominated_amount`'s 7-decimal units. Apply the
+        // oracle rate first: the result is still in 7-decimal settlement-token
+        // units. Then rescale those 7-decimal units to the settlement token's
+        // own `decimals()` (#258). Native XLM and USDC SACs are both 7-decimal,
+        // which hid this: a 6- or 18-decimal SEP-41 token would otherwise be
+        // off by a power of ten in every FX settlement. Rescaling after the
+        // oracle division (rather than multiplying the numerator by
+        // `10^token_decimals` and dividing at the end) keeps an 18-decimal
+        // token's conversion from overflowing i128 on realistic amounts; the
+        // cost is flooring once at 7-decimal precision before scaling.
+        let fx_in_denominated_decimals = ngn_owed * rate.price / 10i128.pow(oracle_decimals);
+        let fx_adjusted_total = if token_decimals >= 7 {
+            fx_in_denominated_decimals * 10i128.pow(token_decimals - 7)
+        } else {
+            fx_in_denominated_decimals / 10i128.pow(7 - token_decimals)
+        };
 
         let claimed_by_coop = (if c.advance1_claimed {
             Self::bps_amount(c.total_amount, c.advance1_bps)
@@ -2102,6 +2318,11 @@ impl EscrowContract {
     }
 
     /// No auth required — read-only view, returns the full commitment state.
+    ///
+    /// Kept for backward compatibility: existing clients read this storage
+    /// struct directly, and it remains the canonical on-chain record. New
+    /// clients should prefer [`Self::get_commitment_view`], whose shape is
+    /// versioned independently of the storage layout.
     pub fn get_commitment(env: Env) -> Result<Commitment, Error> {
         Self::load(&env)
     }
@@ -2354,6 +2575,20 @@ impl EscrowContract {
             ActionDeadline::Exclusive(c.dispute_deadline),
         );
         actions
+    }
+
+    /// No auth required — the versioned read model (#256).
+    ///
+    /// Same state as `get_commitment`, reshaped into [`CommitmentView`] with
+    /// an explicit `schema_version` and semantic sub-structs, so a field added
+    /// to `Commitment` for storage reasons does not change the client-facing
+    /// ABI. `fx.configured` is read from the same instance-storage entry that
+    /// gates settlement's FX path, so a caller can distinguish "no oracle"
+    /// from "oracle resolved with zeros" without a second call.
+    pub fn get_commitment_view(env: Env) -> Result<CommitmentView, Error> {
+        let c = Self::load(&env)?;
+        let oracle_configured = env.storage().instance().has(&DataKey::OracleConfig);
+        Ok(CommitmentView::from_commitment(&c, oracle_configured))
     }
 
     // -- internal --
@@ -2749,6 +2984,16 @@ impl EscrowContract {
     /// `advance1_bps + advance2_bps`. See module docs for why funding is
     /// split into this plus `fund_remainder`'s share instead of all at
     /// `lock`, the way earlier versions of this contract worked.
+    ///
+    /// Rounding: this floors the combined basis points once, while each
+    /// tranche payout floors separately, so up to one token unit per
+    /// commitment can stay in the contract after both advances are claimed.
+    /// It is never lost — every terminal path sweeps `balance()`: `cancel`
+    /// and `reclaim_on_nondelivery` refund it to the buyer, `settle` refunds
+    /// it to the buyer unless the settlement obligation still exceeds the
+    /// balance (then it goes to the cooperative with the rest), and
+    /// `expire_remainder_window`/`expire_fx_shortfall_window` sweep it to the
+    /// cooperative. Pinned by `tests/rounding_dust.rs` (#259).
     fn deposit_amount(c: &Commitment) -> i128 {
         Self::bps_amount(
             c.total_amount,

@@ -18,10 +18,10 @@ full matrix.
 
 ## TL;DR
 
-- 31 public functions, 5 authorization shapes, **zero un-gated
+- 32 public functions, 5 authorization shapes, **zero un-gated
   fund-moving paths**: 13 single-party gates, 8 permissionless state
   changes, 3 multi-party mutual actions, 1 caller-authenticated flag,
-  6 no-auth views.
+  7 no-auth views.
 - **Permissionless is deliberate, and safe by construction** — a
   permissionless call can only complete a check the deal already fixed at
   lock-in (a deadline lapsed, both tranches resolved, FX comparison
@@ -69,7 +69,7 @@ calls no `require_auth()` at all.
 | `flag_dispute` | **The flagger**, who must be one of the three named parties (own auth; strangers rejected `NotAParty`) | §4.8 must-have "dispute flagging with defined escalation". See `dispute-scope.md`. |
 | `resolve_dispute` | **All three parties** | Unanimous resume — `dispute-scope.md` §2. |
 | `expire_dispute_window` | **Permissionless** | Timeout resume so one refuser can't freeze a commitment forever. |
-| `get_oracle_config`, `oracle_rate`, `get_allocation`, `get_status`, `get_commitment`, `available_actions` | **None (views)** | Read-only; no state change, no funds. `available_actions` reports each currently legal state-changing call's function name, `AuthParty` and `ActionDeadline`; it is derived from the same private `can_*` predicates the real guards call. |
+| `get_oracle_config`, `oracle_rate`, `get_allocation`, `get_status`, `get_commitment`, `get_commitment_view`, `available_actions` | **None (views)** | Read-only; no state change, no funds. `get_commitment_view` is the versioned read model (#256); `get_commitment` stays for backward compatibility. `available_actions` reports each currently legal state-changing call's function name, `AuthParty` and `ActionDeadline`; it is derived from the same private `can_*` predicates the real guards call. |
 
 Auth internals worth knowing when reading the code: `claim_advance_1/2`
 route through the private `claim_tranche` (cooperative auth) and

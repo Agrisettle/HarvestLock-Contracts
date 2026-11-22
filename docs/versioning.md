@@ -106,6 +106,35 @@ Two corollaries:
   auth fix, the guard scripts) is `[Unreleased]` and only becomes `0.9.1` (see §3)
   the day it is uploaded.
 
+### 2.1 The read view's own `schema_version` (#256)
+
+§2 versions the *WASM*. One thing inside it has a second, faster-moving
+version: the client-facing commitment shape. `get_commitment` returns the
+storage struct `Commitment` itself, so adding a field for a storage reason is
+silently an ABI change for every indexer. `get_commitment_view` returns
+`CommitmentView` instead, with:
+
+- an explicit `schema_version` (currently `1`, mirroring
+  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`);
+- semantic sub-structs — `parties`, `terms`, `tranches`, `funding`,
+  `delivery`, `fx`, `dispute` — instead of storage order;
+- a documented stability promise: fields are only added, removed, renamed, or
+  re-meaninged with a `schema_version` bump. **Storage-only** changes to
+  `Commitment` never bump it. That is the whole point of the separate view.
+
+`get_commitment` stays for backward compatibility and remains the canonical
+on-chain record. New clients should read the view and reject a
+`schema_version` they don't understand.
+
+The view is a projection of the same single instance-storage read, not a
+second source of truth. Measured on the test host, `get_commitment` costs
+218,476 CPU instructions and `get_commitment_view` 223,471 (≈2.3% more,
+dominated by the shared storage read); the measurement is pinned by
+`get_commitment_view_costs_the_same_order_as_the_storage_struct`, which
+fails if the view ever starts re-reading storage. Host metering undercounts
+the WASM path, so treat those numbers as an order-of-magnitude check rather
+than a network fee estimate.
+
 ## 3. Retroactive mapping of Deployments 1–10
 
 Applying §2 to the recorded history. The "class" column is the input to the
