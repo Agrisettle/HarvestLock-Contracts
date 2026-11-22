@@ -413,8 +413,8 @@ fn after(t: u64) -> ActionDeadline {
     ActionDeadline::Exclusive(t)
 }
 
-/// `cancel` and `reassign_buyer` are advertised in every pre-delivery state,
-/// with the same auth and no deadline, so the table doesn't repeat them.
+/// `cancel`, `reassign_buyer`, and `reassign_operator` are advertised in every
+/// pre-delivery state, with the same auth and no deadline.
 fn push_pre_delivery_common(w: &World, v: &mut Vec<Action>) {
     v.push_back(act(
         &w.env,
@@ -426,6 +426,12 @@ fn push_pre_delivery_common(w: &World, v: &mut Vec<Action>) {
         &w.env,
         "reassign_buyer",
         AuthParty::BuyerCooperativeAndNewBuyer,
+        none(),
+    ));
+    v.push_back(act(
+        &w.env,
+        "reassign_operator",
+        AuthParty::BuyerCooperativeAndNewOperator,
         none(),
     ));
 }
@@ -455,6 +461,7 @@ enum Call {
     ExpireFx,
     Cancel,
     Reassign,
+    ReassignOperator,
     FlagDispute,
     ResolveDispute,
     ExpireDispute,
@@ -484,6 +491,7 @@ impl Call {
             Call::ExpireFx => "expire_fx_shortfall_window",
             Call::Cancel => "cancel",
             Call::Reassign => "reassign_buyer",
+            Call::ReassignOperator => "reassign_operator",
             Call::FlagDispute => "flag_dispute",
             Call::ResolveDispute => "resolve_dispute",
             Call::ExpireDispute => "expire_dispute_window",
@@ -541,6 +549,10 @@ fn invoke(call: Call, w: &World) -> Result<(), Error> {
             let new_buyer = Address::generate(&w.env);
             outcome(w.contract.try_reassign_buyer(&new_buyer))
         }
+        Call::ReassignOperator => {
+            let new_op = Address::generate(&w.env);
+            outcome(w.contract.try_reassign_operator(&new_op))
+        }
         Call::FlagDispute => outcome(w.contract.try_flag_dispute(&w.buyer.clone())),
         Call::ResolveDispute => outcome(w.contract.try_resolve_dispute()),
         Call::ExpireDispute => outcome(w.contract.try_expire_dispute_window()),
@@ -592,6 +604,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Lock,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
             ],
             absent: vec![
                 absent(Call::Claim1, Error::NotYetOpened),
@@ -610,7 +623,12 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 push_pre_delivery_common(w, &mut v);
                 v
             },
-            advertised: vec![Call::Lock, Call::Cancel, Call::Reassign],
+            advertised: vec![
+                Call::Lock,
+                Call::Cancel,
+                Call::Reassign,
+                Call::ReassignOperator,
+            ],
             absent: vec![
                 absent(Call::SetAllocation, Error::AllocationAlreadySet),
                 absent(Call::Release1, Error::InvalidState),
@@ -636,6 +654,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Release1,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -665,6 +684,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Release1,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -700,6 +720,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::ReclaimNondelivery,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -740,6 +761,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::MarkCheckpoint,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -780,6 +802,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::MarkCheckpoint,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -821,6 +844,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::MarkCheckpoint,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -857,6 +881,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Release2,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -905,6 +930,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Ready,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -954,6 +980,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Ready,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -1001,6 +1028,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::Ready,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -1034,6 +1062,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::FundRemainder,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -1067,6 +1096,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::FundRemainder,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -1101,6 +1131,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::ExpireRemainder,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -1133,6 +1164,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 Call::ConfirmDelivery,
                 Call::Cancel,
                 Call::Reassign,
+                Call::ReassignOperator,
                 Call::FlagDispute,
             ],
             absent: vec![
@@ -1162,6 +1194,7 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 absent(Call::ExpireFx, Error::FxNotResolved),
                 absent(Call::Cancel, Error::InvalidState),
                 absent(Call::Reassign, Error::InvalidState),
+                absent(Call::ReassignOperator, Error::InvalidState),
             ],
         },
         Scenario {

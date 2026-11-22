@@ -27,13 +27,10 @@ EVM, and are stated conservatively.
   payout is hard-wired to `buyer` or `cooperative`; permissionless
   callers choose *when*, never *to whom*, and there is no caller fee.
   The races are zero-sum between the two economic parties.
-- **The headline finding is a post-deadline race between
-  `confirm_delivery` and `reclaim_on_nondelivery`.** `confirm_delivery`
-  has no `delivery_deadline` guard, so after the deadline both calls are
-  legal; whichever lands first decides whether the cooperative keeps the
-  remainder or the buyer gets it back. `flag_dispute` is the tool that
-  lets the cooperative win that race by blocking the buyer for a full
-  window.
+- **The headline finding (post-deadline race between `confirm_delivery`
+  and `reclaim_on_nondelivery`) is closed** (#199). `confirm_delivery`
+  now guards on `delivery_deadline` and returns `DeliveryDeadlinePassed`
+  after the deadline, making the two calls strict complements. See §3.1.
 - **The second finding is the `expire_remainder_window` sweep eating a
   lapsed, unreclaimed tranche.** The buyer has a vested `reclaim_*`
   right; the sweep transfers it to the cooperative. This is not
@@ -124,34 +121,16 @@ cooperative's 650,000 and the buyer has already paid `T = 1,000,000`),
 
 | Call | Guards | On success |
 | --- | --- | --- |
-| `confirm_delivery(quantity, grade)` — operator | `status == ReadyForDelivery`, `remainder_funded`, valid grade index. **No deadline check.** | `Delivered` → `settle` pays the cooperative per `settlement_bps` |
+| `confirm_delivery(quantity, grade)` — operator | `status == ReadyForDelivery`, `remainder_funded`, valid grade index, **`now <= delivery_deadline`** (guard added #199) | `Delivered` → `settle` pays the cooperative per `settlement_bps` |
 | `reclaim_on_nondelivery` — buyer | status in `Locked`…`ReadyForDelivery`, `now > delivery_deadline` | `Forfeited`, whole balance back to the buyer; cooperative gets +1 strike |
 
-Both are legal in the same ledger. Whichever lands first changes the
-status and makes the other fail with `InvalidState`. The value at stake
-is the entire remaining escrow — 650,000 in the running example — plus
-the cooperative's strike record.
-
-Why this is a *dispute* race and not just a coincidence: `flag_dispute`
-is legal from `ReadyForDelivery` even after `delivery_deadline`. A
-cooperative that sees (or anticipates) the buyer's reclaim can flag
-first, which blocks `reclaim_on_nondelivery` for the full dispute
-window. It then has that window to obtain the operator's late
-attestation. When the dispute expires, the status is restored to
-`ReadyForDelivery` and `confirm_delivery` succeeds. The buyer's only
-counter is to re-submit after expiry — but the cooperative can flag
-again, and the operator can attest at any point in between.
-
-This is the highest-severity finding in this review: a late, arguably
-invalid delivery can be converted into a full settlement by a single
-flag plus a cooperating operator, and the buyer has no on-chain way to
-make its forfeiture right exclusive.
-
-**Fix direction (product decision, not implemented):** add a
-`delivery_deadline` guard to `confirm_delivery` (or give the buyer a
-short, exclusive reclaim window after the deadline before late delivery
-stops being accepted). That single guard removes the race and most of
-issue #118's payoff.
+**This race is closed** (#199). `confirm_delivery` now returns
+`Error::DeliveryDeadlinePassed` when `now > delivery_deadline`, so the
+two calls are strict complements at that boundary: exactly one is legal
+in any given ledger second. A cooperative that flags a dispute after the
+deadline no longer gains usable time — the operator's attestation will
+be rejected the moment the dispute expires and status is restored to
+`ReadyForDelivery`, because the deadline will still have passed.
 
 ### 3.2 `expire_remainder_window` vs. `reclaim_advance_*` — the lapsed tranche
 

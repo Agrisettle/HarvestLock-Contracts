@@ -18,9 +18,9 @@ full matrix.
 
 ## TL;DR
 
-- 31 public functions, 5 authorization shapes, **zero un-gated
+- 33 public functions, 5 authorization shapes, **zero un-gated
   fund-moving paths**: 13 single-party gates, 8 permissionless state
-  changes, 3 multi-party mutual actions, 1 caller-authenticated flag,
+  changes, 4 multi-party mutual actions, 1 caller-authenticated flag,
   6 no-auth views.
 - **Permissionless is deliberate, and safe by construction** — a
   permissionless call can only complete a check the deal already fixed at
@@ -66,6 +66,7 @@ calls no `require_auth()` at all.
 | `expire_fx_shortfall_window` | **Permissionless** | Buyer-default path if the top-up never funds; same uncontested deadline logic as `expire_remainder_window`. |
 | `cancel` | **Buyer + cooperative** | Edge table — "Mutual cancellation: defined unwind… no penalty, logged". Mutual by definition, both signatures required. |
 | `reassign_buyer` | **Current buyer + cooperative + incoming buyer** | §4.8 — "transferable to another KYB-verified buyer with cooperative consent". The *incoming buyer's* signature is deliberately beyond the PRD (see §3.1). |
+| `reassign_operator` | **Current buyer + cooperative + incoming operator** | #203 — three-party consent transfers the `warehouse_operator` position. Requires the incoming operator's signature so a third party cannot be saddled with the `confirm_delivery` attestation obligation without their knowledge. |
 | `flag_dispute` | **The flagger**, who must be one of the three named parties (own auth; strangers rejected `NotAParty`) | §4.8 must-have "dispute flagging with defined escalation". See `dispute-scope.md`. |
 | `resolve_dispute` | **All three parties** | Unanimous resume — `dispute-scope.md` §2. |
 | `expire_dispute_window` | **Permissionless** | Timeout resume so one refuser can't freeze a commitment forever. |

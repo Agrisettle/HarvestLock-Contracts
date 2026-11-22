@@ -580,7 +580,13 @@ their own deal. Tests pin the mechanical half:
 7. **Observability works**: `status_changed` events and the view functions
    are how anyone detects a transition; `every_transition_publishes_status_changed`
    holds that every mutation is announced (and `initialize` deliberately
-   announces nothing — creation is not a transition).
+   announces nothing — creation is not a transition). Value-movement calls
+   additionally emit typed events: `TrancheClaimed` (cooperative claims an
+   advance), `TrancheReclaimed` (buyer reclaims an unclaimed advance),
+   `RemainderFunded` (buyer deposits the remainder), and `FxShortfallFunded`
+   (buyer tops up the FX shortfall) — giving indexers a machine-readable
+   record of every token flow without requiring them to decode raw transfer
+   calls (#202).
 
 ## What this document does not authorize
 

@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "1c940ce07a062692b753b341b1fdef801831844d964f850b27d079212d398a7e"
+                            "bytes": "66c71f4350f414f8858ccc32b3e20b902cffa67de80f5eae6b455a34bddae875"
                           }
                         },
                         {
@@ -149,7 +149,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "5fd86344ba75334782e911cc0619fc10b7fbb67dd4cf80f30c4e4b0ff5722d5e"
+                            "bytes": "f3438d217680970d57d94b8ffeda7af1b27cc5db85f52e125ddbc007d772e2c9"
                           }
                         },
                         {
@@ -449,7 +449,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "1c940ce07a062692b753b341b1fdef801831844d964f850b27d079212d398a7e"
+                                  "bytes": "66c71f4350f414f8858ccc32b3e20b902cffa67de80f5eae6b455a34bddae875"
                                 }
                               },
                               {
@@ -469,7 +469,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "5fd86344ba75334782e911cc0619fc10b7fbb67dd4cf80f30c4e4b0ff5722d5e"
+                                  "bytes": "f3438d217680970d57d94b8ffeda7af1b27cc5db85f52e125ddbc007d772e2c9"
                                 }
                               },
                               {

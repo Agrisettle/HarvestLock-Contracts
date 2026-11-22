@@ -1788,6 +1788,29 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Transfers the `warehouse_operator` position to `new_operator`. The
+    /// current operator relinquishes all future `confirm_delivery` rights;
+    /// `new_operator` acquires them. No funds move.
+    ///
+    /// auth: current buyer + cooperative + incoming operator (three-party
+    /// consent, `BuyerCooperativeAndNewOperator`). Requiring all three
+    /// prevents: the current buyer + cooperative from silently saddling an
+    /// unwilling third party with the attestation obligation (#203), and the
+    /// current operator from jumping ship without the buyer's knowledge.
+    ///
+    /// Reachable from `Draft` through `ReadyForDelivery` (the same window as
+    /// `reassign_buyer`): past `Delivered`, `warehouse_operator` gates no
+    /// remaining action, so a novation there would be a no-op.
+    pub fn reassign_operator(env: Env, new_operator: Address) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        Self::can_reassign_operator(&c)?;
+        Self::require_once_each(&[&c.buyer, &c.cooperative, &new_operator]);
+
+        c.warehouse_operator = new_operator;
+        Self::save(&env, &c);
+        Ok(())
+    }
+
     /// Dispute flagging (PRD's must-have "dispute flagging with defined
     /// escalation"). Any **one** of the three named parties — `flagger`
     /// must equal `buyer`, `cooperative`, or `warehouse_operator` — can
@@ -2118,6 +2141,14 @@ impl EscrowContract {
             AuthParty::BuyerCooperativeAndNewBuyer,
             ActionDeadline::None,
         );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_reassign_operator(&c),
+            "reassign_operator",
+            AuthParty::BuyerCooperativeAndNewOperator,
+            ActionDeadline::None,
+        );
         // The buyer is always one of the three named parties, so passing it
         // as the representative flagger makes this the same predicate the
         // real call uses (which also checks the caller-supplied address).
@@ -2441,6 +2472,13 @@ impl EscrowContract {
     }
 
     fn can_reassign_buyer(c: &Commitment) -> Result<(), Error> {
+        if !Self::is_pre_delivery_status(c.status) {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_reassign_operator(c: &Commitment) -> Result<(), Error> {
         if !Self::is_pre_delivery_status(c.status) {
             return Err(Error::InvalidState);
         }
