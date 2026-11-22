@@ -119,6 +119,22 @@ unneeded complexity for a mechanism nobody has used yet.
 | Member allocation is contested | **No.** Immutable post-`lock` except by joint amendment; resolved off-chain against the recorded list. The ledger is record-only in v1 anyway (`settle` still pays a lump sum to the cooperative wallet, PRD §4.9 Rung 1). | `set_allocation` doc comment; PRD edge-case table |
 | A trusted third party breaks a tie on-chain | **No such role exists in the contract.** There is no arbitration key, no HarvestLock signer, no tiebreak entry point — matching PRD §4.5's separation, and leaving PRD open question 06 open. | Absence is the design; see §4 below. |
 
+## 3a. What an observer sees (on-chain events)
+
+Three new events are emitted alongside the state machine changes added in #208:
+
+| Event | Emitted by | Topics | Data fields |
+| --- | --- | --- | --- |
+| `DisputeFlagged` | `flag_dispute` | `flagger: Address` | `pre_status: Status`, `deadline: u64` |
+| `DisputeEnded` | `resolve_dispute` **and** `expire_dispute_window` | `outcome: DisputeOutcome` (`Resolved` or `Expired`) | `restored: Status` |
+
+An indexer that subscribes to these events can reconstruct the full dispute timeline without reading commitment storage:
+- `DisputeFlagged` tells it who froze the commitment, what state was recorded, and when the freeze expires.
+- `DisputeEnded { outcome: Resolved, restored }` tells it the freeze ended by unanimous consent and what status was restored.
+- `DisputeEnded { outcome: Expired, restored }` tells it the freeze ended by deadline and what status was restored (matches `dispute_count` incrementing).
+
+The `StatusChanged` event that `set_status` emits is also present on every transition (including `Disputed` → restored status), so the event stream is consistent: a `DisputeEnded` is always preceded by a `DisputeFlagged` and always accompanied by a `StatusChanged`.
+
 ## 4. Notes for future contributors and integrators
 
 - **Don't route grade appeals through this contract.** A future

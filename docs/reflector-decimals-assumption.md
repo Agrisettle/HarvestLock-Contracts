@@ -185,6 +185,23 @@ current source), this assumption is void and the conversion should be
 re-examined, ideally by storing the expected scale in `OracleConfig` and
 rejecting a mismatch with a dedicated error.
 
+## 5. FxResolved event as an audit trail
+
+Issue #210 adds a `FxResolved` event emitted by `resolve_fx_shortfall` immediately after the state write succeeds. Its fields are:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `rate` | `i128` | The raw `price` integer returned by `lastprice()` |
+| `rate_timestamp` | `u64` | The oracle-reported timestamp on that price |
+| `fx_adjusted_total` | `i128` | The computed `ngn_owed * rate / 10^decimals` value |
+| `fx_adjusted_total` | `i128` | The computed `ngn_owed * rate / 10^decimals` value |
+| `shortfall` | `i128` | Tokens the buyer still owes (`0` when already covered) |
+| `deadline` | `u64` | The `fx_shortfall_deadline` for the top-up (`0` when `shortfall == 0`) |
+
+**What this provides for the decimals assumption:** `rate` and `rate_timestamp` are the exact oracle inputs; `fx_adjusted_total` is the output. An off-chain observer can replay the conversion arithmetic given the oracle's current `decimals()` value and check whether the `fx_adjusted_total` matches. If Reflector were ever migrated to a different `decimals` scale, the mismatch would be immediately visible in the event log — the `rate` would be the same, but the `fx_adjusted_total` implied by the new scale would differ from the one recorded. This does not eliminate the silent-rescale failure described in §3, but it makes the failure detectable after the fact.
+
+`FxQuoteStaleChanged { stale: bool }` is emitted by `refresh_fx_quote_status` only when the `fx_quote_stale` flag actually flips, so an indexer receives one event per transition rather than one per call. Combined with `FxResolved`, the two events give a complete picture of the oracle-interaction timeline for any commitment that went through the FX shortfall path.
+
 ## References
 
 - SEP-40 — Oracle Price Feeds:
