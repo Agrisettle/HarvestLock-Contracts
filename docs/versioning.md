@@ -58,6 +58,17 @@ repo deploys a fresh instance per deal from whatever `ESCROW_WASM_HASH` is set
 **callers and the ABI** — does a client written against the previous build have
 to change — not about migrating live instances.
 
+Two companion documents carry the consequences of that immutability, and both
+key off the WASM hash rather than the version label:
+
+- [commitment-schema-history.md](./commitment-schema-history.md) — the exact
+  `Commitment`/`OracleConfig`/`AllocationMember`/`Status`/`Error` shape each
+  deployment below produced, its ScMap key order, and which changes break a
+  decoder built against the latest bindings. Use it to read an old instance.
+- [migration-runbook.md](./migration-runbook.md) — what a release does to
+  in-flight commitments, the per-status cost of unwinding one with `cancel`,
+  and the exact signing sequence for replacing it.
+
 ## 2. Bump rules (decision procedure for the next upload)
 
 Take the diff between the build you're about to upload and the last uploaded
@@ -143,6 +154,11 @@ CHANGELOG; full hashes and per-deployment detail are in HANDOFF.
 | 9 | 2026-09-06 | `7940147d…` | 26 | **BREAKING** — FX shortfall wired into `settle`'s gating; `OracleConfig` gains `denominated_amount` | `0.8.0` |
 | 10 | 2026-09-06 | `21a4bb2e…` | 29 | additive — dispute path (`flag_dispute`/`resolve_dispute`/`expire_dispute_window`), new `Disputed` status | `0.9.0` |
 | *(unreleased)* | — | *(not uploaded)* | — | ABI-identical: #138–#141 overlapping-role auth correctness fix + two CI guard scripts | next upload ⇒ **`0.9.1`** (patch) |
+
+Per-deployment struct shapes and decode compatibility for every hash in that
+table are in [commitment-schema-history.md](./commitment-schema-history.md); the
+operational meaning of a bump for deals that are already open is in
+[migration-runbook.md](./migration-runbook.md).
 
 Notes on the two judgement calls the history forces:
 

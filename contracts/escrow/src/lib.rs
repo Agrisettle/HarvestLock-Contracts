@@ -136,6 +136,9 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 mod reflector;
 
 use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
@@ -158,6 +161,19 @@ pub const MAX_GRADE_ENTRIES: u32 = 16;
 /// longer than that is a caller mistake, not a bigger cooperative. See the
 /// `AllocationTooLarge` error.
 pub const MAX_ALLOCATION_MEMBERS: u32 = 200;
+
+/// Largest `total_amount` `initialize` accepts.
+///
+/// `bps_amount` computes `total * bps / 10_000`, and every bps value it is
+/// ever called with is bounded by 10_000 (`advance1_bps + advance2_bps` is
+/// checked at `initialize`; a single tranche is one of those two). With
+/// `overflow-checks = true` in the release profile, a `total_amount` above
+/// `i128::MAX / 10_000` makes that multiplication trap in `lock`,
+/// `claim_advance_*`, `deposit_amount` and `settle` — long after the call
+/// that supplied the bad value. Rejecting it at `initialize` keeps the
+/// failure at the call that took the input, and makes every `bps_amount`
+/// call site overflow-free by construction. See `Error::AmountTooLarge`.
+pub const MAX_TOTAL_AMOUNT: i128 = i128::MAX / 10_000;
 
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -355,6 +371,14 @@ pub enum Error {
     /// cooperative scale, and unbounded storage the contract shouldn't
     /// accept.
     AllocationTooLarge = 38,
+    /// `initialize`'s `total_amount` exceeded `MAX_TOTAL_AMOUNT`
+    /// (`i128::MAX / 10_000`) — a commitment whose `bps_amount` arithmetic
+    /// would overflow, and therefore one that could never be locked or
+    /// settled. Refused at the call that supplied the value (#249).
+    AmountTooLarge = 39,
+    /// The configured Reflector oracle returned a zero or negative price;
+    /// non-positive exchange rates cannot produce a valid settlement amount.
+    OraclePriceInvalid = 40,
 }
 
 #[contracttype]
@@ -922,6 +946,11 @@ impl EscrowContract {
         if total_amount <= 0 {
             return Err(Error::ZeroAmount);
         }
+        // Upper bound first, before any bps-dependent arithmetic: see
+        // `MAX_TOTAL_AMOUNT` and `Error::AmountTooLarge` (#249).
+        if total_amount > MAX_TOTAL_AMOUNT {
+            return Err(Error::AmountTooLarge);
+        }
         if advance1_bps.saturating_add(advance2_bps) > 10_000 {
             return Err(Error::InvalidBps);
         }
@@ -1029,6 +1058,9 @@ impl EscrowContract {
         let quote = client
             .lastprice(&ReflectorAsset::Other(config.price_asset.clone()))
             .ok_or(Error::OraclePriceUnavailable)?;
+        if quote.price <= 0 {
+            return Err(Error::OraclePriceInvalid);
+        }
 
         let now = env.ledger().timestamp();
         let age = now.saturating_sub(quote.timestamp);

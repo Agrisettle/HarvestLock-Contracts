@@ -81,6 +81,30 @@ that address signs once (tests: `cancel_succeeds_when_buyer_and_cooperative_shar
 `all_three_identical_parties_accept_only_that_principals_signature`,
 `two_of_three_identical_parties_still_require_the_distinct_partys_auth`).
 
+### 1.1 What the buyer's wallet actually signs
+
+The three buyer-gated funding calls — `lock`, `fund_remainder`,
+`fund_fx_shortfall` — each make a nested `token.transfer(buyer, contract,
+amount)` inside the top-level invocation. The authorization a wallet shows is
+that **tree**, not just the method name, so the buyer is signing the exact
+amount as well as the call:
+
+| Call | Amount covered by the buyer's signature tree |
+| --- | --- |
+| `lock` | `deposit_amount` = `(advance1_bps + advance2_bps)` of `total_amount` |
+| `fund_remainder` | `total_amount - deposit_amount` |
+| `fund_fx_shortfall` | `Commitment::fx_shortfall_amount` as computed by `resolve_fx_shortfall` |
+
+That binding is pinned by `lock_auth_tree_carries_exactly_the_deposit`,
+`fund_remainder_auth_tree_carries_exactly_the_remainder`,
+`fund_fx_shortfall_auth_tree_carries_exactly_the_shortfall`, and the three
+matching `..._rejects_a_buyer_auth_tree_signed_for_a_different_...` tests,
+which assert the recorded `env.auths()` sub-invocation argument and reject a
+`mock_auths` entry scoped to a different amount (#253). A change to
+`deposit_amount`'s rounding, or to how the remainder is computed, therefore
+changes what the wallet is asked to approve — the signature is the last line of
+defence, and these tests are what keeps it honest.
+
 ## 2. Why "permissionless" is safe here, not sloppy
 
 The eight permissionless functions share one property, and it is worth
@@ -171,7 +195,12 @@ be smuggled in as a relaxed guard on `set_allocation`.
   chained raw `require_auth()` calls — the dedupe and replay-safety
   properties are test-pinned (`auth_entry_for_one_method_cannot_authorize_a_different_method`,
   `auth_entry_for_one_argument_set_cannot_authorize_a_different_argument_set`,
-  `expired_staged_auth_entry_fails_cleanly_with_no_partial_state`).
+  `cancel_auth_entry_for_one_instance_cannot_cancel_another`,
+  `resolve_dispute_auth_entry_for_one_instance_cannot_resolve_another`,
+  `expired_staged_auth_entry_fails_cleanly_with_no_partial_state`). The
+  two per-instance tests are the realistic one-contract-per-commitment case:
+  the same cooperative's consent for deal A cannot authorize deal B, even
+  when both deals name the same three parties.
 - **A permissionless function may not take an outcome parameter.** If a
   proposed function needs one, it is a party-gated action wearing the
   wrong clothes.

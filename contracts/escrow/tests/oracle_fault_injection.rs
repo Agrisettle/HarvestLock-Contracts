@@ -4,12 +4,13 @@
 //! contract calls *out* to a contract it does not control. Everything here
 //! drives that call through deliberately broken oracles and asserts the
 //! documented degradation — `OracleNotConfigured` / `OraclePriceUnavailable`
-//! / `OracleStale` — rather than a panic escaping or a wrong number coming
-//! back.
+//! / `OracleStale` — plus the non-positive-price guard
+//! (`OraclePriceInvalid`) — rather than a panic escaping or a wrong number
+//! coming back.
 //!
 //! Fault modes covered: no config, no quote on record, stale quote, quote at
 //! exactly the bound, a crashed (`panic!`ing) callee, an unreachable callee
-//! (address with no contract deployed), a future-dated quote, a negative
+//! (address with no contract deployed), a future-dated quote, a non-positive
 //! price, a price large enough to overflow the conversion multiply, an
 //! absurd `decimals()`, and (#63) a *plausible* change to `decimals()`, which
 //! is silently accepted rather than trapping — see
@@ -18,10 +19,11 @@
 //!
 //! ## Findings this harness produced (all real, all reproducible)
 //!
-//! The three documented errors work exactly as advertised. Four things do
-//! **not**, and are pinned here as current behavior with `FINDING` markers
-//! rather than silently fixed, because each fix changes settlement math or
-//! the public error surface and needs a product decision:
+//! The three documented errors and the non-positive-price guard work exactly
+//! as advertised. Three things do **not**, and are pinned here as current
+//! behavior with `FINDING` markers rather than silently fixed, because each
+//! fix changes settlement math or the public error surface and needs a product
+//! decision:
 //!
 //! 1. **F1 — an unreachable oracle is not a graceful error.** Pointing
 //!    `oracle_config.oracle_contract` at an address with no contract (a
@@ -35,13 +37,13 @@
 //!    computes `now.saturating_sub(quote.timestamp)`, so a quote stamped
 //!    *ahead* of the ledger gets age `0` and is accepted as maximally fresh.
 //!    A buggy or manipulated feed can pin the bound open indefinitely.
-//! 3. **F3 — no sanity bound on the price itself.** A negative price is
-//!    returned by `oracle_rate()` unvalidated and flows straight into
-//!    `resolve_fx_shortfall()`, where a negative `fx_adjusted_total` makes
-//!    `owed_from_remainder` clamp to `0`: `settle()` then pays the cooperative
-//!    nothing and refunds the entire escrow to the buyer. One bad oracle
-//!    value silently inverts who the settlement favors.
-//! 4. **F4/F5 — `resolve_fx_shortfall` has two unguarded arithmetic traps.**
+//! The former **F3 — no sanity bound on the price itself** finding is now
+//! closed: both negative and zero prices are rejected as
+//! `OraclePriceInvalid` by `oracle_rate()`, `resolve_fx_shortfall()`, and
+//! `refresh_fx_quote_status()` before any settlement state can be written.
+//! The regression test below keeps that decision pinned.
+//!
+//! 3. **F4/F5 — `resolve_fx_shortfall` has two unguarded arithmetic traps.**
 //!    `ngn_owed * rate.price` and `10i128.pow(decimals)` are unchecked: a
 //!    huge price or a garbage `decimals()` (Reflector's real fiat oracle uses
 //!    14) aborts the call. Soroban's atomicity means no partial state is
@@ -434,47 +436,38 @@ fn a_future_dated_quote_bypasses_the_staleness_bound_for_as_long_as_it_stays_ahe
     );
 }
 
-/// F3 — a negative price, through both read paths and into settlement.
+/// F3 — non-positive prices are rejected on every oracle read path.
 #[test]
-fn a_negative_price_is_returned_unvalidated_and_inverts_the_settlement() {
-    let s = oracle_world(MAX_AGE, DENOMINATED);
-    s.oracle().set_quote(&(-FRESH_PRICE), &s.w.now());
+fn non_positive_prices_are_rejected_on_all_oracle_read_paths() {
+    for price in [-FRESH_PRICE, 0] {
+        let s = oracle_world(MAX_AGE, DENOMINATED);
+        s.oracle().set_quote(&price, &s.w.now());
 
-    let rate = s.w.contract.oracle_rate();
-    assert_eq!(
-        rate.price, -FRESH_PRICE,
-        "FINDING F3: `read_oracle_rate` has no `price > 0` sanity bound"
-    );
+        assert_eq!(
+            s.w.contract.try_oracle_rate(),
+            Err(Ok(Error::OraclePriceInvalid)),
+            "price {price} must be rejected by oracle_rate"
+        );
 
-    // Now the settlement consequence, with real numbers. bps 1500/1500 of a
-    // 1_000_000 total: the cooperative claimed 150_000 + 150_000, and the
-    // buyer funded the 700_000 remainder, so the contract holds 1_000_000.
-    s.w.drive_to_delivered();
-    s.w.contract.resolve_fx_shortfall();
+        s.w.drive_to_delivered();
+        assert_eq!(
+            s.w.contract.try_resolve_fx_shortfall(),
+            Err(Ok(Error::OraclePriceInvalid)),
+            "price {price} must be rejected by resolve_fx_shortfall"
+        );
 
-    let c = s.w.contract.get_commitment();
-    // 500_000 denominated units x (-1.75) / 10^14 scaled = -875_000.
-    assert_eq!(c.fx_adjusted_total, -875_000);
-    assert_eq!(
-        c.fx_shortfall_amount, 0,
-        "a negative adjusted total makes `owed_from_remainder` clamp to 0, \
-         so there is never a shortfall to fund"
-    );
-    assert!(c.fx_shortfall_funded);
-    assert!(c.fx_resolved);
+        let c = s.w.contract.get_commitment();
+        assert!(!c.fx_resolved);
+        assert_eq!(c.fx_adjusted_total, 0);
+        assert_eq!(c.fx_shortfall_amount, 0);
 
-    s.w.contract.settle();
-    assert_eq!(
-        s.w.token.balance(&s.w.cooperative),
-        300_000,
-        "FINDING F3: one garbage oracle value cost the cooperative the entire \
-         remainder payment — it keeps only the two advances it had already claimed"
-    );
-    assert_eq!(
-        s.w.token.balance(&s.w.contract.address),
-        0,
-        "and the whole escrowed remainder came back to the buyer"
-    );
+        assert_eq!(
+            s.w.contract.try_refresh_fx_quote_status(),
+            Err(Ok(Error::OraclePriceInvalid)),
+            "price {price} must be propagated by refresh_fx_quote_status"
+        );
+        assert!(!s.w.contract.get_commitment().fx_quote_stale);
+    }
 }
 
 /// F4 — a price big enough to overflow the conversion multiply.
