@@ -1,0 +1,28 @@
+{
+  "name": "HarvestLock Contracts",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "STELLAR_CLI_VERSION": "30.0.1"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+  // Warm the dependency cache so the first `cargo test` doesn't sit on a
+  // cold registry fetch. Nothing here needs the network after this.
+  "postCreateCommand": "cargo fetch --locked",
+  "hostRequirements": {
+    "cpus": 2,
+    "memory": "4gb",
+    "storage": "16gb"
+  }
+}

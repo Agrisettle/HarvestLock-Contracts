@@ -2670,6 +2670,93 @@ fn settle_blocked_if_advance_2_never_resolved() {
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
 }
 
+/// `ready_for_delivery` only checks `Advance2Released` and `claim_tranche`
+/// doesn't look at status at all, so tranche 2's claim window can still be
+/// open once the commitment reaches `Delivered`. Delivery first, then the
+/// late claim, must pay the tranche out of the remainder balance and still
+/// settle correctly — `settle` reads that same balance after the claim, so
+/// `claimed_by_coop` must count the claim exactly once.
+#[test]
+fn tranche_2_claimed_after_delivery_then_settles_once() {
+    let s = setup(1_500, 2_000); // 15% + 20%, so 65% of total is the remainder
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    // Deliberately no `claim_advance_2` here: its window stays open while
+    // `ready_for_delivery`/`confirm_delivery` run.
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(s.contract.get_status(), Status::Delivered);
+
+    let advance1 = EscrowContract::bps_amount(s.total_amount, 1_500);
+    let advance2 = EscrowContract::bps_amount(s.total_amount, 2_000);
+    assert_eq!(s.token.balance(&s.cooperative), advance1);
+
+    // Claim tranche 2 late, still inside the window `release_advance_2`
+    // opened. It must come out of the remainder balance, not fresh money.
+    let balance_before_claim = s.token.balance(&s.contract.address);
+    s.contract.claim_advance_2();
+
+    assert_eq!(s.token.balance(&s.cooperative), advance1 + advance2);
+    assert_eq!(
+        s.token.balance(&s.contract.address),
+        balance_before_claim - advance2
+    );
+
+    s.contract.settle();
+
+    // `claimed_by_coop` counted the late claim exactly once: the cooperative
+    // ends with the full contract value, with nothing double-paid or left
+    // stranded, and the buyer gets no refund on a full-grade full delivery.
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+    assert_eq!(s.token.balance(&s.buyer), 0);
+}
+
+/// The other side of the same hole: tranche 2's window lapses after the
+/// commitment is already `Delivered` and the buyer reclaims it there.
+/// `settle` must then see `advance2_expired` — not claimed — and leave the
+/// tranche out of `claimed_by_coop`, since the buyer already has it back.
+#[test]
+fn tranche_2_reclaimed_after_delivery_then_settles() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(s.contract.get_status(), Status::Delivered);
+
+    // Let tranche 2's window lapse with the commitment sitting at Delivered,
+    // then reclaim it from exactly that state.
+    let deadline = s.contract.get_commitment().advance2_deadline;
+    set_time(&s, deadline + 1);
+    s.contract.reclaim_advance_2();
+
+    let advance2 = EscrowContract::bps_amount(s.total_amount, 2_000);
+    assert_eq!(s.token.balance(&s.buyer), advance2);
+
+    s.contract.settle();
+
+    // The reclaim already settled that tranche's fate, so the cooperative is
+    // paid the adjusted total minus advance 1 only; everything still escrowed
+    // covers it, and the buyer keeps the reclaimed tranche with no refund on
+    // top (the escrow balance is already the post-reclaim one).
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    assert_eq!(s.token.balance(&s.buyer), advance2);
+    assert_eq!(s.token.balance(&s.cooperative), s.total_amount - advance2);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
 #[test]
 fn cannot_settle_before_delivery_confirmed() {
     let s = setup(1_500, 1_500);
@@ -3501,6 +3588,97 @@ fn flag_dispute_freezes_every_other_state_changing_call() {
         s.contract.try_reassign_buyer(&Address::generate(&s.env)),
         Err(Ok(Error::InvalidState))
     );
+}
+
+// ---------- #301: claim/reclaim keep working while Disputed ----------
+//
+// `claim_tranche` and `reclaim_tranche` never check `status` (only the
+// tranche's own deadline/claimed/expired flags), so the freeze does not stop
+// tranche money moving: the cooperative can claim an open tranche during a
+// dispute, and the buyer can reclaim one whose window lapses during it.
+// docs/dispute-scope.md §2 documents this and cites these four tests by name
+// — if a future refactor adds a status guard to claim/reclaim, these fail and
+// the dispute economics change visibly instead of silently.
+
+#[test]
+fn claim_advance_1_while_disputed_still_pays() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.flag_dispute(&s.buyer);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+
+    s.contract.claim_advance_1();
+
+    let advance1 = EscrowContract::bps_amount(s.total_amount, 1_500);
+    assert_eq!(s.token.balance(&s.cooperative), advance1);
+    // Funds moved, but the freeze itself is untouched.
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Advance1Released
+    );
+}
+
+#[test]
+fn reclaim_advance_1_while_disputed_still_refunds() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    // Flag first, then let the window lapse mid-dispute — the documented
+    // "deadlines keep ticking" limitation, here exercised on the reclaim
+    // right rather than a status transition.
+    s.contract.flag_dispute(&s.buyer);
+    advance_time(&s, WINDOW + 1);
+    let balance_before = s.token.balance(&s.buyer);
+
+    s.contract.reclaim_advance_1();
+
+    let advance1 = EscrowContract::bps_amount(s.total_amount, 1_500);
+    assert_eq!(s.token.balance(&s.buyer), balance_before + advance1);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+}
+
+#[test]
+fn claim_advance_2_while_disputed_still_pays() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.flag_dispute(&s.cooperative);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+
+    s.contract.claim_advance_2();
+
+    let advance1 = EscrowContract::bps_amount(s.total_amount, 1_500);
+    let advance2 = EscrowContract::bps_amount(s.total_amount, 2_000);
+    assert_eq!(s.token.balance(&s.cooperative), advance1 + advance2);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+    assert_eq!(
+        s.contract.get_commitment().dispute_pre_status,
+        Status::Advance2Released
+    );
+}
+
+#[test]
+fn reclaim_advance_2_while_disputed_still_refunds() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.flag_dispute(&s.warehouse);
+    advance_time(&s, WINDOW + 1);
+    let balance_before = s.token.balance(&s.buyer);
+
+    s.contract.reclaim_advance_2();
+
+    let advance2 = EscrowContract::bps_amount(s.total_amount, 2_000);
+    assert_eq!(s.token.balance(&s.buyer), balance_before + advance2);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
 }
 
 #[test]
