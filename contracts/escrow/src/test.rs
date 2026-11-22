@@ -4265,6 +4265,49 @@ fn status_event(s: &Setup, from: Status, to: Status) -> xdr::ContractEvent {
     StatusChanged { from, to }.to_xdr(&s.env, &s.contract.address)
 }
 
+fn payout_event(s: &Setup, reason: &str, to: &Address, amount: i128) -> xdr::ContractEvent {
+    Payout {
+        reason: Symbol::new(&s.env, reason),
+        to: to.clone(),
+        amount,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
+fn tranche_claimed_event(s: &Setup, tranche: u32, amount: i128) -> xdr::ContractEvent {
+    TrancheClaimed {
+        tranche,
+        to: s.cooperative.clone(),
+        amount,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
+fn tranche_reclaimed_event(s: &Setup, tranche: u32, amount: i128) -> xdr::ContractEvent {
+    TrancheReclaimed {
+        tranche,
+        to: s.buyer.clone(),
+        amount,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
+fn remainder_funded_event(s: &Setup, amount: i128) -> xdr::ContractEvent {
+    RemainderFunded {
+        from: s.buyer.clone(),
+        amount,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
+fn fx_shortfall_funded_event(s: &Setup, amount: i128) -> xdr::ContractEvent {
+    FxShortfallFunded {
+        from: s.buyer.clone(),
+        amount,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
 /// Asserts the escrow contract's most recent invocation published exactly
 /// one `status_changed` event, `from -> to` — `env.events().all()` scopes
 /// to the last invocation, so this doubles as the "and nothing else was
@@ -4303,22 +4346,39 @@ fn every_transition_publishes_status_changed() {
     s.contract.release_advance_1();
     assert_transition(&s, Status::Locked, Status::Advance1Released);
     s.contract.claim_advance_1();
-    assert_no_transition(&s); // moves funds, status unchanged
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [tranche_claimed_event(&s, 1, 150_000)]
+    );
     s.contract.mark_checkpoint();
     assert_transition(&s, Status::Advance1Released, Status::CheckpointPassed);
     s.contract.release_advance_2();
     assert_transition(&s, Status::CheckpointPassed, Status::Advance2Released);
     s.contract.claim_advance_2();
-    assert_no_transition(&s);
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [tranche_claimed_event(&s, 2, 200_000)]
+    );
     s.contract.ready_for_delivery();
     assert_transition(&s, Status::Advance2Released, Status::ReadyForDelivery);
     s.contract.fund_remainder();
-    assert_no_transition(&s);
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [remainder_funded_event(&s, 650_000)]
+    );
     s.contract
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_transition(&s, Status::ReadyForDelivery, Status::Delivered);
     s.contract.settle();
-    assert_transition(&s, Status::Delivered, Status::Settled);
+    // settle emits StatusChanged + a coop_pay Payout (coop receives the 650k
+    // remainder; buyer_refund is 0 so no second Payout).
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [
+            status_event(&s, Status::Delivered, Status::Settled),
+            payout_event(&s, "coop_pay", &s.cooperative.clone(), 650_000),
+        ]
+    );
 }
 
 #[test]
@@ -4339,18 +4399,34 @@ fn unwind_and_default_paths_publish_status_changed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     s.contract.cancel();
-    assert_transition(&s, Status::Locked, Status::Cancelled);
+    // cancel emits StatusChanged AND Payout for the returned deposit.
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [
+            status_event(&s, Status::Locked, Status::Cancelled),
+            payout_event(&s, "cancel", &s.buyer.clone(), 300_000),
+        ]
+    );
 
     let s2 = setup(1_500, 1_500);
     s2.contract.lock();
     advance_time(&s2, DELIVERY_WINDOW + 1);
     s2.contract.reclaim_on_nondelivery();
-    assert_transition(&s2, Status::Locked, Status::Forfeited);
+    // reclaim_on_nondelivery emits StatusChanged AND Payout for the deposit.
+    assert_eq!(
+        s2.env
+            .events()
+            .all()
+            .filter_by_contract(&s2.contract.address),
+        [
+            status_event(&s2, Status::Locked, Status::Forfeited),
+            payout_event(&s2, "forfeit", &s2.buyer.clone(), 300_000),
+        ]
+    );
 
     // The remainder window lapses without fund_remainder — buyer default.
-    // Claims are deliberately skipped: they emit nothing (asserted in
-    // every_transition_publishes_status_changed) and no guard on this path
-    // depends on them.
+    // Claims are skipped; deposit (advance1 + advance2 = 350_000) stays in
+    // the contract the whole time and is swept by expire_remainder_window.
     let s3 = setup(1_500, 2_000);
     s3.contract.lock();
     s3.contract.release_advance_1();
@@ -4359,7 +4435,17 @@ fn unwind_and_default_paths_publish_status_changed() {
     s3.contract.ready_for_delivery();
     advance_time(&s3, REMAINDER_WINDOW + 1);
     s3.contract.expire_remainder_window();
-    assert_transition(&s3, Status::ReadyForDelivery, Status::Defaulted);
+    // expire_remainder_window emits StatusChanged AND Payout to cooperative.
+    assert_eq!(
+        s3.env
+            .events()
+            .all()
+            .filter_by_contract(&s3.contract.address),
+        [
+            status_event(&s3, Status::ReadyForDelivery, Status::Defaulted),
+            payout_event(&s3, "exp_rem", &s3.cooperative.clone(), 350_000),
+        ]
+    );
 }
 
 #[test]
@@ -4944,4 +5030,299 @@ fn fund_fx_shortfall_rejects_a_buyer_auth_tree_signed_for_a_different_amount() {
         "a signature covering a different amount must not authorize fund_fx_shortfall: {result:?}"
     );
     assert!(!s.contract.get_commitment().fx_shortfall_funded);
+}
+
+// ---------- issue #207: resolve_fx_shortfall must not charge FX shortfall for reclaimed tranches ----------
+
+#[test]
+fn full_happy_path_advance_1_reclaimed_oracle_no_fx_shortfall_charged() {
+    // Advance 1 lapses and the buyer reclaims it; advance 2 is claimed by
+    // the cooperative. The oracle gives fx_adjusted_total = 875_000.
+    //
+    // WITHOUT the fix: owed_from_remainder = 875_000 - 150_000 (adv2) = 725_000;
+    //   available_balance = 700_000; shortfall = 25_000 (spurious).
+    // WITH the fix:    owed_from_remainder = 875_000 - 150_000 - 150_000 = 575_000;
+    //   available_balance = 700_000; shortfall = 0 (correct).
+    let (s, oracle) = setup_with_oracle_denomination(u64::MAX, 500_000);
+    s.contract.lock();
+    // Open tranche 1 but let it lapse so the buyer reclaims it.
+    s.contract.release_advance_1();
+    advance_time(&s, WINDOW + 1);
+    s.contract.reclaim_advance_1();
+    assert!(s.contract.get_commitment().advance1_expired);
+
+    // Advance through checkpoint / tranche 2 / remainder.
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.ready_for_delivery();
+    s.contract.fund_remainder();
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    // Refresh oracle price so the quote is not stale (we advanced WINDOW+1 secs).
+    oracle.set_price(&175_000_000_000_000i128, &s.env.ledger().timestamp());
+    s.contract.resolve_fx_shortfall();
+
+    let c = s.contract.get_commitment();
+    // fx_adjusted_total = 500_000 * 1.75 = 875_000.
+    assert_eq!(
+        c.fx_adjusted_total, 875_000,
+        "sanity: fx_adjusted_total must be 875_000"
+    );
+    // The shortfall must be zero — the reclaimed advance must not inflate it.
+    assert_eq!(
+        c.fx_shortfall_amount, 0,
+        "reclaimed advance must not create a spurious shortfall"
+    );
+    assert!(
+        c.fx_shortfall_funded,
+        "zero shortfall must be trivially funded"
+    );
+}
+
+// ---------- issue #205: expire_delivery_window ----------
+
+#[test]
+fn expire_delivery_window_after_grace_transfers_balance_to_buyer() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    // Cooperative never proceeds further.
+    // Grace = delivery_deadline + remainder_window_secs.
+    advance_time(&s, DELIVERY_WINDOW + REMAINDER_WINDOW + 1);
+
+    let contract_balance_before = s.token.balance(&s.contract.address);
+    let buyer_balance_before = s.token.balance(&s.buyer);
+
+    s.contract.expire_delivery_window();
+
+    assert_eq!(s.contract.get_status(), Status::Forfeited);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+    assert_eq!(
+        s.token.balance(&s.buyer),
+        buyer_balance_before + contract_balance_before
+    );
+}
+
+#[test]
+fn expire_delivery_window_before_grace_is_rejected() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    // Past delivery deadline but not yet past the grace window.
+    advance_time(&s, DELIVERY_WINDOW + 1);
+
+    let result = s.contract.try_expire_delivery_window();
+    assert_eq!(result, Err(Ok(Error::DeliveryGraceWindowNotPassed)));
+}
+
+#[test]
+fn expire_delivery_window_callable_by_stranger() {
+    // The function is permissionless — any caller can trigger it.
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_time(&s, DELIVERY_WINDOW + REMAINDER_WINDOW + 1);
+
+    // Calling as neither buyer nor cooperative — just a random address.
+    // mock_all_auths is set by setup(), so the call succeeds regardless
+    // of who triggers it; what matters is that it does not require_auth.
+    s.contract.expire_delivery_window();
+    assert_eq!(s.contract.get_status(), Status::Forfeited);
+}
+
+#[test]
+fn expire_delivery_window_rejects_from_delivered() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    advance_time(&s, DELIVERY_WINDOW + REMAINDER_WINDOW + 1);
+
+    let result = s.contract.try_expire_delivery_window();
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn expire_delivery_window_publishes_payout_event() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_time(&s, DELIVERY_WINDOW + REMAINDER_WINDOW + 1);
+
+    let balance_before = s.token.balance(&s.contract.address);
+    s.contract.expire_delivery_window();
+
+    let all_events = s.env.events().all();
+    let filtered = all_events.filter_by_contract(&s.contract.address);
+    let events = filtered.events();
+    // One StatusChanged + one Payout — the Payout must carry the balance.
+    let payout_event = Payout {
+        reason: symbol_short!("exp_del"),
+        to: s.buyer.clone(),
+        amount: balance_before,
+    }
+    .to_xdr(&s.env, &s.contract.address);
+    assert!(
+        events.iter().any(|e| *e == payout_event),
+        "expire_delivery_window must publish a Payout event"
+    );
+}
+
+// ---------- issue #204: Payout events on every fund transfer ----------
+
+#[test]
+fn settle_publishes_payout_events_for_coop_and_buyer() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+
+    let coop_owed: i128 = s.total_amount * (10_000 - 1_500 - 2_000) / 10_000; // remainder net — no refund
+    s.contract.settle();
+
+    let all_events = s.env.events().all();
+    let filtered = all_events.filter_by_contract(&s.contract.address);
+    let events = filtered.events();
+    let coop_payout = Payout {
+        reason: symbol_short!("coop_pay"),
+        to: s.cooperative.clone(),
+        amount: coop_owed,
+    }
+    .to_xdr(&s.env, &s.contract.address);
+    assert!(
+        events.iter().any(|e| *e == coop_payout),
+        "settle must publish a coop_pay Payout"
+    );
+}
+
+#[test]
+fn cancel_publishes_payout_event() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+
+    let balance_before = s.token.balance(&s.contract.address);
+    s.contract.cancel();
+
+    let all_events = s.env.events().all();
+    let filtered = all_events.filter_by_contract(&s.contract.address);
+    let events = filtered.events();
+    let payout_event = Payout {
+        reason: symbol_short!("cancel"),
+        to: s.buyer.clone(),
+        amount: balance_before,
+    }
+    .to_xdr(&s.env, &s.contract.address);
+    assert!(
+        events.iter().any(|e| *e == payout_event),
+        "cancel must publish a Payout event"
+    );
+}
+
+#[test]
+fn reclaim_on_nondelivery_publishes_payout_event() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    advance_time(&s, DELIVERY_WINDOW + 1);
+
+    let balance_before = s.token.balance(&s.contract.address);
+    s.contract.reclaim_on_nondelivery();
+
+    let all_events = s.env.events().all();
+    let filtered = all_events.filter_by_contract(&s.contract.address);
+    let events = filtered.events();
+    let payout_event = Payout {
+        reason: symbol_short!("forfeit"),
+        to: s.buyer.clone(),
+        amount: balance_before,
+    }
+    .to_xdr(&s.env, &s.contract.address);
+    assert!(
+        events.iter().any(|e| *e == payout_event),
+        "reclaim_on_nondelivery must publish a Payout event"
+    );
+}
+
+#[test]
+fn expire_remainder_window_publishes_payout_event() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.ready_for_delivery();
+    advance_time(&s, REMAINDER_WINDOW + 1);
+
+    let balance_before = s.token.balance(&s.contract.address);
+    s.contract.expire_remainder_window();
+
+    let all_events = s.env.events().all();
+    let filtered = all_events.filter_by_contract(&s.contract.address);
+    let events = filtered.events();
+    let payout_event = Payout {
+        reason: symbol_short!("exp_rem"),
+        to: s.cooperative.clone(),
+        amount: balance_before,
+    }
+    .to_xdr(&s.env, &s.contract.address);
+    assert!(
+        events.iter().any(|e| *e == payout_event),
+        "expire_remainder_window must publish a Payout event"
+    );
+}
+
+// ---------- issue #201: dispute_count cap ----------
+
+#[test]
+fn flag_dispute_capped_after_max_lapsed_disputes() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    // Exhaust all three allowed lapses.
+    for _ in 0..3 {
+        s.contract.flag_dispute(&s.buyer);
+        assert_eq!(s.contract.get_status(), Status::Disputed);
+        advance_time(&s, WINDOW + 1);
+        s.contract.expire_dispute_window();
+        assert_eq!(s.contract.get_status(), Status::Locked);
+    }
+    assert_eq!(s.contract.get_commitment().dispute_count, 3);
+
+    // The cap is now hit; a fourth flag must be rejected.
+    let result = s.contract.try_flag_dispute(&s.buyer);
+    assert_eq!(result, Err(Ok(Error::DisputeCapReached)));
+}
+
+#[test]
+fn unanimous_resolve_does_not_count_against_cap() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    // Three unanimous resolutions must NOT consume cap slots.
+    for _ in 0..3 {
+        s.contract.flag_dispute(&s.buyer);
+        s.contract.resolve_dispute();
+    }
+    assert_eq!(
+        s.contract.get_commitment().dispute_count,
+        0,
+        "unanimous resolves must not increment dispute_count"
+    );
+
+    // Because no lapse happened the cap is untouched; a fourth flag works.
+    s.contract.flag_dispute(&s.cooperative);
+    assert_eq!(s.contract.get_status(), Status::Disputed);
+}
+
+#[test]
+fn expire_dispute_window_increments_dispute_count() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+
+    s.contract.flag_dispute(&s.buyer);
+    advance_time(&s, WINDOW + 1);
+    s.contract.expire_dispute_window();
+
+    assert_eq!(s.contract.get_commitment().dispute_count, 1);
 }

@@ -317,15 +317,17 @@ Revisit if a real dispute ever collides with a deadline this way (see
 `flag_dispute`'s doc comment and [`dispute-scope.md`](./dispute-scope.md) §4).
 
 #### 16. A party flags a dispute to buy time
-**Verdict: accepted risk, and the contract does not bound the
-delay.** Any named party can pause the machine for up to
-`remainder_window_secs` at a time, and because `expire_dispute_window`
-restores the pre-dispute status while `flag_dispute` has no cooldown, bond,
-or per-commitment counter, the flagger can re-flag immediately after each
-expiry. The timeout bounds a *single* freeze, not the strategy. Two claims
-this entry used to make need correcting: a pause *can* change an outcome,
-because a cooperative can flag to block `reclaim_on_nondelivery` and use
-the window to obtain a late `confirm_delivery` (entry 28,
+**Verdict: defended, bounded by `MAX_DISPUTE_FLAGS`.** Any named party
+can pause the machine for up to `remainder_window_secs` at a time.
+`flag_dispute` now checks `dispute_count >= MAX_DISPUTE_FLAGS` (= 3) and
+returns `DisputeCapReached` once that threshold is reached.
+`expire_dispute_window` increments `dispute_count`; unanimous
+`resolve_dispute` does not, so a good-faith dispute that the parties
+resolve together does not cost them a flag. The aggregate delay is now
+bounded at `3 × remainder_window_secs`. Two additional notes: a pause
+*can* change an outcome, because a cooperative can flag to block
+`reclaim_on_nondelivery` and use the window to obtain a late
+`confirm_delivery` (entry 28,
 [`dispute-frontrunning.md`](./dispute-frontrunning.md) §3.1); and the
 freeze leaves other deadlines ticking (entry 15), so it buys time rather
 than curing anything. The flag itself also generates no reputation event,
