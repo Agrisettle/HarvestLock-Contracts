@@ -226,6 +226,9 @@ pub enum AuthParty {
     /// Current buyer, cooperative, **and** the incoming buyer supplied as
     /// `new_buyer` — the three signatures `reassign_buyer` requires.
     BuyerCooperativeAndNewBuyer,
+    /// Current buyer, cooperative, **and** the incoming operator supplied as
+    /// `new_operator` — the three signatures `reassign_operator` requires.
+    BuyerCooperativeAndNewOperator,
 }
 
 /// The timestamp, if any, that bounds a callable action. The variant says
@@ -732,6 +735,18 @@ impl EscrowContract {
     /// reason. The only thing an abandoned Draft leaves behind is its
     /// storage entry, whose lifetime (and eventual archival) is covered by
     /// docs/storage-ttl.md — a dead record, not lost money.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::AlreadyInitialized`] — called on an already-initialized contract instance.
+    /// - [`Error::ZeroAmount`] — `total_amount` is zero or negative.
+    /// - [`Error::AmountTooLarge`] — `total_amount` exceeds `MAX_TOTAL_AMOUNT` (`i128::MAX / 10_000`).
+    /// - [`Error::InvalidBps`] — `advance1_bps + advance2_bps > 10_000`.
+    /// - [`Error::InvalidWindow`] — any of `claim_window_secs`, `remainder_window_secs`, or `delivery_window_secs` is zero.
+    /// - [`Error::InvalidQuantity`] — `contracted_quantity` is zero.
+    /// - [`Error::InvalidGradeSchedule`] — `grade_price_bps` is empty or contains an entry exceeding 10_000.
+    /// - [`Error::GradeScheduleTooLong`] — `grade_price_bps` has more than `MAX_GRADE_ENTRIES` entries.
+    /// - [`Error::InvalidOracleConfig`] — `oracle_config` is `Some` with `max_age_secs == 0`.
     pub fn initialize(
         env: Env,
         buyer: Address,
@@ -959,6 +974,16 @@ impl EscrowContract {
     /// might expect. (An earlier version of this comment claimed approve
     /// was required — that was never checked against real behavior; this
     /// replaces it with what was actually verified.)
+    ///
+    /// **Auth**: buyer (`buyer.require_auth()`).
+    /// **Precondition**: commitment must be in `Draft`.
+    /// **State changes**: transitions to `Locked`; transfers `advance1_bps + advance2_bps`
+    /// of `total_amount` from buyer into the contract.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in `Draft`.
     pub fn lock(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_lock(&c)?;
@@ -1040,6 +1065,15 @@ impl EscrowContract {
     /// state advance, so unlike opening an advance tranche it *is*
     /// auth-gated. Independent of whether tranche 1 has actually been
     /// claimed yet — crop progress doesn't wait on paperwork.
+    ///
+    /// **Auth**: warehouse operator (`warehouse_operator.require_auth()`).
+    /// **Precondition**: commitment must be in `Advance1Released`.
+    /// **State changes**: transitions to `CheckpointPassed`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in `Advance1Released`.
     pub fn mark_checkpoint(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_mark_checkpoint(&c)?;
@@ -1216,6 +1250,18 @@ impl EscrowContract {
     /// The checked conversions panic if either derived basis-point value
     /// exceeds `u32`; validated quantity and grade bounds keep both values
     /// within 10,000.
+    ///
+    /// **Auth**: warehouse operator (`warehouse_operator.require_auth()`).
+    /// **Precondition**: commitment must be in `ReadyForDelivery` and remainder already funded.
+    /// **State changes**: transitions to `Delivered`; records `delivered_quantity`, `grade_index`,
+    /// and `settlement_bps` for use by `settle`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in `ReadyForDelivery`.
+    /// - [`Error::RemainderNotFunded`] — buyer has not yet funded the remainder.
+    /// - [`Error::InvalidGradeIndex`] — `grade_index` is out of bounds for `grade_price_bps`.
     pub fn confirm_delivery(
         env: Env,
         delivered_quantity: u32,
@@ -1285,6 +1331,14 @@ impl EscrowContract {
     ///
     /// Permissionless — no auth required: the payout math depends only on
     /// already-recorded state, not on who triggers it.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in `Delivered`.
+    /// - [`Error::TrancheUnresolved`] — either advance tranche has not been claimed or expired.
+    /// - [`Error::FxNotResolved`] — oracle-configured commitment: `resolve_fx_shortfall` has not run.
+    /// - [`Error::FxShortfallUnfunded`] — oracle-configured commitment: a shortfall was found and has not been paid in.
     pub fn settle(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_settle(&env, &c)?;
@@ -1613,6 +1667,29 @@ impl EscrowContract {
         Ok(())
     }
 
+    /// Transfers the `warehouse_operator` position to `new_operator`. The
+    /// current operator relinquishes all future `confirm_delivery` rights;
+    /// `new_operator` acquires them. No funds move.
+    ///
+    /// auth: current buyer + cooperative + incoming operator (three-party
+    /// consent, `BuyerCooperativeAndNewOperator`). Requiring all three
+    /// prevents: the current buyer + cooperative from silently saddling an
+    /// unwilling third party with the attestation obligation (#203), and the
+    /// current operator from jumping ship without the buyer's knowledge.
+    ///
+    /// Reachable from `Draft` through `ReadyForDelivery` (the same window as
+    /// `reassign_buyer`): past `Delivered`, `warehouse_operator` gates no
+    /// remaining action, so a novation there would be a no-op.
+    pub fn reassign_operator(env: Env, new_operator: Address) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        Self::can_reassign_operator(&c)?;
+        Self::require_once_each(&[&c.buyer, &c.cooperative, &new_operator]);
+
+        c.warehouse_operator = new_operator;
+        Self::save(&env, &c);
+        Ok(())
+    }
+
     /// Dispute flagging (PRD's must-have "dispute flagging with defined
     /// escalation"). Any **one** of the three named parties — `flagger`
     /// must equal `buyer`, `cooperative`, or `warehouse_operator` — can
@@ -1649,6 +1726,19 @@ impl EscrowContract {
     /// Requires the flagger's own auth (`flagger.require_auth()`), and
     /// `flagger` must be the buyer, the cooperative, or the warehouse
     /// operator.
+    ///
+    /// **Auth**: any one named party (`flagger.require_auth()`; `flagger` must equal `buyer`,
+    /// `cooperative`, or `warehouse_operator`).
+    /// **Precondition**: commitment must be in `Locked`, `Advance1Released`, `CheckpointPassed`,
+    /// `Advance2Released`, `ReadyForDelivery`, or `Delivered`.
+    /// **State changes**: transitions to `Disputed`; records `dispute_pre_status` and sets
+    /// `dispute_deadline` to `now + remainder_window_secs`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in a disputable status (see precondition above).
+    /// - [`Error::NotAParty`] — `flagger` is not the buyer, cooperative, or warehouse operator.
     pub fn flag_dispute(env: Env, flagger: Address) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_flag_dispute(&c, &flagger)?;
@@ -1677,6 +1767,17 @@ impl EscrowContract {
     /// the deadline second itself and after it. Unanimous consent is the
     /// only gate — the timeout exists to break a deadlock, never to take
     /// the decision away from three parties who have already agreed.
+    ///
+    /// **Auth**: all three named parties (`buyer`, `cooperative`, `warehouse_operator`),
+    /// deduplicated — a single address holding multiple roles only signs once.
+    /// **Precondition**: commitment must be in `Disputed`.
+    /// **State changes**: restores `status` to `dispute_pre_status`; clears `dispute_pre_status`
+    /// and `dispute_deadline`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in `Disputed`.
     pub fn resolve_dispute(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_resolve_dispute(&c)?;
@@ -1708,6 +1809,17 @@ impl EscrowContract {
     /// `DisputeWindowNotPassed` while `resolve_dispute` remains available —
     /// the boundary second is never a dead zone where neither resume path
     /// works.
+    ///
+    /// **Auth**: none — permissionless.
+    /// **Precondition**: commitment must be in `Disputed` and `now > dispute_deadline`.
+    /// **State changes**: restores `status` to `dispute_pre_status`; clears `dispute_pre_status`
+    /// and `dispute_deadline`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotInitialized`] — `initialize` has not run yet.
+    /// - [`Error::InvalidState`] — commitment is not in `Disputed`.
+    /// - [`Error::DisputeWindowNotPassed`] — `dispute_deadline` has not strictly passed yet.
     pub fn expire_dispute_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_expire_dispute_window(&c, env.ledger().timestamp())?;
@@ -1932,6 +2044,14 @@ impl EscrowContract {
             Self::can_reassign_buyer(&c),
             "reassign_buyer",
             AuthParty::BuyerCooperativeAndNewBuyer,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_reassign_operator(&c),
+            "reassign_operator",
+            AuthParty::BuyerCooperativeAndNewOperator,
             ActionDeadline::None,
         );
         // The buyer is always one of the three named parties, so passing it
@@ -2241,6 +2361,13 @@ impl EscrowContract {
     }
 
     fn can_reassign_buyer(c: &Commitment) -> Result<(), Error> {
+        if !Self::is_pre_delivery_status(c.status) {
+            return Err(Error::InvalidState);
+        }
+        Ok(())
+    }
+
+    fn can_reassign_operator(c: &Commitment) -> Result<(), Error> {
         if !Self::is_pre_delivery_status(c.status) {
             return Err(Error::InvalidState);
         }
