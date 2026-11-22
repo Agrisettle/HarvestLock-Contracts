@@ -765,6 +765,99 @@ pub struct FxShortfallFunded {
     pub amount: i128,
 }
 
+/// Emitted by `reassign_buyer` after the buyer position is novated to `new_buyer` (#206).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuyerReassigned {
+    #[topic]
+    pub previous: Address,
+    #[topic]
+    pub new_buyer: Address,
+}
+
+/// Whether a dispute ended by unanimous consent or by the window expiring (#208).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisputeOutcome {
+    Resolved,
+    Expired,
+}
+
+/// Emitted by `flag_dispute` when a named party freezes the commitment (#208).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeFlagged {
+    #[topic]
+    pub flagger: Address,
+    pub pre_status: Status,
+    pub deadline: u64,
+}
+
+/// Emitted by `resolve_dispute` and `expire_dispute_window` when a dispute ends (#208).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeEnded {
+    #[topic]
+    pub outcome: DisputeOutcome,
+    pub restored: Status,
+}
+
+/// Emitted by `resolve_fx_shortfall` after the FX shortfall amount is computed (#210).
+/// `deadline` is 0 when `shortfall` is 0 (no top-up window needed).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FxResolved {
+    pub rate: i128,
+    pub rate_timestamp: u64,
+    pub fx_adjusted_total: i128,
+    pub shortfall: i128,
+    pub deadline: u64,
+}
+
+/// Emitted by `refresh_fx_quote_status` when `fx_quote_stale` changes (#210).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FxQuoteStaleChanged {
+    pub stale: bool,
+}
+
+/// Emitted by `confirm_delivery` after the operator's attestation is recorded (#212).
+/// The three fields together are the trust anchor for every downstream
+/// calculation: `settlement_bps` is derived from `delivered_quantity` ×
+/// `grade_price_bps[grade_index]` / `contracted_quantity`, computed once and
+/// never re-derived. Per-member hashes stay out of this event — see
+/// `docs/allocation-salt-analysis.md` for why member identity belongs
+/// off-chain.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryConfirmed {
+    #[topic]
+    pub grade_index: u32,
+    pub delivered_quantity: u32,
+    pub settlement_bps: u32,
+}
+
+/// Emitted by `set_allocation` after the member entitlement ledger is
+/// recorded (#212). Reports the aggregate shape (member count and total
+/// share basis points) without exposing individual hashes, so an indexer
+/// can verify completeness without decoding the full allocation list.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllocationRecorded {
+    pub member_count: u32,
+    pub total_share_bps: u32,
+}
+
+/// Emitted by `replace_oracle_config` when both parties consent to swap the
+/// oracle address (#215). The old config is not stored after replacement;
+/// subscribers that need it can read it from this event's context, via the
+/// previous `initialize` transaction's arguments.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleConfigReplaced {
+    pub new_oracle_contract: Address,
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -925,6 +1018,40 @@ impl EscrowContract {
         Ok(env.storage().instance().get(&DataKey::OracleConfig))
     }
 
+    /// Replaces a broken oracle configuration with a new one, with two-party
+    /// consent (issue #215). Addresses F1 (unreachable oracle) by letting the
+    /// buyer and cooperative substitute a working `oracle_config` before
+    /// `fx_resolved` is set.
+    ///
+    /// Only legal in `Status::Delivered` while `fx_resolved` is false.
+    /// The new config is validated the same way `initialize` does
+    /// (`max_age_secs != 0`). Requires buyer and cooperative to co-sign.
+    pub fn replace_oracle_config(env: Env, new_config: OracleConfig) -> Result<(), Error> {
+        let c = Self::load(&env)?;
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        if !env.storage().instance().has(&DataKey::OracleConfig) {
+            return Err(Error::OracleNotConfigured);
+        }
+        if new_config.max_age_secs == 0 {
+            return Err(Error::InvalidOracleConfig);
+        }
+        Self::require_once_each(&[&c.buyer, &c.cooperative]);
+        let new_oracle_contract = new_config.oracle_contract.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleConfig, &new_config);
+        OracleConfigReplaced {
+            new_oracle_contract,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
     /// Reads the current rate for this commitment's configured oracle
     /// asset, enforcing the staleness bound. A pure read against
     /// Reflector's own stored history, not a state transition — callable
@@ -1014,7 +1141,13 @@ impl EscrowContract {
         }
         c.cooperative.require_auth();
 
+        let member_count = members.len();
         env.storage().instance().set(&DataKey::Allocation, &members);
+        AllocationRecorded {
+            member_count,
+            total_share_bps: total_bps,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1373,6 +1506,12 @@ impl EscrowContract {
             .expect("settlement basis points are bounded by 10,000");
         Self::set_status(&env, &mut c, Status::Delivered);
         Self::save(&env, &c);
+        DeliveryConfirmed {
+            grade_index,
+            delivered_quantity,
+            settlement_bps: c.settlement_bps,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1575,6 +1714,14 @@ impl EscrowContract {
             c.fx_shortfall_funded = true;
         }
         Self::save(&env, &c);
+        FxResolved {
+            rate: rate.price,
+            rate_timestamp: rate.timestamp,
+            fx_adjusted_total,
+            shortfall,
+            deadline: c.fx_shortfall_deadline,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1636,12 +1783,17 @@ impl EscrowContract {
             .get(&DataKey::OracleConfig)
             .ok_or(Error::OracleNotConfigured)?;
 
+        let prev_stale = c.fx_quote_stale;
         match Self::read_oracle_rate(&env, &oracle_config) {
             Ok(_) => c.fx_quote_stale = false,
             Err(Error::OracleStale) => c.fx_quote_stale = true,
             Err(e) => return Err(e),
         }
+        let new_stale = c.fx_quote_stale;
         Self::save(&env, &c);
+        if new_stale != prev_stale {
+            FxQuoteStaleChanged { stale: new_stale }.publish(&env);
+        }
         Ok(())
     }
 
@@ -1778,13 +1930,21 @@ impl EscrowContract {
     /// `buyer` no longer gates any remaining action (`settle` doesn't
     /// check it), so reassigning it after that point would be a no-op
     /// dressed up as a real transfer.
+    /// Emits [`BuyerReassigned`] after the write so observers learn both the
+    /// outgoing and incoming buyer in a single indexed event (#206).
     pub fn reassign_buyer(env: Env, new_buyer: Address) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_reassign_buyer(&c)?;
         Self::require_once_each(&[&c.buyer, &c.cooperative, &new_buyer]);
 
-        c.buyer = new_buyer;
+        let previous = c.buyer.clone();
+        c.buyer = new_buyer.clone();
         Self::save(&env, &c);
+        BuyerReassigned {
+            previous,
+            new_buyer,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1833,6 +1993,12 @@ impl EscrowContract {
         c.dispute_deadline = env.ledger().timestamp() + c.remainder_window_secs;
         Self::set_status(&env, &mut c, Status::Disputed);
         Self::save(&env, &c);
+        DisputeFlagged {
+            flagger,
+            pre_status: c.dispute_pre_status,
+            deadline: c.dispute_deadline,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1862,6 +2028,11 @@ impl EscrowContract {
         c.dispute_deadline = 0;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
+        DisputeEnded {
+            outcome: DisputeOutcome::Resolved,
+            restored,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1893,6 +2064,11 @@ impl EscrowContract {
         c.dispute_count += 1;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
+        DisputeEnded {
+            outcome: DisputeOutcome::Expired,
+            restored,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -2076,6 +2252,14 @@ impl EscrowContract {
             Self::can_resolve_fx_shortfall(&env, &c),
             "resolve_fx_shortfall",
             AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_replace_oracle_config(&env, &c),
+            "replace_oracle_config",
+            AuthParty::BuyerAndCooperative,
             ActionDeadline::None,
         );
         Self::push_action(
@@ -2352,6 +2536,19 @@ impl EscrowContract {
             if c.fx_shortfall_amount > 0 && !c.fx_shortfall_funded {
                 return Err(Error::FxShortfallUnfunded);
             }
+        }
+        Ok(())
+    }
+
+    fn can_replace_oracle_config(env: &Env, c: &Commitment) -> Result<(), Error> {
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        if !env.storage().instance().has(&DataKey::OracleConfig) {
+            return Err(Error::OracleNotConfigured);
         }
         Ok(())
     }

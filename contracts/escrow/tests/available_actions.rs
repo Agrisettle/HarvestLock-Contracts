@@ -1317,6 +1317,12 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                     w,
                     &[
                         act(&w.env, "resolve_fx_shortfall", AuthParty::Anyone, none()),
+                        act(
+                            &w.env,
+                            "replace_oracle_config",
+                            AuthParty::BuyerAndCooperative,
+                            none(),
+                        ),
                         act(&w.env, "refresh_fx_quote_status", AuthParty::Anyone, none()),
                         act(&w.env, "flag_dispute", AuthParty::AnyNamedParty, none()),
                     ],

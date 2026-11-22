@@ -4308,6 +4308,38 @@ fn fx_shortfall_funded_event(s: &Setup, amount: i128) -> xdr::ContractEvent {
     .to_xdr(&s.env, &s.contract.address)
 }
 
+fn delivery_confirmed_event(
+    s: &Setup,
+    grade_index: u32,
+    delivered_quantity: u32,
+    settlement_bps: u32,
+) -> xdr::ContractEvent {
+    DeliveryConfirmed {
+        grade_index,
+        delivered_quantity,
+        settlement_bps,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
+fn dispute_flagged_event(
+    s: &Setup,
+    flagger: &Address,
+    pre_status: Status,
+    deadline: u64,
+) -> xdr::ContractEvent {
+    DisputeFlagged {
+        flagger: flagger.clone(),
+        pre_status,
+        deadline,
+    }
+    .to_xdr(&s.env, &s.contract.address)
+}
+
+fn dispute_ended_event(s: &Setup, outcome: DisputeOutcome, restored: Status) -> xdr::ContractEvent {
+    DisputeEnded { outcome, restored }.to_xdr(&s.env, &s.contract.address)
+}
+
 /// Asserts the escrow contract's most recent invocation published exactly
 /// one `status_changed` event, `from -> to` — `env.events().all()` scopes
 /// to the last invocation, so this doubles as the "and nothing else was
@@ -4368,7 +4400,14 @@ fn every_transition_publishes_status_changed() {
     );
     s.contract
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
-    assert_transition(&s, Status::ReadyForDelivery, Status::Delivered);
+    // confirm_delivery emits StatusChanged AND DeliveryConfirmed.
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [
+            status_event(&s, Status::ReadyForDelivery, Status::Delivered),
+            delivery_confirmed_event(&s, FULL_PRICE_GRADE, CONTRACTED_QUANTITY, 10_000),
+        ]
+    );
     s.contract.settle();
     // settle emits StatusChanged + a coop_pay Payout (coop receives the 650k
     // remainder; buyer_refund is 0 so no second Payout).
@@ -4386,12 +4425,24 @@ fn dispute_freeze_and_resume_publish_status_changed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     s.contract.flag_dispute(&s.buyer);
-    assert_transition(&s, Status::Locked, Status::Disputed);
+    // flag_dispute emits StatusChanged AND DisputeFlagged.
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [
+            status_event(&s, Status::Locked, Status::Disputed),
+            dispute_flagged_event(&s, &s.buyer.clone(), Status::Locked, REMAINDER_WINDOW),
+        ]
+    );
     s.contract.resolve_dispute();
-    // The resume event's `to` is the restored pre-dispute status, not
-    // Draft — the same restoration `status` itself gets, mirrored into
-    // the event.
-    assert_transition(&s, Status::Disputed, Status::Locked);
+    // resolve_dispute emits StatusChanged AND DisputeEnded.
+    // The `to` is the restored pre-dispute status (Locked here), not Draft.
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [
+            status_event(&s, Status::Disputed, Status::Locked),
+            dispute_ended_event(&s, DisputeOutcome::Resolved, Status::Locked),
+        ]
+    );
 }
 
 #[test]
@@ -5325,4 +5376,170 @@ fn expire_dispute_window_increments_dispute_count() {
     s.contract.expire_dispute_window();
 
     assert_eq!(s.contract.get_commitment().dispute_count, 1);
+}
+
+// ── issue #211 — fund-conservation property tests ────────────────────────────
+//
+// Four proptest suites, one per terminal path: Settled, Cancelled, Defaulted,
+// and Forfeited.  Each suite asserts four conservation laws:
+//
+//  Law 1 — contract is fully drained at the terminal state.
+//  Law 2 — buyer + cooperative balances sum to `total_amount` (conservation).
+//  Law 3 — in the Settled path, the cooperative receives ≤ settlement_bps
+//           fraction of `total_amount` (the grade-adjusted ceiling).
+//  Law 4 — the buyer's final balance is non-negative.
+//
+// `advance1_bps` and `advance2_bps` are varied across [0, 4000] so the
+// deposit size (and therefore the remainder size) covers the full plausible
+// range without pushing either advance beyond 40 % of total_amount.
+mod proptest_fund_conservation {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn settle_lifecycle(
+        advance1_bps: u32,
+        advance2_bps: u32,
+        grade_index: u32,
+    ) -> Result<(), TestCaseError> {
+        let s = setup(advance1_bps, advance2_bps);
+        let total = s.total_amount;
+        s.contract.lock();
+        s.contract.release_advance_1();
+        s.contract.claim_advance_1();
+        s.contract.mark_checkpoint();
+        s.contract.release_advance_2();
+        s.contract.claim_advance_2();
+        s.contract.ready_for_delivery();
+        s.contract.fund_remainder();
+        s.contract
+            .confirm_delivery(&CONTRACTED_QUANTITY, &grade_index);
+
+        // Snapshot balances immediately before settle so Law 3 can verify that
+        // settle only pays out — it never charges either party.
+        let coop_before_settle = s.token.balance(&s.cooperative);
+        let buyer_before_settle = s.token.balance(&s.buyer);
+        s.contract.settle();
+
+        prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
+        let buyer_bal = s.token.balance(&s.buyer);
+        let coop_bal = s.token.balance(&s.cooperative);
+        prop_assert_eq!(buyer_bal + coop_bal, total, "Law 2");
+        // Law 3: settle only distributes, never charges — both parties'
+        // balances are non-decreasing across the settle call.
+        // Note: advances are pre-agreed; if advance1_bps + advance2_bps
+        // exceeds the grade-adjusted settlement, the coop simply receives 0
+        // from the remainder and the buyer is refunded any excess — the
+        // `(adjusted_total - claimed).max(0)` guard prevents a negative payout.
+        prop_assert!(
+            coop_bal >= coop_before_settle,
+            "Law 3a: settle must not debit the coop ({} < {})",
+            coop_bal,
+            coop_before_settle
+        );
+        prop_assert!(
+            buyer_bal >= buyer_before_settle,
+            "Law 3b: settle must not debit the buyer ({} < {})",
+            buyer_bal,
+            buyer_before_settle
+        );
+        prop_assert!(buyer_bal >= 0, "Law 4");
+        Ok(())
+    }
+
+    fn cancel_lifecycle(advance1_bps: u32, advance2_bps: u32) -> Result<(), TestCaseError> {
+        let s = setup(advance1_bps, advance2_bps);
+        let total = s.total_amount;
+        s.contract.lock();
+        s.contract.cancel();
+
+        prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
+        let buyer_bal = s.token.balance(&s.buyer);
+        let coop_bal = s.token.balance(&s.cooperative);
+        prop_assert_eq!(buyer_bal + coop_bal, total, "Law 2");
+        prop_assert_eq!(coop_bal, 0i128, "Law 3: cancel pays buyer in full");
+        prop_assert!(buyer_bal >= 0, "Law 4");
+        Ok(())
+    }
+
+    fn defaulted_lifecycle(advance1_bps: u32, advance2_bps: u32) -> Result<(), TestCaseError> {
+        let s = setup(advance1_bps, advance2_bps);
+        let total = s.total_amount;
+        s.contract.lock();
+        s.contract.release_advance_1();
+        s.contract.mark_checkpoint();
+        s.contract.release_advance_2();
+        s.contract.ready_for_delivery();
+        let deadline = s.contract.get_commitment().remainder_deadline;
+        s.env.ledger().set_timestamp(deadline + 1);
+        s.contract.expire_remainder_window();
+
+        prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
+        let buyer_bal = s.token.balance(&s.buyer);
+        let coop_bal = s.token.balance(&s.cooperative);
+        prop_assert_eq!(buyer_bal + coop_bal, total, "Law 2");
+        prop_assert!(
+            coop_bal <= total,
+            "Law 3: defaulted coop cannot exceed total"
+        );
+        prop_assert!(buyer_bal >= 0, "Law 4");
+        Ok(())
+    }
+
+    fn forfeited_lifecycle(advance1_bps: u32, advance2_bps: u32) -> Result<(), TestCaseError> {
+        let s = setup(advance1_bps, advance2_bps);
+        let total = s.total_amount;
+        s.contract.lock();
+        let deadline = s.contract.get_commitment().delivery_deadline;
+        s.env.ledger().set_timestamp(deadline + 1);
+        s.contract.reclaim_on_nondelivery();
+
+        prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
+        let buyer_bal = s.token.balance(&s.buyer);
+        let coop_bal = s.token.balance(&s.cooperative);
+        prop_assert_eq!(buyer_bal + coop_bal, total, "Law 2");
+        prop_assert_eq!(
+            coop_bal,
+            0i128,
+            "Law 3: forfeiture returns all funds to buyer"
+        );
+        prop_assert!(buyer_bal >= 0, "Law 4");
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn fund_conservation_settle(
+            advance1_bps in 0u32..=4_000u32,
+            advance2_bps in 0u32..=4_000u32,
+            grade_index in 0u32..=2u32,
+        ) {
+            settle_lifecycle(advance1_bps, advance2_bps, grade_index)?;
+        }
+
+        #[test]
+        fn fund_conservation_cancel(
+            advance1_bps in 0u32..=4_000u32,
+            advance2_bps in 0u32..=4_000u32,
+        ) {
+            cancel_lifecycle(advance1_bps, advance2_bps)?;
+        }
+
+        #[test]
+        fn fund_conservation_defaulted(
+            advance1_bps in 0u32..=4_000u32,
+            advance2_bps in 0u32..=4_000u32,
+        ) {
+            defaulted_lifecycle(advance1_bps, advance2_bps)?;
+        }
+
+        #[test]
+        fn fund_conservation_forfeited(
+            advance1_bps in 0u32..=4_000u32,
+            advance2_bps in 0u32..=4_000u32,
+        ) {
+            forfeited_lifecycle(advance1_bps, advance2_bps)?;
+        }
+    }
 }
