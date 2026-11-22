@@ -58,6 +58,4 @@ AmountTooLarge = 39
 OraclePriceInvalid = 40
 DeliveryGraceWindowNotPassed = 41
 DisputeCapReached = 42
-DeliveryGraceWindowNotPassed = 41
-DisputeCapReached = 42
 DeliveryDeadlinePassed = 43
