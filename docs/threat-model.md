@@ -536,6 +536,44 @@ their own deal. Tests pin the mechanical half:
 `zero_remainder_window_rejected_at_initialize`,
 `zero_delivery_window_rejected_at_initialize`.
 
+**Sub-case: a token that *looks* like SEP-41 and nevertheless misbehaves (#264).**
+A *wrong* token address is a plainly buyer-borne mistake — the buyer picked
+an address that is not SEP-41 and the call fails on first use. A token that
+implements the right interface but has non-standard transfer semantics is a
+subtler matter: the buyer did pick a SEP-41-shaped contract, and the harm
+of a fee-on-transfer leg or a lying `balance()` lands on the cooperative
+(whose settlement is silently short, or whose `settle` traps mid-call),
+not on the buyer who chose the address. This is where "layer-shifted" gets
+narrower: the API can and does choose the token — the real deployments
+only ever pass a SAC (USDC testnet / USDC mainnet). Anything calling
+`initialize` directly still bypasses that, so the contract-side verdict
+stays "accepted risk," but the written-down requirement is now
+"**standard SEP-41 transfer semantics, ideally a Stellar Asset Contract
+(SAC)**" — stated in `initialize`'s doc comment, and pinned by
+`contracts/escrow/tests/nonstandard_token.rs`, which runs the lifecycle
+against two deliberately broken tokens and records what breaks:
+- **Fee-on-transfer** (`transfer(amount)` delivers `amount - fee`):
+  `lock` and `fund_remainder` each leave the escrow short by one fee, and
+  `settle`'s `coop_payment = min(owed, balance)` falls back to `balance`,
+  so the entire escrow drains to the cooperative and the buyer's refund
+  is zero. The buyer pays `TOTAL_AMOUNT` and gets nothing back. The
+  `settle`-leg fee further reduces the on-the-wire receipt; with a
+  fee-on-transfer token every edge between buyer wallet and cooperative
+  wallet silently eats a fee.
+- **`balance()` reports more than held**: `settle`'s coop-payment leg
+  reads the inflated number and the subsequent `token::transfer` traps
+  inside the token when it tries to move stroops that aren't really there.
+  Soroban's atomicity rolls back the call — `status` stays `Delivered`,
+  nothing drains. Same shape with `cancel`: the refund `transfer(balance)`
+  traps, nothing moves. The commitment is stuck, not drained — the
+  "wrongly refused" direction the threat model treats as recoverable,
+  not the "wrongly succeeds and moves money" direction it will not
+  cross.
+
+The on-chain mitigation is no stronger than §4.5's custody-model
+assumption — the buyer picked the token — but the requirement is now
+documented at both the function-doc-comment layer and here, not folklore.
+
 ## Out of scope
 
 | Attack / concern | Why it is explicitly out of scope |

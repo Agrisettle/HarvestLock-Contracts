@@ -1617,6 +1617,92 @@ fn refresh_fx_quote_status_does_not_conflate_a_missing_quote_with_a_stale_one() 
     assert!(!s.contract.get_commitment().fx_quote_stale);
 }
 
+/// Issue #265 — the oracle-path mirror of
+/// `severe_shortfall_does_not_claw_back_advances_already_claimed`.
+///
+/// `severe_shortfall_does_not_claw_back_advances_already_claimed` proves the
+/// PRD §7 no-clawback rule on the non-oracle `settle` path: with
+/// `confirm_delivery(0, …)` driving `settlement_bps` to 0, the cooperative
+/// keeps the advances it already claimed, the remainder refunds in full to
+/// the buyer, and the settlement math stays non-negative.
+///
+/// The oracle path reaches the same question through an entirely different
+/// number (`fx_adjusted_total` set by `resolve_fx_shortfall`, not
+/// `bps_amount(total_amount, settlement_bps)`), and crosses a different
+/// code path (`resolve_fx_shortfall`'s own shortfall computation). The rule
+/// must hold there too — if `fx_adjusted_total < claimed_by_coop`,
+/// `resolve_fx_shortfall` must still record a zero shortfall rather than
+/// trying to invert the sign, and `settle` must still refund the whole
+/// remaining balance to the buyer without touching the already-claimed
+/// advances.
+#[test]
+fn oracle_severe_shortfall_does_not_claw_back_advances_already_claimed() {
+    // SHORTFALL_DENOMINATION at full delivery is a real shortfall case —
+    // this is the fixture every other FX shortfall test in this section
+    // uses. The twist here is that `confirm_delivery` runs with zero
+    // delivered quantity (same shape as the non-oracle companion test),
+    // so `settlement_bps == 0` and `ngn_owed` / `fx_adjusted_total`
+    // collapse to zero — well below `claimed_by_coop` (300_000, both
+    // 1_500-bps advances already claimed).
+    let (s, _oracle) = setup_with_oracle_denomination(3_600, SHORTFALL_DENOMINATION);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&0, &FULL_PRICE_GRADE); // zero delivered
+
+    let coop_before_resolve = s.token.balance(&s.cooperative);
+    s.contract.resolve_fx_shortfall();
+
+    let c = s.contract.get_commitment();
+    assert!(c.fx_resolved);
+    assert_eq!(c.settlement_bps, 0);
+    // The whole point of the test: `fx_adjusted_total` is strictly below
+    // `claimed_by_coop` (0 < 300_000), yet `resolve_fx_shortfall` neither
+    // panics nor records a negative shortfall.
+    assert_eq!(c.fx_adjusted_total, 0);
+    assert_eq!(c.fx_shortfall_amount, 0);
+    // Trivially "funded" — nothing was owed, so `settle`'s guard reads
+    // naturally (`fx_shortfall_amount > 0 && !fx_shortfall_funded` is
+    // false) without a separate "or amount is zero" branch.
+    assert!(c.fx_shortfall_funded);
+    assert_eq!(c.fx_shortfall_deadline, 0);
+    // No clawback at the resolve step either — the already-claimed
+    // advances sit in the cooperative's wallet, untouched.
+    let advance1_amount = s.total_amount * 1_500 / 10_000;
+    let advance2_amount = s.total_amount * 1_500 / 10_000;
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        coop_before_resolve,
+        "resolve_fx_shortfall must move no funds"
+    );
+    assert_eq!(coop_before_resolve, advance1_amount + advance2_amount);
+
+    s.contract.settle();
+
+    // The entire remainder refunds to the buyer, the cooperative's
+    // already-claimed advances stay with them in full, and the escrow
+    // drains to zero — the same three-line conclusion the non-oracle
+    // companion asserts.
+    assert_eq!(
+        s.token.balance(&s.cooperative),
+        advance1_amount + advance2_amount,
+        "settle must not claw back the already-claimed advances"
+    );
+    // Buyer's wallet after settle: they paid in `deposit + remainder`
+    // (both drawn from the fixture's `total_amount * 3` mint) and got
+    // the whole remainder back; their net cost across the cycle is
+    // just the deposit they can't recover from the cooperative.
+    assert_eq!(
+        s.token.balance(&s.buyer),
+        s.total_amount * 3 - advance1_amount - advance2_amount
+    );
+    assert_eq!(
+        s.token.balance(&s.contract.address),
+        0,
+        "every stroop has a settled destination after settle"
+    );
+    assert_eq!(s.contract.get_status(), Status::Settled);
+}
+
 // ---------- opening a tranche moves no funds ----------
 
 #[test]
@@ -3502,6 +3588,266 @@ fn dispute_in_the_fx_shortfall_window_the_fx_shortfall_deadline_still_governs() 
         s.token.balance(&s.cooperative),
         cooperative_before + escrow_before
     );
+}
+
+// ---------- #267: dispute round-trip property test ----------
+//
+// Pinned claim: resolving (or expiring) a dispute changes `Commitment` in
+// exactly three fields and leaves every other field, plus every token
+// balance, byte-identical. The existing
+// `resolve_dispute_restores_the_exact_pre_dispute_status` test asserts
+// only one of those fields (`status` restored) on a hand-picked pre-status,
+// leaving every other field implicit — "if we didn't notice, it didn't
+// change." The property version below exercises *every* allowed pre-status
+// (Locked through Delivered) with varied sub-state (tranche resolutions,
+// grade index, time inside the status), varied flagger (any of the three
+// named parties), varied freeze duration, and both exit paths
+// (`resolve_dispute`, `expire_dispute_window`), and asserts the full
+// Commitment equals its pre-flag snapshot — not "status matches," but the
+// struct as a whole.
+//
+// This protects the dispute mechanism against a future edit that silently
+// touches something else during the round-trip — e.g. the
+// deadline-shifting proposal `dispute_does_not_pause_an_already_ticking_deadline_known_limitation`
+// pins as a known limitation, which if adopted would have to update this
+// property on purpose (because the property changed), not by accident
+// (because nothing noticed).
+
+mod dispute_round_trip_property {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Every status `flag_dispute` accepts, per `can_flag_dispute`. If a
+    /// future edit broadens or narrows that set, `drive_to` below fails
+    /// to compile first — this enum is the one place the acceptable
+    /// pre-statuses are enumerated for tests, and adding a variant here
+    /// without adding a drive arm is a compile error.
+    #[derive(Debug, Clone, Copy)]
+    enum DisputableStatus {
+        Locked,
+        Advance1Released,
+        CheckpointPassed,
+        Advance2Released,
+        ReadyForDelivery,
+        Delivered,
+    }
+
+    /// Which of the three named parties flags the dispute. All three are
+    /// equally legal per `flag_dispute`'s own doc, so the property must
+    /// not depend on which.
+    #[derive(Debug, Clone, Copy)]
+    enum Flagger {
+        Buyer,
+        Cooperative,
+        Warehouse,
+    }
+
+    /// Per-status sub-state knobs. Not every knob applies to every status —
+    /// `drive_to` ignores any that would be a no-op in the target state
+    /// (e.g. `remainder_funded` for `Locked`, before the remainder window
+    /// has even opened).
+    #[derive(Debug, Clone, Copy)]
+    struct SubState {
+        /// For `Advance2Released` and later: whether tranche 1 was
+        /// resolved by `claim_advance_1` (true) or by
+        /// `reclaim_advance_1` (false).
+        tranche1_claimed: bool,
+        /// For `Delivered`: which `grade_price_bps` entry
+        /// `confirm_delivery` attested (always within the fixture's
+        /// 3-entry grade schedule, so `InvalidGradeIndex` can't trigger).
+        grade_index: u32,
+        /// For statuses whose `drive_to` opens a time window: how many
+        /// seconds past the status's entry timestamp the `flag_dispute`
+        /// itself runs. Bounded so no other deadline on the commitment
+        /// expires mid-test — this suite is about the dispute, not about
+        /// deadline collisions (those already have their own tests above).
+        time_offset_secs: u64,
+    }
+
+    fn arb_status() -> impl Strategy<Value = DisputableStatus> {
+        prop_oneof![
+            Just(DisputableStatus::Locked),
+            Just(DisputableStatus::Advance1Released),
+            Just(DisputableStatus::CheckpointPassed),
+            Just(DisputableStatus::Advance2Released),
+            Just(DisputableStatus::ReadyForDelivery),
+            Just(DisputableStatus::Delivered),
+        ]
+    }
+
+    fn arb_flagger() -> impl Strategy<Value = Flagger> {
+        prop_oneof![
+            Just(Flagger::Buyer),
+            Just(Flagger::Cooperative),
+            Just(Flagger::Warehouse),
+        ]
+    }
+
+    fn arb_substate() -> impl Strategy<Value = SubState> {
+        (any::<bool>(), 0u32..3u32, 0u64..(WINDOW / 4)).prop_map(
+            |(tranche1_claimed, grade_index, time_offset_secs)| SubState {
+                tranche1_claimed,
+                grade_index,
+                time_offset_secs,
+            },
+        )
+    }
+
+    /// Resolve by unanimous consent, or let the dispute window pass and
+    /// trigger the timeout path. Both must restore the same state.
+    #[derive(Debug, Clone, Copy)]
+    enum Exit {
+        Resolve,
+        Expire,
+    }
+
+    fn arb_exit() -> impl Strategy<Value = Exit> {
+        prop_oneof![Just(Exit::Resolve), Just(Exit::Expire)]
+    }
+
+    /// Drives `s` into `target`, with sub-state knobs interpreted per
+    /// status. Panics if `target` is a variant `drive_to` doesn't know how
+    /// to reach — the enum is exhaustively matched below so adding a
+    /// variant forces an arm here first.
+    fn drive_to(s: &Setup, target: DisputableStatus, sub: SubState) {
+        s.contract.lock();
+        match target {
+            DisputableStatus::Locked => {}
+            DisputableStatus::Advance1Released => {
+                s.contract.release_advance_1();
+            }
+            DisputableStatus::CheckpointPassed => {
+                s.contract.release_advance_1();
+                if sub.tranche1_claimed {
+                    s.contract.claim_advance_1();
+                } else {
+                    // The tranche's claim window must pass first for
+                    // `reclaim_advance_1` to succeed — `advance_time`
+                    // doesn't change the flag_dispute dispute_deadline
+                    // because that only starts once flag_dispute runs.
+                    advance_time(s, WINDOW + 1);
+                    s.contract.reclaim_advance_1();
+                }
+                s.contract.mark_checkpoint();
+            }
+            DisputableStatus::Advance2Released => {
+                s.contract.release_advance_1();
+                if sub.tranche1_claimed {
+                    s.contract.claim_advance_1();
+                } else {
+                    advance_time(s, WINDOW + 1);
+                    s.contract.reclaim_advance_1();
+                }
+                s.contract.mark_checkpoint();
+                s.contract.release_advance_2();
+            }
+            DisputableStatus::ReadyForDelivery => {
+                s.contract.release_advance_1();
+                s.contract.claim_advance_1();
+                s.contract.mark_checkpoint();
+                s.contract.release_advance_2();
+                s.contract.claim_advance_2();
+                s.contract.ready_for_delivery();
+            }
+            DisputableStatus::Delivered => {
+                s.contract.release_advance_1();
+                s.contract.claim_advance_1();
+                s.contract.mark_checkpoint();
+                s.contract.release_advance_2();
+                s.contract.claim_advance_2();
+                s.contract.ready_for_delivery();
+                s.contract.fund_remainder();
+                s.contract
+                    .confirm_delivery(&CONTRACTED_QUANTITY, &sub.grade_index);
+            }
+        }
+        // Spend some time inside the target status before flagging — the
+        // property must hold regardless of the exact ledger timestamp at
+        // which the dispute opens.
+        advance_time(s, sub.time_offset_secs);
+    }
+
+    /// Snapshot of every token balance that `settle`/`cancel`/`claim_*`/
+    /// `reclaim_*` could ever move — buyer, cooperative, warehouse
+    /// operator, escrow contract itself. `flag_dispute` and its two exit
+    /// paths move no funds, so every one of these must be byte-identical
+    /// across the round-trip.
+    fn balance_snapshot(s: &Setup) -> (i128, i128, i128, i128) {
+        (
+            s.token.balance(&s.buyer),
+            s.token.balance(&s.cooperative),
+            s.token.balance(&s.warehouse),
+            s.token.balance(&s.contract.address),
+        )
+    }
+
+    proptest! {
+        /// A dispute round-trip changes `Commitment` in exactly three
+        /// fields (`status` restored, `dispute_pre_status` back to
+        /// `Draft`, `dispute_deadline` back to 0) and moves no tokens.
+        /// Every other field in `Commitment` — and every token balance —
+        /// is byte-identical before `flag_dispute` and after
+        /// `resolve_dispute`/`expire_dispute_window`.
+        #[test]
+        fn dispute_round_trip_changes_nothing_but_the_dispute_fields(
+            status in arb_status(),
+            flagger in arb_flagger(),
+            sub in arb_substate(),
+            exit in arb_exit(),
+            freeze_tail_secs in 0u64..(2 * REMAINDER_WINDOW),
+        ) {
+            // Fresh fixture per case — proptest shares no mutable state
+            // between invocations, but Soroban's `Env` carries ledger and
+            // storage state we explicitly don't want to leak either.
+            let s = setup(1_500, 2_000);
+            drive_to(&s, status, sub);
+
+            let before = s.contract.get_commitment();
+            let balances_before = balance_snapshot(&s);
+
+            let flagger_addr = match flagger {
+                Flagger::Buyer => s.buyer.clone(),
+                Flagger::Cooperative => s.cooperative.clone(),
+                Flagger::Warehouse => s.warehouse.clone(),
+            };
+            s.contract.flag_dispute(&flagger_addr);
+
+            // Spend some arbitrary time inside the freeze before exiting.
+            advance_time(&s, freeze_tail_secs);
+
+            match exit {
+                Exit::Resolve => {
+                    // `resolve_dispute` has no deadline guard, so the
+                    // call is legal at any `freeze_tail_secs`.
+                    s.contract.resolve_dispute();
+                }
+                Exit::Expire => {
+                    // `expire_dispute_window` requires `now > dispute_deadline`.
+                    // The deadline is `flag_time + REMAINDER_WINDOW`; if
+                    // the random freeze_tail hasn't put us strictly past
+                    // it, jump there.
+                    let deadline = s.contract.get_commitment().dispute_deadline;
+                    let now = s.env.ledger().timestamp();
+                    if now <= deadline {
+                        set_time(&s, deadline + 1);
+                    }
+                    s.contract.expire_dispute_window();
+                }
+            }
+
+            let after = s.contract.get_commitment();
+            let balances_after = balance_snapshot(&s);
+
+            // The whole claim this property pins: the struct equals its
+            // pre-flag snapshot, byte-for-byte. Both exit paths restore
+            // `dispute_pre_status` to `Draft` and `dispute_deadline` to
+            // 0 — which is also exactly their value *before* the flag,
+            // since `status` wasn't `Disputed` then — so the overall
+            // comparison is unqualified equality.
+            prop_assert_eq!(&before, &after);
+            prop_assert_eq!(balances_before, balances_after);
+        }
+    }
 }
 
 // ---------- multi-party Soroban auth model scrutiny (#138-#141) ----------
