@@ -1042,8 +1042,13 @@ impl EscrowContract {
         }
         Self::require_once_each(&[&c.buyer, &c.cooperative]);
         let new_oracle_contract = new_config.oracle_contract.clone();
-        env.storage().instance().set(&DataKey::OracleConfig, &new_config);
-        OracleConfigReplaced { new_oracle_contract }.publish(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleConfig, &new_config);
+        OracleConfigReplaced {
+            new_oracle_contract,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1136,9 +1141,13 @@ impl EscrowContract {
         }
         c.cooperative.require_auth();
 
-        let member_count = members.len() as u32;
+        let member_count = members.len();
         env.storage().instance().set(&DataKey::Allocation, &members);
-        AllocationRecorded { member_count, total_share_bps: total_bps }.publish(&env);
+        AllocationRecorded {
+            member_count,
+            total_share_bps: total_bps,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1931,7 +1940,11 @@ impl EscrowContract {
         let previous = c.buyer.clone();
         c.buyer = new_buyer.clone();
         Self::save(&env, &c);
-        BuyerReassigned { previous, new_buyer }.publish(&env);
+        BuyerReassigned {
+            previous,
+            new_buyer,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -2015,7 +2028,11 @@ impl EscrowContract {
         c.dispute_deadline = 0;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
-        DisputeEnded { outcome: DisputeOutcome::Resolved, restored }.publish(&env);
+        DisputeEnded {
+            outcome: DisputeOutcome::Resolved,
+            restored,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -2047,7 +2064,11 @@ impl EscrowContract {
         c.dispute_count += 1;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
-        DisputeEnded { outcome: DisputeOutcome::Expired, restored }.publish(&env);
+        DisputeEnded {
+            outcome: DisputeOutcome::Expired,
+            restored,
+        }
+        .publish(&env);
         Ok(())
     }
 

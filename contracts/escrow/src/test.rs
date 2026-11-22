@@ -4314,8 +4314,12 @@ fn delivery_confirmed_event(
     delivered_quantity: u32,
     settlement_bps: u32,
 ) -> xdr::ContractEvent {
-    DeliveryConfirmed { grade_index, delivered_quantity, settlement_bps }
-        .to_xdr(&s.env, &s.contract.address)
+    DeliveryConfirmed {
+        grade_index,
+        delivered_quantity,
+        settlement_bps,
+    }
+    .to_xdr(&s.env, &s.contract.address)
 }
 
 fn dispute_flagged_event(
@@ -4324,8 +4328,12 @@ fn dispute_flagged_event(
     pre_status: Status,
     deadline: u64,
 ) -> xdr::ContractEvent {
-    DisputeFlagged { flagger: flagger.clone(), pre_status, deadline }
-        .to_xdr(&s.env, &s.contract.address)
+    DisputeFlagged {
+        flagger: flagger.clone(),
+        pre_status,
+        deadline,
+    }
+    .to_xdr(&s.env, &s.contract.address)
 }
 
 fn dispute_ended_event(s: &Setup, outcome: DisputeOutcome, restored: Status) -> xdr::ContractEvent {
@@ -5403,7 +5411,8 @@ mod proptest_fund_conservation {
         s.contract.claim_advance_2();
         s.contract.ready_for_delivery();
         s.contract.fund_remainder();
-        s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &grade_index);
+        s.contract
+            .confirm_delivery(&CONTRACTED_QUANTITY, &grade_index);
 
         // Snapshot balances immediately before settle so Law 3 can verify that
         // settle only pays out — it never charges either party.
@@ -5468,7 +5477,10 @@ mod proptest_fund_conservation {
         let buyer_bal = s.token.balance(&s.buyer);
         let coop_bal = s.token.balance(&s.cooperative);
         prop_assert_eq!(buyer_bal + coop_bal, total, "Law 2");
-        prop_assert!(coop_bal <= total, "Law 3: defaulted coop cannot exceed total");
+        prop_assert!(
+            coop_bal <= total,
+            "Law 3: defaulted coop cannot exceed total"
+        );
         prop_assert!(buyer_bal >= 0, "Law 4");
         Ok(())
     }
@@ -5485,7 +5497,11 @@ mod proptest_fund_conservation {
         let buyer_bal = s.token.balance(&s.buyer);
         let coop_bal = s.token.balance(&s.cooperative);
         prop_assert_eq!(buyer_bal + coop_bal, total, "Law 2");
-        prop_assert_eq!(coop_bal, 0i128, "Law 3: forfeiture returns all funds to buyer");
+        prop_assert_eq!(
+            coop_bal,
+            0i128,
+            "Law 3: forfeiture returns all funds to buyer"
+        );
         prop_assert!(buyer_bal >= 0, "Law 4");
         Ok(())
     }

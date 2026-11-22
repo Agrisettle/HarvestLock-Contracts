@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e96fd9f85bff95c1d27c5138e4d32c55a6922c102c3f865a97293b86bdd1d5b6 # shrinks to advance1_bps = 3646, advance2_bps = 3855, grade_index = 2
