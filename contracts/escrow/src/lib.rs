@@ -135,6 +135,7 @@
 //! mitigations live in `docs/storage-ttl.md`.
 
 #![no_std]
+#![warn(missing_docs)]
 
 #[cfg(test)]
 extern crate std;
@@ -175,19 +176,36 @@ pub const MAX_ALLOCATION_MEMBERS: u32 = 200;
 /// call site overflow-free by construction. See `Error::AmountTooLarge`.
 pub const MAX_TOTAL_AMOUNT: i128 = i128::MAX / 10_000;
 
+/// The lifecycle state of a commitment. Advances monotonically through the
+/// main sequence; `Disputed` is a re-entrant pause; `Settled`, `Cancelled`,
+/// `Defaulted`, and `Forfeited` are terminal states from which no further
+/// state-changing call will succeed.
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
+    /// Initial state after `initialize`. No funds have been escrowed yet.
     Draft,
+    /// Deposit (`advance1_bps + advance2_bps` of `total_amount`) escrowed.
+    /// Set by `lock`.
     Locked,
+    /// Tranche 1 claim window open. Set by `release_advance_1`.
     Advance1Released,
+    /// Mid-season checkpoint attested by the warehouse operator. Set by
+    /// `mark_checkpoint`.
     CheckpointPassed,
+    /// Tranche 2 claim window open. Set by `release_advance_2`.
     Advance2Released,
     /// The cooperative has signaled intent to deliver — opens the
     /// remainder-payment window. See module docs.
     ReadyForDelivery,
+    /// Delivery confirmed by the warehouse operator. Set by
+    /// `confirm_delivery`. Advance tranches must still be resolved before
+    /// `settle` will run.
     Delivered,
+    /// Final settlement paid out. Terminal success state. Set by `settle`.
     Settled,
+    /// Mutual cancellation (buyer + cooperative consent). Remaining escrow
+    /// returned to the buyer. Set by `cancel`.
     Cancelled,
     /// Buyer failed to fund the remainder before its deadline. Uncontested
     /// by construction — the deadline either passed or it didn't.
@@ -199,6 +217,11 @@ pub enum Status {
     /// status would make an already-settled commitment's history
     /// ambiguous about who actually failed to perform.
     Forfeited,
+    /// Commitment frozen by `flag_dispute`. Blocks every other
+    /// state-changing call by construction (none of them accept `Disputed`
+    /// as a required status). Lifted by `resolve_dispute` (unanimous
+    /// three-party consent) or `expire_dispute_window` (timeout), both of
+    /// which restore `Commitment::dispute_pre_status`.
     Disputed,
 }
 
@@ -247,12 +270,19 @@ pub enum ActionDeadline {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Action {
-    /// The public function to invoke, as a Soroban symbol.
+    /// The public entry-point to invoke, as a Soroban `Symbol` (e.g.
+    /// `"claim_advance_1"`).
     pub function: Symbol,
+    /// Which party (or parties) must authorize the call.
     pub auth: AuthParty,
+    /// The timestamp boundary that gates this action, if any.
     pub deadline: ActionDeadline,
 }
 
+/// Errors returned by contract entry points. Each variant is encoded as a
+/// fixed `u32` discriminant (`#[contracterror]`) so the generated host value
+/// is stable across builds and can be matched by off-chain clients without
+/// inspecting source.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -381,8 +411,13 @@ pub enum Error {
     OraclePriceInvalid = 40,
 }
 
+/// Instance-storage keys. All persistent state for a commitment lives under
+/// exactly these keys in a single `ContractData` instance-storage entry —
+/// see the module doc's storage section and `docs/storage-ttl.md`.
 #[contracttype]
 pub enum DataKey {
+    /// The `Commitment` struct — the main lifecycle record. Present once
+    /// `initialize` has run.
     Commitment,
     /// Present only once `set_allocation` has run — absence, not an
     /// empty `Vec`, is how `get_allocation` distinguishes "never set"
@@ -465,6 +500,10 @@ pub struct OracleRate {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllocationMember {
+    /// Off-chain farmer identity, stored as `HMAC-SHA256(salt,
+    /// phone_number)` — never bare PII. The random salt and plaintext map
+    /// live only in the API's Postgres; deleting that row makes this hash
+    /// permanently unlinkable to a real person (NDPA s.34 erasability).
     pub member_hash: BytesN<32>,
     /// Basis points of the commitment's total payout this member is
     /// entitled to, off-chain. Record-only in v1 — see `set_allocation`'s
@@ -520,10 +559,22 @@ enum Tranche {
 #[contracttype]
 #[derive(Clone)]
 pub struct Commitment {
+    /// Account that funded the deposit and receives settlement shortfall
+    /// refunds. Set at `initialize`, rewritten only by `reassign_buyer`.
     pub buyer: Address,
+    /// Agricultural cooperative — receives advance payouts and the final
+    /// settlement amount at `settle`. Set at `initialize`.
     pub cooperative: Address,
+    /// Attests crop progress via `mark_checkpoint` and `confirm_delivery`.
+    /// Set at `initialize`.
     pub warehouse_operator: Address,
+    /// SAC or native-XLM token contract used for all in-escrow transfers.
+    /// Set at `initialize`.
     pub token: Address,
+    /// Full face value of the deal in the settlement token's smallest unit
+    /// (e.g. stroops for XLM). The deposit `lock` escrows is
+    /// `(advance1_bps + advance2_bps) * total_amount / 10_000`; the
+    /// remainder is funded later via `fund_remainder`. Set at `initialize`.
     pub total_amount: i128,
     /// Basis points (of `total_amount`) released at lock-in. 0-10_000.
     pub advance1_bps: u32,
@@ -551,7 +602,12 @@ pub struct Commitment {
     /// `ready_for_delivery` opens the window. Independent of
     /// `claim_window_secs` — this is a payment deadline, not a claim one.
     pub remainder_window_secs: u64,
+    /// Current lifecycle state. Updated exclusively through `set_status`,
+    /// which also emits a `StatusChanged` event.
     pub status: Status,
+    /// Ledger timestamp when `initialize` ran. Base for `delivery_deadline`.
+    /// 0 is never a real value — the network's ledger timestamp is always
+    /// positive.
     pub created_at: u64,
 
     /// Absolute deadline (`created_at + delivery_window_secs`), computed
@@ -564,15 +620,32 @@ pub struct Commitment {
     /// the ledger timestamp after which the cooperative can no longer
     /// claim and the buyer becomes eligible to reclaim.
     pub advance1_deadline: u64,
+    /// `true` once `claim_advance_1` has transferred tranche 1 to the
+    /// cooperative. Prevents double-claim; contributes to `settle`'s
+    /// `claimed_by_coop` calculation.
     pub advance1_claimed: bool,
+    /// `true` once `reclaim_advance_1` has returned tranche 1 to the buyer.
+    /// Prevents double-reclaim. `advance1_claimed || advance1_expired` is
+    /// the "resolved" predicate `settle` requires before running.
     pub advance1_expired: bool,
 
+    /// 0 = not yet opened. Set by `release_advance_2` to
+    /// `ledger.timestamp() + claim_window_secs`. Same sentinel and
+    /// boundary convention as `advance1_deadline`.
     pub advance2_deadline: u64,
+    /// `true` once `claim_advance_2` has transferred tranche 2 to the
+    /// cooperative. Same semantics as `advance1_claimed`.
     pub advance2_claimed: bool,
+    /// `true` once `reclaim_advance_2` has returned tranche 2 to the buyer.
+    /// Same semantics as `advance1_expired`.
     pub advance2_expired: bool,
 
     /// 0 = not yet opened. Set by `ready_for_delivery`.
     pub remainder_deadline: u64,
+    /// `true` once `fund_remainder` has transferred the second-phase payment
+    /// into escrow. Guards `confirm_delivery` (delivery cannot be confirmed
+    /// before the buyer has funded) and `expire_remainder_window` (cannot
+    /// default while already funded).
     pub remainder_funded: bool,
 
     /// The quantity (caller-defined unit, e.g. kg) the buyer is
@@ -619,6 +692,11 @@ pub struct Commitment {
     /// `resolve_fx_shortfall`'s comparison. 0 means no top-up needed —
     /// `settle` can run without waiting on `fund_fx_shortfall` at all.
     pub fx_shortfall_amount: i128,
+    /// `true` once `fund_fx_shortfall` has paid the computed top-up, or
+    /// set immediately by `resolve_fx_shortfall` when no shortfall exists
+    /// (`fx_shortfall_amount == 0`). The sentinel that `settle` checks when
+    /// an oracle is configured — it refuses with `FxShortfallUnfunded`
+    /// while this is `false` and `fx_shortfall_amount > 0`.
     pub fx_shortfall_funded: bool,
     /// 0 if `fx_shortfall_amount` is 0 (no deadline needed). Reuses
     /// `remainder_window_secs` as the window length rather than adding
@@ -676,12 +754,17 @@ pub struct Commitment {
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusChanged {
+    /// Previous status, indexed as a Soroban event topic so off-chain
+    /// consumers can filter by transition (e.g. everything → `Defaulted`).
     #[topic]
     pub from: Status,
+    /// New status, indexed as a Soroban event topic.
     #[topic]
     pub to: Status,
 }
 
+/// Contract entrypoint. All public functions are hosted here via
+/// `#[contractimpl]`; one instance is deployed per escrow commitment.
 #[contract]
 pub struct EscrowContract;
 
@@ -1008,6 +1091,15 @@ impl EscrowContract {
     /// Auth-gating would add a timing veto the non-custodial design
     /// deliberately gives nobody (PRD §4.5) while adding a liveness
     /// dependency, not safety.
+    ///
+    /// **What it changes**: advances status to `Advance1Released`, sets
+    /// `Commitment::advance1_deadline` to `now + claim_window_secs`. No
+    /// token transfers.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `InvalidState` — status is not `Locked`.
     pub fn release_advance_1(env: Env) -> Result<(), Error> {
         Self::open_tranche(&env, Tranche::One)
     }
@@ -1019,6 +1111,19 @@ impl EscrowContract {
     /// `claim_tranche` rejects only when `timestamp > advance1_deadline`, so
     /// `advance1_deadline` itself is still claimable, and it is the last
     /// instant that is. Pinned by `tests/deadline_boundary.rs`.
+    ///
+    /// **What it changes**: sets `Commitment::advance1_claimed = true`,
+    /// transfers `advance1_bps * total_amount / 10_000` from escrow to
+    /// the cooperative. Status does not change.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `NotYetOpened` — `release_advance_1` has not been called; the
+    ///   window has never opened (`advance1_deadline == 0`).
+    /// - `AlreadyClaimed` — tranche 1 has already been claimed.
+    /// - `AlreadyExpired` — tranche 1 has already been reclaimed by the buyer.
+    /// - `ClaimWindowPassed` — `now > advance1_deadline`; the window has closed.
     pub fn claim_advance_1(env: Env) -> Result<(), Error> {
         Self::claim_tranche(&env, Tranche::One)
     }
@@ -1031,6 +1136,19 @@ impl EscrowContract {
     /// the deadline instant belongs to the cooperative's claim and the buyer's
     /// reclaim first becomes possible at `advance1_deadline + 1`. No timestamp
     /// ever admits both, and none admits neither.
+    ///
+    /// **What it changes**: sets `Commitment::advance1_expired = true`,
+    /// transfers `advance1_bps * total_amount / 10_000` from escrow back to
+    /// the buyer. Status does not change.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `NotYetOpened` — `release_advance_1` has not been called.
+    /// - `AlreadyClaimed` — tranche 1 has already been claimed by the cooperative.
+    /// - `AlreadyExpired` — `reclaim_advance_1` has already been called.
+    /// - `ClaimWindowNotPassed` — `now <= advance1_deadline`; the cooperative's
+    ///   claim window is still open.
     pub fn reclaim_advance_1(env: Env) -> Result<(), Error> {
         Self::reclaim_tranche(&env, Tranche::One)
     }
@@ -1058,6 +1176,15 @@ impl EscrowContract {
     /// clock additionally cannot be pulled early at all: reaching
     /// `CheckpointPassed` requires the warehouse operator's auth-gated
     /// `mark_checkpoint` first.
+    ///
+    /// **What it changes**: advances status to `Advance2Released`, sets
+    /// `Commitment::advance2_deadline` to `now + claim_window_secs`. No
+    /// token transfers.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `InvalidState` — status is not `CheckpointPassed`.
     pub fn release_advance_2(env: Env) -> Result<(), Error> {
         Self::open_tranche(&env, Tranche::Two)
     }
@@ -1065,6 +1192,18 @@ impl EscrowContract {
     /// Cooperative claims tranche 2, if within the window. Requires
     /// cooperative auth — same mechanics as `claim_advance_1`, including its
     /// inclusive `advance2_deadline` boundary (#111).
+    ///
+    /// **What it changes**: sets `Commitment::advance2_claimed = true`,
+    /// transfers `advance2_bps * total_amount / 10_000` from escrow to the
+    /// cooperative. Status does not change.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `NotYetOpened` — `release_advance_2` has not been called.
+    /// - `AlreadyClaimed` — tranche 2 has already been claimed.
+    /// - `AlreadyExpired` — tranche 2 has already been reclaimed by the buyer.
+    /// - `ClaimWindowPassed` — `now > advance2_deadline`; the window has closed.
     pub fn claim_advance_2(env: Env) -> Result<(), Error> {
         Self::claim_tranche(&env, Tranche::Two)
     }
@@ -1072,6 +1211,19 @@ impl EscrowContract {
     /// Buyer reclaims tranche 2, if the window has passed unclaimed.
     /// Requires buyer auth — same mechanics as `reclaim_advance_1`, including
     /// the exclusive `advance2_deadline` boundary (#111).
+    ///
+    /// **What it changes**: sets `Commitment::advance2_expired = true`,
+    /// transfers `advance2_bps * total_amount / 10_000` from escrow back to
+    /// the buyer. Status does not change.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `NotYetOpened` — `release_advance_2` has not been called.
+    /// - `AlreadyClaimed` — tranche 2 has already been claimed by the cooperative.
+    /// - `AlreadyExpired` — `reclaim_advance_2` has already been called.
+    /// - `ClaimWindowNotPassed` — `now <= advance2_deadline`; the cooperative's
+    ///   claim window is still open.
     pub fn reclaim_advance_2(env: Env) -> Result<(), Error> {
         Self::reclaim_tranche(&env, Tranche::Two)
     }
@@ -1082,6 +1234,15 @@ impl EscrowContract {
     /// `release_advance_*`: this one has real stakes for the buyer (it
     /// starts the clock that can end in `Defaulted`), so it shouldn't be
     /// triggerable by just anyone.
+    ///
+    /// **What it changes**: advances status to `ReadyForDelivery`, sets
+    /// `Commitment::remainder_deadline` to `now + remainder_window_secs`.
+    /// No token transfers.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `InvalidState` — status is not `Advance2Released`.
     pub fn ready_for_delivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_ready_for_delivery(&c)?;
@@ -1104,6 +1265,17 @@ impl EscrowContract {
     /// `expire_remainder_window` needs strictly more than the deadline,
     /// which is what keeps the boundary from being ambiguous — the two
     /// calls are never both legal at the same timestamp.
+    ///
+    /// **What it changes**: sets `Commitment::remainder_funded = true`,
+    /// transfers `total_amount - deposit` from the buyer into escrow.
+    /// Status does not change.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `InvalidState` — status is not `ReadyForDelivery`.
+    /// - `RemainderAlreadyFunded` — `fund_remainder` has already run.
+    /// - `RemainderWindowPassed` — `now > remainder_deadline`; too late to fund.
     pub fn fund_remainder(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_fund_remainder(&c, env.ledger().timestamp())?;
@@ -1141,6 +1313,19 @@ impl EscrowContract {
     /// weren't already scoped to benefit the buyer specifically. Anyone —
     /// including an off-chain watcher — can trigger it once the fact of
     /// the matter (deadline passed, unfunded) is true.
+    ///
+    /// **What it changes**: advances status to `Defaulted`, transfers the
+    /// contract's entire token balance (the deposit, or what remains of it
+    /// after any claimed advances) to the cooperative.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `InvalidState` — status is not `ReadyForDelivery`.
+    /// - `RemainderAlreadyFunded` — the remainder was funded; there is no
+    ///   default to trigger.
+    /// - `RemainderWindowNotPassed` — `now <= remainder_deadline`; the
+    ///   buyer's payment window has not yet closed.
     pub fn expire_remainder_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_expire_remainder_window(&c, env.ledger().timestamp())?;
@@ -1170,6 +1355,17 @@ impl EscrowContract {
     /// Not reachable from `Draft`: nothing's ever been escrowed at that
     /// point, so there's nothing to reclaim and no real event has
     /// occurred worth recording as a forfeiture.
+    ///
+    /// **What it changes**: advances status to `Forfeited`, transfers the
+    /// contract's entire token balance back to the buyer.
+    ///
+    /// # Errors
+    ///
+    /// - `NotInitialized` — `initialize` has not run yet.
+    /// - `InvalidState` — status is not one of `Locked`, `Advance1Released`,
+    ///   `CheckpointPassed`, `Advance2Released`, or `ReadyForDelivery`.
+    /// - `DeliveryDeadlineNotPassed` — `now <= delivery_deadline`; the
+    ///   cooperative's delivery window is still open.
     pub fn reclaim_on_nondelivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_reclaim_on_nondelivery(&c, env.ledger().timestamp())?;

@@ -6,7 +6,7 @@ This document analyzes the collision probability of the per-member allocation sa
 
 ## Salt Scheme Details
 
-As documented in [HANDOFF.md](./HANDOFF.md) and implemented in the contract:
+As documented in [HANDOFF.md](../HANDOFF.md) and implemented in the contract:
 
 1. Each member's allocation is recorded as an `AllocationMember` struct:
    ```rust
