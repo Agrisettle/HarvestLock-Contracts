@@ -143,8 +143,8 @@ mod reflector;
 
 use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, BytesN,
-    Env, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token,
+    Address, BytesN, Env, Symbol, Vec,
 };
 
 /// Maximum number of entries `initialize` accepts in `grade_price_bps`.
@@ -174,6 +174,14 @@ pub const MAX_ALLOCATION_MEMBERS: u32 = 200;
 /// failure at the call that took the input, and makes every `bps_amount`
 /// call site overflow-free by construction. See `Error::AmountTooLarge`.
 pub const MAX_TOTAL_AMOUNT: i128 = i128::MAX / 10_000;
+
+/// Maximum number of times `flag_dispute` may be called per commitment.
+/// Only a lapsed dispute window (resolved by `expire_dispute_window`) counts
+/// against the cap; a unanimous `resolve_dispute` does not.
+/// Three covers any realistic round of parallel good-faith attempts and
+/// closes the stalling attack documented in `docs/dispute-stalling.md`.
+/// See `Error::DisputeCapReached`.
+pub const MAX_DISPUTE_FLAGS: u32 = 3;
 
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -226,6 +234,9 @@ pub enum AuthParty {
     /// Current buyer, cooperative, **and** the incoming buyer supplied as
     /// `new_buyer` — the three signatures `reassign_buyer` requires.
     BuyerCooperativeAndNewBuyer,
+    /// Current buyer, cooperative, **and** the incoming operator supplied as
+    /// `new_operator` — the three signatures `reassign_operator` requires.
+    BuyerCooperativeAndNewOperator,
 }
 
 /// The timestamp, if any, that bounds a callable action. The variant says
@@ -379,6 +390,20 @@ pub enum Error {
     /// The configured Reflector oracle returned a zero or negative price;
     /// non-positive exchange rates cannot produce a valid settlement amount.
     OraclePriceInvalid = 40,
+    /// `expire_delivery_window` called before `delivery_deadline +
+    /// remainder_window_secs` has strictly passed. The permissionless
+    /// fallback is intentionally delayed past the buyer's own reclaim
+    /// window to give the buyer time to act first.
+    DeliveryGraceWindowNotPassed = 41,
+    /// `flag_dispute` called after the per-commitment `MAX_DISPUTE_FLAGS`
+    /// cap has been reached. Only `expire_dispute_window` lapsals count
+    /// against the cap; `resolve_dispute` (unanimous consent) does not.
+    DisputeCapReached = 42,
+    /// `confirm_delivery` called after `delivery_deadline` has *strictly*
+    /// passed (`now > delivery_deadline`). The deadline second itself still
+    /// belongs to the operator's confirmation window; strictly after it, only
+    /// `reclaim_on_nondelivery` is legal (#199).
+    DeliveryDeadlinePassed = 43,
 }
 
 #[contracttype]
@@ -650,6 +675,12 @@ pub struct Commitment {
     /// above — see `flag_dispute`'s doc comment for why a dispute freeze
     /// needs a bound at all.
     pub dispute_deadline: u64,
+    /// Number of lapsed dispute windows accumulated so far. `flag_dispute`
+    /// refuses once this reaches `MAX_DISPUTE_FLAGS`. Only
+    /// `expire_dispute_window` lapsals increment it; `resolve_dispute`
+    /// (unanimous consent) does not — good-faith resolution should not
+    /// shorten the window for future disputes.
+    pub dispute_count: u32,
 }
 
 /// Published on every real status transition — `lock`, both advance
@@ -680,6 +711,58 @@ pub struct StatusChanged {
     pub from: Status,
     #[topic]
     pub to: Status,
+}
+
+/// Emitted after every fund transfer in a terminal or payout path —
+/// `settle` (once per non-zero leg), `cancel`, `expire_remainder_window`,
+/// `reclaim_on_nondelivery`, and `expire_fx_shortfall_window`.
+/// `reason` is a short symbol naming the call so an indexer can reconstruct
+/// each party's final balance from escrow events alone (#204).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Payout {
+    #[topic]
+    pub reason: Symbol,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `claim_advance_1` / `claim_advance_2` after a tranche is
+/// transferred to the cooperative. `tranche` is 1 or 2 (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrancheClaimed {
+    #[topic]
+    pub tranche: u32,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `reclaim_advance_1` / `reclaim_advance_2` after a lapsed
+/// tranche is returned to the buyer (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrancheReclaimed {
+    #[topic]
+    pub tranche: u32,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `fund_remainder` after the buyer's second deposit lands (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemainderFunded {
+    pub from: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `fund_fx_shortfall` after the buyer's FX top-up lands (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FxShortfallFunded {
+    pub from: Address,
+    pub amount: i128,
 }
 
 #[contract]
@@ -818,6 +901,7 @@ impl EscrowContract {
             fx_quote_stale: false,
             dispute_pre_status: Status::Draft,
             dispute_deadline: 0,
+            dispute_count: 0,
         };
         env.storage()
             .instance()
@@ -1122,6 +1206,11 @@ impl EscrowContract {
                 &remainder,
             );
         }
+        RemainderFunded {
+            from: c.buyer.clone(),
+            amount: remainder,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1153,6 +1242,12 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
+            Payout {
+                reason: symbol_short!("exp_rem"),
+                to: c.cooperative.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1183,6 +1278,39 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
+            Payout {
+                reason: symbol_short!("forfeit"),
+                to: c.buyer.clone(),
+                amount: balance,
+            }
+            .publish(&env);
+        }
+        Ok(())
+    }
+
+    /// Permissionless fallback that forfeits the escrowed funds to the buyer
+    /// when the cooperative never called `reclaim_on_nondelivery` and the
+    /// buyer's key is lost or inaccessible. Callable by anyone after
+    /// `delivery_deadline + remainder_window_secs` (the grace period).
+    /// Without this hatch, a lost buyer key would lock funds forever.
+    pub fn expire_delivery_window(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        Self::can_expire_delivery_window(&c, env.ledger().timestamp())?;
+
+        // Effects before interaction — see `lock`'s comment for why.
+        Self::set_status(&env, &mut c, Status::Forfeited);
+        Self::save(&env, &c);
+
+        let token_client = token::Client::new(&env, &c.token);
+        let balance = token_client.balance(&env.current_contract_address());
+        if balance > 0 {
+            token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
+            Payout {
+                reason: symbol_short!("exp_del"),
+                to: c.buyer.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1223,6 +1351,12 @@ impl EscrowContract {
     ) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_confirm_delivery(&c)?;
+        // Deadline guard: the operator's attestation window ends at
+        // `delivery_deadline`; strictly after it only `reclaim_on_nondelivery`
+        // is legal. The deadline second itself still belongs to the operator.
+        if env.ledger().timestamp() > c.delivery_deadline {
+            return Err(Error::DeliveryDeadlinePassed);
+        }
         let Some(grade_bps) = c.grade_price_bps.get(grade_index) else {
             return Err(Error::InvalidGradeIndex);
         };
@@ -1321,9 +1455,21 @@ impl EscrowContract {
                 &c.cooperative,
                 &coop_payment,
             );
+            Payout {
+                reason: symbol_short!("coop_pay"),
+                to: c.cooperative.clone(),
+                amount: coop_payment,
+            }
+            .publish(&env);
         }
         if buyer_refund > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &buyer_refund);
+            Payout {
+                reason: symbol_short!("refund"),
+                to: c.buyer.clone(),
+                amount: buyer_refund,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1398,7 +1544,19 @@ impl EscrowContract {
         } else {
             0
         });
-        let owed_from_remainder = (fx_adjusted_total - claimed_by_coop).max(0);
+        // Reclaimed tranches were returned to the buyer and are no longer in
+        // escrow, so the coop has no claim on them; subtract them so we do not
+        // charge the buyer a shortfall for funds they already recovered.
+        let reclaimed_by_buyer = (if c.advance1_expired {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_expired {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        });
+        let owed_from_remainder = (fx_adjusted_total - claimed_by_coop - reclaimed_by_buyer).max(0);
         let available_balance =
             token::Client::new(&env, &c.token).balance(&env.current_contract_address());
         let shortfall = (owed_from_remainder - available_balance).max(0);
@@ -1510,6 +1668,11 @@ impl EscrowContract {
             env.current_contract_address(),
             &amount,
         );
+        FxShortfallFunded {
+            from: c.buyer.clone(),
+            amount,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1538,6 +1701,12 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
+            Payout {
+                reason: symbol_short!("exp_fx"),
+                to: c.cooperative.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1577,6 +1746,12 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
+            Payout {
+                reason: symbol_short!("cancel"),
+                to: c.buyer.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1715,6 +1890,7 @@ impl EscrowContract {
         let restored = c.dispute_pre_status;
         c.dispute_pre_status = Status::Draft;
         c.dispute_deadline = 0;
+        c.dispute_count += 1;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
         Ok(())
@@ -1869,6 +2045,14 @@ impl EscrowContract {
             "reclaim_on_nondelivery",
             AuthParty::Buyer,
             ActionDeadline::Exclusive(c.delivery_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_expire_delivery_window(&c, now),
+            "expire_delivery_window",
+            AuthParty::Anyone,
+            ActionDeadline::Exclusive(c.delivery_deadline.saturating_add(c.remainder_window_secs)),
         );
         Self::push_action(
             &env,
@@ -2120,6 +2304,22 @@ impl EscrowContract {
         Ok(())
     }
 
+    fn can_expire_delivery_window(c: &Commitment, now: u64) -> Result<(), Error> {
+        match c.status {
+            Status::Locked
+            | Status::Advance1Released
+            | Status::CheckpointPassed
+            | Status::Advance2Released
+            | Status::ReadyForDelivery => {}
+            _ => return Err(Error::InvalidState),
+        }
+        let grace_deadline = c.delivery_deadline.saturating_add(c.remainder_window_secs);
+        if now <= grace_deadline {
+            return Err(Error::DeliveryGraceWindowNotPassed);
+        }
+        Ok(())
+    }
+
     fn can_confirm_delivery(c: &Commitment) -> Result<(), Error> {
         if c.status != Status::ReadyForDelivery {
             return Err(Error::InvalidState);
@@ -2263,6 +2463,9 @@ impl EscrowContract {
         let flagger = flagger.clone();
         if flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator {
             return Err(Error::NotAParty);
+        }
+        if c.dispute_count >= MAX_DISPUTE_FLAGS {
+            return Err(Error::DisputeCapReached);
         }
         Ok(())
     }
@@ -2453,6 +2656,10 @@ impl EscrowContract {
         c.cooperative.require_auth();
         Self::can_claim_tranche(&c, t, env.ledger().timestamp())?;
 
+        let tranche_num = match t {
+            Tranche::One => 1u32,
+            Tranche::Two => 2u32,
+        };
         let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
         Self::set_tranche_claimed(&mut c, t);
@@ -2464,6 +2671,12 @@ impl EscrowContract {
                 &amount,
             );
         }
+        TrancheClaimed {
+            tranche: tranche_num,
+            to: c.cooperative.clone(),
+            amount,
+        }
+        .publish(env);
         Ok(())
     }
 
@@ -2472,6 +2685,10 @@ impl EscrowContract {
         c.buyer.require_auth();
         Self::can_reclaim_tranche(&c, t, env.ledger().timestamp())?;
 
+        let tranche_num = match t {
+            Tranche::One => 1u32,
+            Tranche::Two => 2u32,
+        };
         let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
         Self::set_tranche_expired(&mut c, t);
@@ -2483,6 +2700,12 @@ impl EscrowContract {
                 &amount,
             );
         }
+        TrancheReclaimed {
+            tranche: tranche_num,
+            to: c.buyer.clone(),
+            amount,
+        }
+        .publish(env);
         Ok(())
     }
 }
