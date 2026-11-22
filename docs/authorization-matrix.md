@@ -64,6 +64,7 @@ calls no `require_auth()` at all.
 | `refresh_fx_quote_status` | **Permissionless** | #1 — records the answer of the same staleness check (`Commitment::fx_quote_stale`, the "waiting on a fresh quote" signal). Informational only: takes no outcome parameter, moves nothing, and no guard reads the flag back. |
 | `fund_fx_shortfall` | **Buyer** | §4.2 option (b) — "buyer tops up" at settlement when the rate moved. Fund-mover, correctly gated to the payer. |
 | `expire_fx_shortfall_window` | **Permissionless** | Buyer-default path if the top-up never funds; same uncontested deadline logic as `expire_remainder_window`. |
+| `replace_oracle_config` | **Buyer + cooperative** | Issue #215 repair path for F1/F4/F5 oracle faults. Only legal in `Delivered` while `fx_resolved` is false; validates new config like `initialize`. |
 | `cancel` | **Buyer + cooperative** | Edge table — "Mutual cancellation: defined unwind… no penalty, logged". Mutual by definition, both signatures required. |
 | `reassign_buyer` | **Current buyer + cooperative + incoming buyer** | §4.8 — "transferable to another KYB-verified buyer with cooperative consent". The *incoming buyer's* signature is deliberately beyond the PRD (see §3.1). |
 | `flag_dispute` | **The flagger**, who must be one of the three named parties (own auth; strangers rejected `NotAParty`) | §4.8 must-have "dispute flagging with defined escalation". See `dispute-scope.md`. |

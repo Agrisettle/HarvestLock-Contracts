@@ -29,10 +29,12 @@
 //!    `oracle_config.oracle_contract` at an address with no contract (a
 //!    re-deployed oracle, a wrong address typed at `initialize`) aborts the
 //!    whole invocation at the host level. There is no
-//!    `OracleUnreachable`-shaped contract error to catch, and the contract
-//!    has no way to be repaired afterwards: `oracle_config` is set once at
-//!    `initialize` and has no setter. Callers (the API's staged-transaction
-//!    layer) must treat a host abort here as "this commitment is unreadable."
+//!    `OracleUnreachable`-shaped contract error to catch. Callers (the
+//!    API's staged-transaction layer) must treat a host abort here as "this
+//!    commitment is currently unreadable." The repair path is
+//!    `replace_oracle_config` (issue #215), which requires buyer +
+//!    cooperative consent and is only open in `Delivered` while
+//!    `fx_resolved` is false.
 //! 2. **F2 — a future-dated quote passes the staleness bound.** `read_oracle_rate`
 //!    computes `now.saturating_sub(quote.timestamp)`, so a quote stamped
 //!    *ahead* of the ledger gets age `0` and is accepted as maximally fresh.
@@ -48,7 +50,7 @@
 //!    huge price or a garbage `decimals()` (Reflector's real fiat oracle uses
 //!    14) aborts the call. Soroban's atomicity means no partial state is
 //!    written, so the damage is bounded to "this commitment can never be
-//!    resolved" — same repair story as F1.
+//!    resolved" — same repair path as F1: `replace_oracle_config`.
 //!
 //! A crashing or unreachable oracle is reported by the host, and depending on
 //! the SDK's version the failure surfaces either as the `try_*` call's outer
@@ -390,19 +392,16 @@ fn an_unreachable_oracle_aborts_rather_than_degrading_to_a_documented_error() {
         "expected an unreachable oracle to fail the read, got {outcome:?}"
     );
 
-    // Actionable finding, stated plainly: the failure is *not* one of
+    // Actionable finding: the failure is *not* one of
     // OracleNotConfigured / OraclePriceUnavailable / OracleStale. Whatever
-    // off-chain caller drove this gets a host abort, and because
-    // `oracle_config` has no setter the commitment keeps that dead address
-    // forever. `settle` on an oracle-configured commitment is then permanently
-    // unreachable (`FxNotResolved`), so this is a liveness gap, not just a
-    // cosmetic one — worth an `update_oracle_config` (re-initialize-gated) or
-    // an `OracleUnreachable` contract error in a follow-up.
+    // off-chain caller drove this gets a host abort. The repair path is
+    // `replace_oracle_config` (issue #215): buyer + cooperative can
+    // substitute a working config in `Delivered` while `fx_resolved` is
+    // false, unblocking `resolve_fx_shortfall` and eventually `settle`.
     assert_eq!(
         s.w.contract.get_oracle_config().unwrap().oracle_contract,
         s.oracle_addr,
-        "the dead address is exactly what `initialize` persisted, and there \
-         is no way to change it afterwards"
+        "the dead address is exactly what initialize persisted"
     );
 }
 
