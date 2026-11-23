@@ -426,9 +426,13 @@ pub enum Error {
     /// belongs to the operator's confirmation window; strictly after it, only
     /// `reclaim_on_nondelivery` is legal (#199).
     DeliveryDeadlinePassed = 43,
+    /// The oracle conversion's numerator or decimal divisor cannot be
+    /// represented as an `i128`; settlement must not trap on unusable oracle
+    /// values.
+    OracleConversionOutOfRange = 44,
     /// The configured Reflector oracle returned a quote timestamp later than
     /// the current ledger timestamp; future quotes cannot satisfy freshness.
-    OracleTimestampInFuture = 44,
+    OracleTimestampInFuture = 45,
 }
 
 #[contracttype]
@@ -2104,8 +2108,9 @@ impl EscrowContract {
     /// real contract makes `decimals` immutable (write-once at `config`, no
     /// setter; SEP-40 likewise says it "should never change"), so the trust
     /// is well-placed for the deployed oracle. If it were ever violated the
-    /// conversion would silently rescale by a power of ten rather than
-    /// error — see `docs/reflector-decimals-assumption.md` and the
+    /// conversion would silently rescale by a power of ten when representable;
+    /// unrepresentable arithmetic returns `OracleConversionOutOfRange` rather
+    /// than trapping. See `docs/reflector-decimals-assumption.md` and the
     /// `a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall`
     /// test that pins it.
     ///
@@ -2157,7 +2162,8 @@ impl EscrowContract {
         // `10^token_decimals` and dividing at the end) keeps an 18-decimal
         // token's conversion from overflowing i128 on realistic amounts; the
         // cost is flooring once at 7-decimal precision before scaling.
-        let fx_in_denominated_decimals = ngn_owed * rate.price / 10i128.pow(oracle_decimals);
+        let fx_in_denominated_decimals =
+            Self::checked_fx_conversion(ngn_owed, rate.price, oracle_decimals)?;
         let fx_adjusted_total = if token_decimals >= 7 {
             fx_in_denominated_decimals * 10i128.pow(token_decimals - 7)
         } else {
@@ -3167,6 +3173,16 @@ impl EscrowContract {
 
     fn bps_amount(total: i128, bps: u32) -> i128 {
         total * i128::from(bps) / 10_000
+    }
+
+    fn checked_fx_conversion(ngn_owed: i128, price: i128, decimals: u32) -> Result<i128, Error> {
+        let numerator = ngn_owed
+            .checked_mul(price)
+            .ok_or(Error::OracleConversionOutOfRange)?;
+        let divisor = 10i128
+            .checked_pow(decimals)
+            .ok_or(Error::OracleConversionOutOfRange)?;
+        Ok(numerator / divisor)
     }
 
     /// Calls `require_auth()` once per distinct address, in first-seen order.

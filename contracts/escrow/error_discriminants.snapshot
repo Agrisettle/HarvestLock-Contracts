@@ -59,4 +59,5 @@ OraclePriceInvalid = 40
 DeliveryGraceWindowNotPassed = 41
 DisputeCapReached = 42
 DeliveryDeadlinePassed = 43
-OracleTimestampInFuture = 44
+OracleConversionOutOfRange = 44
+OracleTimestampInFuture = 45

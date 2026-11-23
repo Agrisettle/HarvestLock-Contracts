@@ -4,25 +4,23 @@
 //! contract calls *out* to a contract it does not control. Everything here
 //! drives that call through deliberately broken oracles and asserts the
 //! documented degradation — `OracleNotConfigured` / `OraclePriceUnavailable`
-//! / `OracleStale` / `OracleTimestampInFuture` — plus the
-//! non-positive-price guard
-//! (`OraclePriceInvalid`) — rather than a panic escaping or a wrong number
-//! coming back.
+//! / `OracleStale` / `OracleTimestampInFuture` / `OracleConversionOutOfRange`
+//! — plus the non-positive-price guard (`OraclePriceInvalid`) — rather than
+//! a panic escaping or a wrong number coming back.
 //!
 //! Fault modes covered: no config, no quote on record, stale quote, quote at
 //! exactly the bound, a crashed (`panic!`ing) callee, an unreachable callee
 //! (address with no contract deployed), a future-dated quote, a non-positive
 //! price, a price large enough to overflow the conversion multiply, an
 //! absurd `decimals()`, and (#63) a *plausible* change to `decimals()`, which
-//! is silently accepted rather than trapping — see
+//! is silently accepted — see
 //! `docs/reflector-decimals-assumption.md` for why the contract assumes the
 //! scale never changes and what happens if it does.
 //!
 //! ## Remaining findings and fixed regressions
 //!
-//! The documented errors and non-positive-price guard work exactly as
-//! advertised. Two unresolved findings are pinned here as current behavior;
-//! F2 is recorded below as a fixed regression.
+//! The documented errors and non-positive-price guard work as advertised.
+//! F2 is recorded below as a fixed regression; F1 remains unresolved.
 //!
 //! 1. **F1 — an unreachable oracle is not a graceful error.** Pointing
 //!    `oracle_config.oracle_contract` at an address with no contract (a
@@ -32,20 +30,17 @@
 //!    has no way to be repaired afterwards: `oracle_config` is set once at
 //!    `initialize` and has no setter. Callers (the API's staged-transaction
 //!    layer) must treat a host abort here as "this commitment is unreadable."
-//! F2 — future-dated quotes are now rejected by `read_oracle_rate` with the
-//! distinct `OracleTimestampInFuture` error, before calculating quote age.
+//! **F2 — future-dated quotes are now rejected by `read_oracle_rate` with the
+//! distinct `OracleTimestampInFuture` error**, before calculating quote age.
 //! The former **F3 — no sanity bound on the price itself** finding is now
 //! closed: both negative and zero prices are rejected as
 //! `OraclePriceInvalid` by `oracle_rate()`, `resolve_fx_shortfall()`, and
 //! `refresh_fx_quote_status()` before any settlement state can be written.
 //! The regression test below keeps that decision pinned.
 //!
-//! 2. **F4/F5 — `resolve_fx_shortfall` has two unguarded arithmetic traps.**
-//!    `ngn_owed * rate.price` and `10i128.pow(decimals)` are unchecked: a
-//!    huge price or a garbage `decimals()` (Reflector's real fiat oracle uses
-//!    14) aborts the call. Soroban's atomicity means no partial state is
-//!    written, so the damage is bounded to "this commitment can never be
-//!    resolved" — same repair story as F1.
+//! 3. **F4/F5 — `resolve_fx_shortfall` reports unrepresentable oracle
+//!    conversion arithmetic as `OracleConversionOutOfRange`.** A huge price
+//!    or garbage `decimals()` no longer traps or records partial state.
 //!
 //! A crashing or unreachable oracle is reported by the host, and depending on
 //! the SDK's version the failure surfaces either as the `try_*` call's outer
@@ -481,18 +476,17 @@ fn non_positive_prices_are_rejected_on_all_oracle_read_paths() {
     }
 }
 
-/// F4 — a price big enough to overflow the conversion multiply.
+/// F4 — a price big enough to overflow the conversion multiply returns a
+/// contract error rather than trapping.
 #[test]
-fn an_overflowing_price_traps_resolve_fx_shortfall_without_recording_anything() {
+fn an_overflowing_price_returns_error_without_recording_anything() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     s.oracle().set_quote(&(i128::MAX / 2), &s.w.now());
 
     s.w.drive_to_delivered();
-    let outcome = attempt(|| s.w.contract.try_resolve_fx_shortfall().is_ok());
-    assert!(
-        !matches!(outcome, Attempt::Succeeded),
-        "FINDING F4: `ngn_owed * rate.price` is unchecked, so an extreme \
-         price traps instead of being rejected — got {outcome:?}"
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleConversionOutOfRange))
     );
 
     let c = s.w.contract.get_commitment();
@@ -504,23 +498,24 @@ fn an_overflowing_price_traps_resolve_fx_shortfall_without_recording_anything() 
     assert_eq!(s.w.status(), Status::Delivered);
 }
 
-/// F5 — a nonsense `decimals()` answer, which `resolve_fx_shortfall` divides
-/// by as `10i128.pow(decimals)`.
+/// F5 — a nonsense `decimals()` answer returns a contract error.
 #[test]
-fn an_absurd_decimals_count_traps_resolve_fx_shortfall() {
+fn an_absurd_decimals_count_returns_error_without_recording_anything() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     s.oracle().set_decimals(&200); // 10^200 does not fit in i128
 
     s.w.drive_to_delivered();
-    let outcome = attempt(|| s.w.contract.try_resolve_fx_shortfall().is_ok());
-    assert!(
-        !matches!(outcome, Attempt::Succeeded),
-        "FINDING F5: `10i128.pow(decimals)` is unbounded, so a bad \
-         decimals() value traps — got {outcome:?}"
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleConversionOutOfRange))
     );
     // `oracle_rate` itself is unaffected: it never calls `decimals()`.
     assert_eq!(s.w.contract.oracle_rate().price, FRESH_PRICE);
-    assert!(!s.w.contract.get_commitment().fx_resolved);
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved);
+    assert_eq!(c.fx_adjusted_total, 0);
+    assert_eq!(c.fx_shortfall_amount, 0);
+    assert_eq!(s.w.status(), Status::Delivered);
 }
 
 /// #63 — the decimals-change question, and the assumption the conversion leans
@@ -529,7 +524,7 @@ fn an_absurd_decimals_count_traps_resolve_fx_shortfall() {
 /// `oracle_rate()` does **no** conversion math: it returns the raw `price`
 /// exactly as `lastprice` gave it and never calls `decimals()`, so a
 /// `decimals()` change cannot alter it. The scale is applied in exactly one
-/// place — `resolve_fx_shortfall` (`lib.rs`), via `10i128.pow(decimals)`.
+/// place — `resolve_fx_shortfall` (`lib.rs`), via checked decimal conversion.
 ///
 /// Reflector's real contract makes `decimals` immutable: `settings.rs` writes
 /// it once in `init` (which aborts with `AlreadyInitialized` on a second call)
@@ -537,7 +532,8 @@ fn an_absurd_decimals_count_traps_resolve_fx_shortfall() {
 /// change." This test pins what happens if that invariant is ever violated
 /// anyway: a *plausible* new value (15 instead of 14) is accepted silently and
 /// rescales the conversion by a power of ten, with no error and no mismatch
-/// detection — unlike the absurd value in the F5 test above, which traps.
+/// detection — unlike an absurd value that cannot be represented, which
+/// returns `OracleConversionOutOfRange`.
 #[test]
 fn a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall() {
     let s = oracle_world(MAX_AGE, 1_000_000);

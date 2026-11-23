@@ -649,6 +649,28 @@ per-commitment budget above (by then the code entry's TTL is already at
 max), but it is a real deployment-day cost and it is why a single
 `initialize` measured in isolation can look alarming.
 
+### TTL extension rent tradeoff
+
+The fresh-instance `initialize` row above is the available measured
+max-TTL-extension baseline: **4,092,383 stroops gross rent** (618,696 refunded
+in that simulation). To put a deadline-sized extension in context, assuming
+linear rent, a five-second ledger, and the test host's 6,312,000-ledger maximum:
+
+| Extension target | TTL ledgers | Gross rent |
+| --- | ---: | ---: |
+| Max TTL (measured `initialize`) | 6,312,000 | 4,092,383 |
+| 120 days (pro-rata estimate) | 2,073,600 | ~1,344,000 |
+| Difference | 4,238,400 | ~2,748,000 |
+
+The 120-day row is a pro-rata estimate from the measured baseline, **not** a
+second transaction measurement. It excludes any safety margin and later
+remainder, FX, or dispute windows; network rent settings, ledger interval,
+entry size, and current TTL also affect the actual fee. The contract retains
+max-TTL because `Draft` can be locked later and successfully resolved disputes
+can be reopened without consuming the lapse cap, so the current state machine
+does not provide a finite latest reachable deadline to use as a safe cap. See
+[`storage-ttl.md`](./storage-ttl.md#ttl-target-decision) for the reasoning.
+
 ### Reproduce
 
 ```bash
