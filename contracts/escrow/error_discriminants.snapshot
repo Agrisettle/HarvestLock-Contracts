@@ -56,3 +56,6 @@ GradeScheduleTooLong = 37
 AllocationTooLarge = 38
 AmountTooLarge = 39
 OraclePriceInvalid = 40
+DeliveryGraceWindowNotPassed = 41
+DisputeCapReached = 42
+DeliveryDeadlinePassed = 43

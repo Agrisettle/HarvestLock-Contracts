@@ -10,6 +10,13 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 doctest = false
 
+[features]
+# Compiles `Commitment::check_invariants` (and the `save` hook that calls
+# it) into builds that aren't `cfg(test)` — i.e. the integration suites in
+# `tests/`, which link this crate as a normal dependency. Absent from the
+# release WASM; never enable it there. See issue #225.
+testutils = []
+
 [dependencies]
 soroban-sdk = "29.0.1"
 

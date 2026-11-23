@@ -17,6 +17,13 @@ to confirm your starting point actually matches `HANDOFF.md` before
 changing anything; if it doesn't, trust the code and test output over
 the doc, and fix the doc to match before doing anything else.
 
+To see whether a change will pass CI before pushing, run `just --list`:
+each recipe in the [justfile](./justfile) mirrors a job in
+[`.github/workflows/test.yml`](./.github/workflows/test.yml), and `just ci`
+runs all the offline ones together. (The workflow itself is
+maintainer-managed — see the PR template — but the justfile is a local
+mirror, not a second source of truth: when a job changes, update it too.)
+
 Security issues go through [`SECURITY.md`](./SECURITY.md), not a
 public issue.
 

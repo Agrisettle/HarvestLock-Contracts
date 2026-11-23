@@ -133,6 +133,28 @@
 //! the network maximum (see `bump_instance_ttl`'s doc comment). The full
 //! key-by-key audit, the residual expiry risk, and the operational
 //! mitigations live in `docs/storage-ttl.md`.
+//!
+//! **The state machine is declared once, not once per function (#227)**:
+//! every status guard on a state-changing call is a single
+//! `require_status(&c, Method::X)` lookup into the one const transition
+//! table below (`Method` + `Method::allowed_from`). Read that table top to
+//! bottom and you have the whole machine: which method each status admits,
+//! and — via its `None` rows — which two calls are deliberately not
+//! status-gated at all (`claim_advance_*`/`reclaim_advance_*`, whose
+//! windows stay actionable while a dispute is open; see `Method`'s doc).
+//! Nothing in this file may re-state a source-status list by hand: a new
+//! guard is a new table row, so the "Disputed blocks everything" property
+//! and the "pre-delivery range" are each written once instead of a dozen
+//! times. The guard *order* (status first, then flags, then deadlines) is
+//! untouched by that centralization, which is what keeps the existing
+//! error-ordering expectations valid.
+//!
+//! **Test builds assert the same invariants on every write (#225)**:
+//! `save` calls `Commitment::check_invariants` under
+//! `cfg(any(test, feature = "testutils"))`, so the field doc comments that
+//! state things like "0 = not yet opened" or "`Draft` whenever `status`
+//! isn't `Disputed`" are checked by every test that writes state, not only
+//! by whoever rereads them. It compiles out of the release WASM entirely.
 
 #![no_std]
 #![warn(missing_docs)]
@@ -144,8 +166,8 @@ mod reflector;
 
 use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, token, Address, BytesN,
-    Env, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token,
+    Address, BytesN, Env, Symbol, Vec,
 };
 
 /// Maximum number of entries `initialize` accepts in `grade_price_bps`.
@@ -249,6 +271,9 @@ pub enum AuthParty {
     /// Current buyer, cooperative, **and** the incoming buyer supplied as
     /// `new_buyer` — the three signatures `reassign_buyer` requires.
     BuyerCooperativeAndNewBuyer,
+    /// Current buyer, cooperative, **and** the incoming operator supplied as
+    /// `new_operator` — the three signatures `reassign_operator` requires.
+    BuyerCooperativeAndNewOperator,
 }
 
 /// The timestamp, if any, that bounds a callable action. The variant says
@@ -409,6 +434,20 @@ pub enum Error {
     /// The configured Reflector oracle returned a zero or negative price;
     /// non-positive exchange rates cannot produce a valid settlement amount.
     OraclePriceInvalid = 40,
+    /// `expire_delivery_window` called before `delivery_deadline +
+    /// remainder_window_secs` has strictly passed. The permissionless
+    /// fallback is intentionally delayed past the buyer's own reclaim
+    /// window to give the buyer time to act first.
+    DeliveryGraceWindowNotPassed = 41,
+    /// `flag_dispute` called after the per-commitment `MAX_DISPUTE_FLAGS`
+    /// cap has been reached. Only `expire_dispute_window` lapsals count
+    /// against the cap; `resolve_dispute` (unanimous consent) does not.
+    DisputeCapReached = 42,
+    /// `confirm_delivery` called after `delivery_deadline` has *strictly*
+    /// passed (`now > delivery_deadline`). The deadline second itself still
+    /// belongs to the operator's confirmation window; strictly after it, only
+    /// `reclaim_on_nondelivery` is legal (#199).
+    DeliveryDeadlinePassed = 43,
 }
 
 /// Instance-storage keys. All persistent state for a commitment lives under
@@ -455,10 +494,11 @@ pub struct OracleConfig {
     /// *at whatever rate happened to hold when the deal was funded*.
     /// `resolve_fx_shortfall` reprices this at a fresh rate; the gap
     /// between that and what's actually escrowed is PRD §4.2's FX risk,
-    /// make concrete. Using the same 7-decimal convention on both sides
-    /// of the multiplication is what lets `resolve_fx_shortfall`'s
-    /// conversion formula skip a separate unit-normalization step — see
-    /// its doc comment for the worked example.
+    /// make concrete. This field always uses the 7-decimal convention;
+    /// `resolve_fx_shortfall` converts the result to the settlement token's
+    /// own `decimals()` (which is not necessarily 7 — see #258) before
+    /// comparing it with the escrowed balance. See that function's doc
+    /// comment for the worked example.
     ///
     /// **Not** the oracle's `decimals()` — that is a property of the
     /// oracle, read live at settlement and assumed immutable (see
@@ -558,6 +598,14 @@ enum Tranche {
 /// Finding: retain struct fields as-is.
 #[contracttype]
 #[derive(Clone)]
+// `PartialEq`/`Eq`/`Debug` are test-only (#267): the dispute round-trip
+// property test compares `Commitment` byte-for-byte before `flag_dispute`
+// and after `resolve_dispute`/`expire_dispute_window`, which is why the
+// derive exists at all. Keeping it behind `cfg(test)` means the deployed
+// WASM pays nothing for it — a matching-logic trait that will never be
+// invoked at runtime shouldn't widen the on-chain binary (docs/gas-costs.md
+// treats every reserved byte as a product cost).
+#[cfg_attr(test, derive(PartialEq, Eq, Debug))]
 pub struct Commitment {
     /// Account that funded the deposit and receives settlement shortfall
     /// refunds. Set at `initialize`, rewritten only by `reassign_buyer`.
@@ -728,6 +776,288 @@ pub struct Commitment {
     /// above — see `flag_dispute`'s doc comment for why a dispute freeze
     /// needs a bound at all.
     pub dispute_deadline: u64,
+    /// Number of lapsed dispute windows accumulated so far. `flag_dispute`
+    /// refuses once this reaches `MAX_DISPUTE_FLAGS`. Only
+    /// `expire_dispute_window` lapsals increment it; `resolve_dispute`
+    /// (unanimous consent) does not — good-faith resolution should not
+    /// shorten the window for future disputes.
+    pub dispute_count: u32,
+}
+
+/// The invariants the state machine is allowed to rely on (#225), every one
+/// of which previously lived only in a field doc comment above.
+///
+/// Test-only by construction: the whole block is `cfg`'d to `test` /
+/// `testutils`, and `save` calls it before every write, so the hundreds of
+/// existing tests each double as an invariant test on every state write —
+/// including `initialize`'s, which writes through `save` too. It is absent
+/// from the release WASM (neither cfg is set there), so the deployed
+/// contract pays nothing for it.
+///
+/// Panicking rather than returning an error is deliberate: a violation means
+/// this contract wrote an impossible state, which is a bug here, not a
+/// caller mistake to report to a caller. A panic makes every test that
+/// reaches the bad write fail, whether or not it knows the invariant exists.
+#[cfg(any(test, feature = "testutils"))]
+impl Commitment {
+    /// No auth required — test-build-only check of in-memory state: it calls
+    /// nothing, writes nothing, and has no caller-supplied input. Panics (see
+    /// this impl's doc) rather than returning an error.
+    pub fn check_invariants(&self) {
+        // A tranche is resolved at most once, and in one direction.
+        assert!(
+            !(self.advance1_claimed && self.advance1_expired),
+            "invariant: advance1_claimed && advance1_expired"
+        );
+        assert!(
+            !(self.advance2_claimed && self.advance2_expired),
+            "invariant: advance2_claimed && advance2_expired"
+        );
+        // "0 = not yet opened": neither flag can be set before the window
+        // that sets it exists.
+        if self.advance1_deadline == 0 {
+            assert!(
+                !self.advance1_claimed && !self.advance1_expired,
+                "invariant: advance1 flags set with advance1_deadline == 0"
+            );
+        }
+        if self.advance2_deadline == 0 {
+            assert!(
+                !self.advance2_claimed && !self.advance2_expired,
+                "invariant: advance2 flags set with advance2_deadline == 0"
+            );
+        }
+        // The commitment is frozen iff a dispute window is open, and the
+        // pre-dispute status is only a real value while it is.
+        assert!(
+            (self.status == Status::Disputed) == (self.dispute_deadline != 0),
+            "invariant: status == Disputed iff dispute_deadline != 0"
+        );
+        if self.status == Status::Disputed {
+            // `flag_dispute` never accepts `Draft`, so `Draft` can only be
+            // the unset sentinel — never a real restore target.
+            assert!(
+                self.dispute_pre_status != Status::Draft,
+                "invariant: dispute_pre_status == Draft while Disputed"
+            );
+        } else {
+            assert!(
+                self.dispute_pre_status == Status::Draft,
+                "invariant: dispute_pre_status != Draft outside Disputed"
+            );
+        }
+        // The remainder can only be funded inside a window that was opened.
+        if self.remainder_funded {
+            assert!(
+                self.remainder_deadline != 0,
+                "invariant: remainder_funded with remainder_deadline == 0"
+            );
+        }
+        // A shortfall exists iff it has a deadline to cure it by.
+        assert!(
+            (self.fx_shortfall_amount > 0) == (self.fx_shortfall_deadline != 0),
+            "invariant: fx_shortfall_amount > 0 iff fx_shortfall_deadline != 0"
+        );
+        // Settlement cannot owe more than the agreed full value.
+        assert!(
+            self.settlement_bps <= 10_000,
+            "invariant: settlement_bps > 10_000"
+        );
+        // The delivery window is opened at creation, never before it.
+        assert!(
+            self.delivery_deadline >= self.created_at,
+            "invariant: delivery_deadline < created_at"
+        );
+    }
+}
+
+/// The version of the [`CommitmentView`] read shape.
+///
+/// Bumped whenever a field is added, removed, renamed, or changes meaning —
+/// see `docs/versioning.md` §2. Storage-only changes to [`Commitment`] do
+/// **not** bump it; that is the whole point of the view.
+pub const COMMITMENT_VIEW_SCHEMA_VERSION: u32 = 1;
+
+/// The three named parties plus the settlement token.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentParties {
+    pub buyer: Address,
+    pub cooperative: Address,
+    pub warehouse_operator: Address,
+    pub token: Address,
+}
+
+/// The deal's agreed terms and windows, fixed at `initialize`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentTerms {
+    pub total_amount: i128,
+    pub advance1_bps: u32,
+    pub advance2_bps: u32,
+    pub claim_window_secs: u64,
+    pub remainder_window_secs: u64,
+    pub delivery_deadline: u64,
+    pub contracted_quantity: u32,
+    pub grade_price_bps: Vec<u32>,
+}
+
+/// One advance tranche's claim state. `deadline == 0` means not opened yet.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrancheView {
+    pub deadline: u64,
+    pub claimed: bool,
+    pub expired: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentTranches {
+    pub advance1: TrancheView,
+    pub advance2: TrancheView,
+}
+
+/// Two-phase funding state: the deposit is escrowed by `lock`, the remainder
+/// by `fund_remainder` once `ready_for_delivery` opens its window.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentFunding {
+    pub remainder_deadline: u64,
+    pub remainder_funded: bool,
+}
+
+/// The warehouse operator's delivery attestation, consumed by `settle`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentDelivery {
+    pub delivered_quantity: u32,
+    pub grade_index: u32,
+    pub settlement_bps: u32,
+}
+
+/// PRD §4.2 option (b)'s FX-resolution state. All fields are zero/false for a
+/// commitment initialized without an `oracle_config`; `configured` tells the
+/// two apart without a second storage read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentFx {
+    pub configured: bool,
+    pub resolved: bool,
+    pub adjusted_total: i128,
+    pub shortfall_amount: i128,
+    pub shortfall_funded: bool,
+    pub shortfall_deadline: u64,
+    pub quote_stale: bool,
+}
+
+/// Dispute freeze state; `pre_status` is `Draft` when not disputed.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentDispute {
+    pub pre_status: Status,
+    pub deadline: u64,
+}
+
+/// A stable, versioned read model for a commitment (#256).
+///
+/// [`Commitment`] is the storage struct: every field exists because some guard
+/// or payout needs it on chain, and its shape is free to change for storage
+/// reasons. Off-chain clients read this view instead, so a storage-layout
+/// change does not rewrite their ABI.
+///
+/// **Stability promise.** Fields are only added, or their meaning changed, in
+/// a release that increments [`COMMITMENT_VIEW_SCHEMA_VERSION`]; readers
+/// should refuse a `schema_version` newer than they understand and may assume
+/// that a `schema_version` they do understand keeps the same field meanings.
+/// The storage struct can change without a version bump — only this view's
+/// shape is contractual.
+///
+/// The grouping is semantic, not storage order: `parties` (who), `terms`
+/// (agreed before funding), `tranches` (advance claim state), `funding`
+/// (two-phase payment), `delivery` (the operator's attestation), `fx` (oracle
+/// conversion), and `dispute` (the bounded freeze). `status` and `created_at`
+/// stay top-level because they describe the commitment as a whole.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentView {
+    pub schema_version: u32,
+    pub status: Status,
+    pub created_at: u64,
+    pub parties: CommitmentParties,
+    pub terms: CommitmentTerms,
+    pub tranches: CommitmentTranches,
+    pub funding: CommitmentFunding,
+    pub delivery: CommitmentDelivery,
+    pub fx: CommitmentFx,
+    pub dispute: CommitmentDispute,
+}
+
+impl CommitmentView {
+    /// Projects the storage struct into the read model: every `Commitment`
+    /// field appears exactly once, unchanged. The one extra field,
+    /// `fx.configured`, is not storage state of its own — it reports whether
+    /// the `DataKey::OracleConfig` entry exists. The view is a reshaping, not
+    /// a second source of truth. Kept private: the only supported construction
+    /// path is the contract's own `get_commitment_view`, so no client can
+    /// build a view that disagrees with stored state.
+    fn from_commitment(c: &Commitment, oracle_configured: bool) -> Self {
+        Self {
+            schema_version: COMMITMENT_VIEW_SCHEMA_VERSION,
+            status: c.status,
+            created_at: c.created_at,
+            parties: CommitmentParties {
+                buyer: c.buyer.clone(),
+                cooperative: c.cooperative.clone(),
+                warehouse_operator: c.warehouse_operator.clone(),
+                token: c.token.clone(),
+            },
+            terms: CommitmentTerms {
+                total_amount: c.total_amount,
+                advance1_bps: c.advance1_bps,
+                advance2_bps: c.advance2_bps,
+                claim_window_secs: c.claim_window_secs,
+                remainder_window_secs: c.remainder_window_secs,
+                delivery_deadline: c.delivery_deadline,
+                contracted_quantity: c.contracted_quantity,
+                grade_price_bps: c.grade_price_bps.clone(),
+            },
+            tranches: CommitmentTranches {
+                advance1: TrancheView {
+                    deadline: c.advance1_deadline,
+                    claimed: c.advance1_claimed,
+                    expired: c.advance1_expired,
+                },
+                advance2: TrancheView {
+                    deadline: c.advance2_deadline,
+                    claimed: c.advance2_claimed,
+                    expired: c.advance2_expired,
+                },
+            },
+            funding: CommitmentFunding {
+                remainder_deadline: c.remainder_deadline,
+                remainder_funded: c.remainder_funded,
+            },
+            delivery: CommitmentDelivery {
+                delivered_quantity: c.delivered_quantity,
+                grade_index: c.grade_index,
+                settlement_bps: c.settlement_bps,
+            },
+            fx: CommitmentFx {
+                configured: oracle_configured,
+                resolved: c.fx_resolved,
+                adjusted_total: c.fx_adjusted_total,
+                shortfall_amount: c.fx_shortfall_amount,
+                shortfall_funded: c.fx_shortfall_funded,
+                shortfall_deadline: c.fx_shortfall_deadline,
+                quote_stale: c.fx_quote_stale,
+            },
+            dispute: CommitmentDispute {
+                pre_status: c.dispute_pre_status,
+                deadline: c.dispute_deadline,
+            },
+        }
+    }
 }
 
 /// Published on every real status transition — `lock`, both advance
@@ -792,6 +1122,22 @@ impl EscrowContract {
     ///
     /// `grade_price_bps` must be non-empty, may hold at most
     /// `MAX_GRADE_ENTRIES` entries, and every entry must be ≤ 10_000.
+    ///
+    /// **`token` must have standard SEP-41 transfer semantics — ideally a
+    /// Stellar Asset Contract (SAC).** The contract calls `balance()` and
+    /// `transfer()` on `token` and relies on both to behave as SEP-41
+    /// specifies: `transfer(amount)` moves exactly `amount` from sender
+    /// to receiver with no fee skim, and `balance(id)` reports what `id`
+    /// actually holds. Non-standard tokens that implement the SEP-41
+    /// interface but misbehave — fee-on-transfer, lying `balance()` — do
+    /// not corrupt the escrow's accounting (`settle`/`cancel` either leave
+    /// money with the wrong party or trap mid-call, never over-pay), but
+    /// they do harm the cooperative, who did not pick the address. See
+    /// threat-model entry 30's sub-case and the pinned behavior in
+    /// `contracts/escrow/tests/nonstandard_token.rs`. The real HarvestLock
+    /// API deployments only ever pass a SAC (USDC testnet / USDC
+    /// mainnet); anything calling `initialize` directly (CLI, tests, a
+    /// future direct caller) must honor this requirement itself.
     ///
     /// **A commitment abandoned at Draft forever (#96)**: this call moves
     /// no funds, and `lock` is the first and only place in the whole
@@ -901,10 +1247,13 @@ impl EscrowContract {
             fx_quote_stale: false,
             dispute_pre_status: Status::Draft,
             dispute_deadline: 0,
+            dispute_count: 0,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Commitment, &commitment);
+        // Through `save` like every other write, so the initial state is
+        // covered by the same test-build invariant checker (#225) — the
+        // `Draft` state it writes is the one every later invariant is
+        // relative to.
+        Self::save(&env, &commitment);
         if let Some(oc) = oracle_config {
             env.storage().instance().set(&DataKey::OracleConfig, &oc);
         }
@@ -922,6 +1271,40 @@ impl EscrowContract {
     pub fn get_oracle_config(env: Env) -> Result<Option<OracleConfig>, Error> {
         let _ = Self::load(&env)?; // NotInitialized if the commitment itself doesn't exist
         Ok(env.storage().instance().get(&DataKey::OracleConfig))
+    }
+
+    /// Replaces a broken oracle configuration with a new one, with two-party
+    /// consent (issue #215). Addresses F1 (unreachable oracle) by letting the
+    /// buyer and cooperative substitute a working `oracle_config` before
+    /// `fx_resolved` is set.
+    ///
+    /// Only legal in `Status::Delivered` while `fx_resolved` is false.
+    /// The new config is validated the same way `initialize` does
+    /// (`max_age_secs != 0`). Requires buyer and cooperative to co-sign.
+    pub fn replace_oracle_config(env: Env, new_config: OracleConfig) -> Result<(), Error> {
+        let c = Self::load(&env)?;
+        if c.status != Status::Delivered {
+            return Err(Error::InvalidState);
+        }
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
+        }
+        if !env.storage().instance().has(&DataKey::OracleConfig) {
+            return Err(Error::OracleNotConfigured);
+        }
+        if new_config.max_age_secs == 0 {
+            return Err(Error::InvalidOracleConfig);
+        }
+        Self::require_once_each(&[&c.buyer, &c.cooperative]);
+        let new_oracle_contract = new_config.oracle_contract.clone();
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleConfig, &new_config);
+        OracleConfigReplaced {
+            new_oracle_contract,
+        }
+        .publish(&env);
+        Ok(())
     }
 
     /// Reads the current rate for this commitment's configured oracle
@@ -1013,7 +1396,13 @@ impl EscrowContract {
         }
         c.cooperative.require_auth();
 
+        let member_count = members.len();
         env.storage().instance().set(&DataKey::Allocation, &members);
+        AllocationRecorded {
+            member_count,
+            total_share_bps: total_bps,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1294,6 +1683,11 @@ impl EscrowContract {
                 &remainder,
             );
         }
+        RemainderFunded {
+            from: c.buyer.clone(),
+            amount: remainder,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1338,6 +1732,12 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
+            Payout {
+                reason: symbol_short!("exp_rem"),
+                to: c.cooperative.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1379,6 +1779,39 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
+            Payout {
+                reason: symbol_short!("forfeit"),
+                to: c.buyer.clone(),
+                amount: balance,
+            }
+            .publish(&env);
+        }
+        Ok(())
+    }
+
+    /// Permissionless fallback that forfeits the escrowed funds to the buyer
+    /// when the cooperative never called `reclaim_on_nondelivery` and the
+    /// buyer's key is lost or inaccessible. Callable by anyone after
+    /// `delivery_deadline + remainder_window_secs` (the grace period).
+    /// Without this hatch, a lost buyer key would lock funds forever.
+    pub fn expire_delivery_window(env: Env) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        Self::can_expire_delivery_window(&c, env.ledger().timestamp())?;
+
+        // Effects before interaction — see `lock`'s comment for why.
+        Self::set_status(&env, &mut c, Status::Forfeited);
+        Self::save(&env, &c);
+
+        let token_client = token::Client::new(&env, &c.token);
+        let balance = token_client.balance(&env.current_contract_address());
+        if balance > 0 {
+            token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
+            Payout {
+                reason: symbol_short!("exp_del"),
+                to: c.buyer.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1419,6 +1852,12 @@ impl EscrowContract {
     ) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_confirm_delivery(&c)?;
+        // Deadline guard: the operator's attestation window ends at
+        // `delivery_deadline`; strictly after it only `reclaim_on_nondelivery`
+        // is legal. The deadline second itself still belongs to the operator.
+        if env.ledger().timestamp() > c.delivery_deadline {
+            return Err(Error::DeliveryDeadlinePassed);
+        }
         let Some(grade_bps) = c.grade_price_bps.get(grade_index) else {
             return Err(Error::InvalidGradeIndex);
         };
@@ -1435,6 +1874,12 @@ impl EscrowContract {
             .expect("settlement basis points are bounded by 10,000");
         Self::set_status(&env, &mut c, Status::Delivered);
         Self::save(&env, &c);
+        DeliveryConfirmed {
+            grade_index,
+            delivered_quantity,
+            settlement_bps: c.settlement_bps,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1517,9 +1962,21 @@ impl EscrowContract {
                 &c.cooperative,
                 &coop_payment,
             );
+            Payout {
+                reason: symbol_short!("coop_pay"),
+                to: c.cooperative.clone(),
+                amount: coop_payment,
+            }
+            .publish(&env);
         }
         if buyer_refund > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &buyer_refund);
+            Payout {
+                reason: symbol_short!("refund"),
+                to: c.buyer.clone(),
+                amount: buyer_refund,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1545,16 +2002,25 @@ impl EscrowContract {
     /// 6_500_000_000 (650 USDC) — a genuine 17 USDC shortfall the buyer
     /// now owes, exactly the FX-risk gap PRD §4.2 names.
     ///
-    /// **The `decimals` divisor is trusted to be constant** (#63): it is read
-    /// live from the oracle rather than pinned in `OracleConfig`, because it
-    /// is a property of the oracle, not the commitment. Reflector's real
-    /// contract makes `decimals` immutable (write-once at `config`, no
+    /// **The oracle's `decimals` divisor is trusted to be constant** (#63): it
+    /// is read live from the oracle rather than pinned in `OracleConfig`,
+    /// because it is a property of the oracle, not the commitment. Reflector's
+    /// real contract makes `decimals` immutable (write-once at `config`, no
     /// setter; SEP-40 likewise says it "should never change"), so the trust
     /// is well-placed for the deployed oracle. If it were ever violated the
     /// conversion would silently rescale by a power of ten rather than
     /// error — see `docs/reflector-decimals-assumption.md` and the
     /// `a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall`
     /// test that pins it.
+    ///
+    /// **The settlement token's decimals are read, not assumed** (#258).
+    /// `denominated_amount` is in the 7-decimal convention `total_amount`
+    /// uses for native XLM; a SEP-41 token may use 6, 18, or any other
+    /// `decimals()`. The conversion therefore rescales the 7-decimal result
+    /// to the token's live `decimals()` before comparing it against escrowed
+    /// balances. Unlike the oracle's scale this is a property of the token
+    /// contract, read per call — a token proxy that changed its decimals
+    /// would be a different, equally trust-the-provider assumption.
     ///
     /// Requires both tranches already resolved (same guard `settle`
     /// itself has) before reading `claimed_by_coop` — computing this
@@ -1580,10 +2046,27 @@ impl EscrowContract {
             .ok_or(Error::OracleNotConfigured)?;
 
         let rate = Self::read_oracle_rate(&env, &oracle_config)?;
-        let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+        let oracle_decimals =
+            ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+        let token_decimals = token::Client::new(&env, &c.token).decimals();
 
         let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
-        let fx_adjusted_total = ngn_owed * rate.price / 10i128.pow(decimals);
+        // `ngn_owed` is in `denominated_amount`'s 7-decimal units. Apply the
+        // oracle rate first: the result is still in 7-decimal settlement-token
+        // units. Then rescale those 7-decimal units to the settlement token's
+        // own `decimals()` (#258). Native XLM and USDC SACs are both 7-decimal,
+        // which hid this: a 6- or 18-decimal SEP-41 token would otherwise be
+        // off by a power of ten in every FX settlement. Rescaling after the
+        // oracle division (rather than multiplying the numerator by
+        // `10^token_decimals` and dividing at the end) keeps an 18-decimal
+        // token's conversion from overflowing i128 on realistic amounts; the
+        // cost is flooring once at 7-decimal precision before scaling.
+        let fx_in_denominated_decimals = ngn_owed * rate.price / 10i128.pow(oracle_decimals);
+        let fx_adjusted_total = if token_decimals >= 7 {
+            fx_in_denominated_decimals * 10i128.pow(token_decimals - 7)
+        } else {
+            fx_in_denominated_decimals / 10i128.pow(7 - token_decimals)
+        };
 
         let claimed_by_coop = (if c.advance1_claimed {
             Self::bps_amount(c.total_amount, c.advance1_bps)
@@ -1594,7 +2077,19 @@ impl EscrowContract {
         } else {
             0
         });
-        let owed_from_remainder = (fx_adjusted_total - claimed_by_coop).max(0);
+        // Reclaimed tranches were returned to the buyer and are no longer in
+        // escrow, so the coop has no claim on them; subtract them so we do not
+        // charge the buyer a shortfall for funds they already recovered.
+        let reclaimed_by_buyer = (if c.advance1_expired {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_expired {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        });
+        let owed_from_remainder = (fx_adjusted_total - claimed_by_coop - reclaimed_by_buyer).max(0);
         let available_balance =
             token::Client::new(&env, &c.token).balance(&env.current_contract_address());
         let shortfall = (owed_from_remainder - available_balance).max(0);
@@ -1613,6 +2108,14 @@ impl EscrowContract {
             c.fx_shortfall_funded = true;
         }
         Self::save(&env, &c);
+        FxResolved {
+            rate: rate.price,
+            rate_timestamp: rate.timestamp,
+            fx_adjusted_total,
+            shortfall,
+            deadline: c.fx_shortfall_deadline,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1674,12 +2177,17 @@ impl EscrowContract {
             .get(&DataKey::OracleConfig)
             .ok_or(Error::OracleNotConfigured)?;
 
+        let prev_stale = c.fx_quote_stale;
         match Self::read_oracle_rate(&env, &oracle_config) {
             Ok(_) => c.fx_quote_stale = false,
             Err(Error::OracleStale) => c.fx_quote_stale = true,
             Err(e) => return Err(e),
         }
+        let new_stale = c.fx_quote_stale;
         Self::save(&env, &c);
+        if new_stale != prev_stale {
+            FxQuoteStaleChanged { stale: new_stale }.publish(&env);
+        }
         Ok(())
     }
 
@@ -1706,6 +2214,11 @@ impl EscrowContract {
             env.current_contract_address(),
             &amount,
         );
+        FxShortfallFunded {
+            from: c.buyer.clone(),
+            amount,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1734,6 +2247,12 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
+            Payout {
+                reason: symbol_short!("exp_fx"),
+                to: c.cooperative.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1773,6 +2292,12 @@ impl EscrowContract {
         let balance = token_client.balance(&env.current_contract_address());
         if balance > 0 {
             token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
+            Payout {
+                reason: symbol_short!("cancel"),
+                to: c.buyer.clone(),
+                amount: balance,
+            }
+            .publish(&env);
         }
         Ok(())
     }
@@ -1799,13 +2324,21 @@ impl EscrowContract {
     /// `buyer` no longer gates any remaining action (`settle` doesn't
     /// check it), so reassigning it after that point would be a no-op
     /// dressed up as a real transfer.
+    /// Emits [`BuyerReassigned`] after the write so observers learn both the
+    /// outgoing and incoming buyer in a single indexed event (#206).
     pub fn reassign_buyer(env: Env, new_buyer: Address) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_reassign_buyer(&c)?;
         Self::require_once_each(&[&c.buyer, &c.cooperative, &new_buyer]);
 
-        c.buyer = new_buyer;
+        let previous = c.buyer.clone();
+        c.buyer = new_buyer.clone();
         Self::save(&env, &c);
+        BuyerReassigned {
+            previous,
+            new_buyer,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1854,6 +2387,12 @@ impl EscrowContract {
         c.dispute_deadline = env.ledger().timestamp() + c.remainder_window_secs;
         Self::set_status(&env, &mut c, Status::Disputed);
         Self::save(&env, &c);
+        DisputeFlagged {
+            flagger,
+            pre_status: c.dispute_pre_status,
+            deadline: c.dispute_deadline,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1883,6 +2422,11 @@ impl EscrowContract {
         c.dispute_deadline = 0;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
+        DisputeEnded {
+            outcome: DisputeOutcome::Resolved,
+            restored,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1911,8 +2455,14 @@ impl EscrowContract {
         let restored = c.dispute_pre_status;
         c.dispute_pre_status = Status::Draft;
         c.dispute_deadline = 0;
+        c.dispute_count += 1;
         Self::set_status(&env, &mut c, restored);
         Self::save(&env, &c);
+        DisputeEnded {
+            outcome: DisputeOutcome::Expired,
+            restored,
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -1922,6 +2472,11 @@ impl EscrowContract {
     }
 
     /// No auth required — read-only view, returns the full commitment state.
+    ///
+    /// Kept for backward compatibility: existing clients read this storage
+    /// struct directly, and it remains the canonical on-chain record. New
+    /// clients should prefer [`Self::get_commitment_view`], whose shape is
+    /// versioned independently of the storage layout.
     pub fn get_commitment(env: Env) -> Result<Commitment, Error> {
         Self::load(&env)
     }
@@ -2069,6 +2624,14 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
+            Self::can_expire_delivery_window(&c, now),
+            "expire_delivery_window",
+            AuthParty::Anyone,
+            ActionDeadline::Exclusive(c.delivery_deadline.saturating_add(c.remainder_window_secs)),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
             Self::can_confirm_delivery(&c),
             "confirm_delivery",
             AuthParty::WarehouseOperator,
@@ -2088,6 +2651,14 @@ impl EscrowContract {
             Self::can_resolve_fx_shortfall(&env, &c),
             "resolve_fx_shortfall",
             AuthParty::Anyone,
+            ActionDeadline::None,
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_replace_oracle_config(&env, &c),
+            "replace_oracle_config",
+            AuthParty::BuyerAndCooperative,
             ActionDeadline::None,
         );
         Self::push_action(
@@ -2160,6 +2731,20 @@ impl EscrowContract {
         actions
     }
 
+    /// No auth required — the versioned read model (#256).
+    ///
+    /// Same state as `get_commitment`, reshaped into [`CommitmentView`] with
+    /// an explicit `schema_version` and semantic sub-structs, so a field added
+    /// to `Commitment` for storage reasons does not change the client-facing
+    /// ABI. `fx.configured` is read from the same instance-storage entry that
+    /// gates settlement's FX path, so a caller can distinguish "no oracle"
+    /// from "oracle resolved with zeros" without a second call.
+    pub fn get_commitment_view(env: Env) -> Result<CommitmentView, Error> {
+        let c = Self::load(&env)?;
+        let oracle_configured = env.storage().instance().has(&DataKey::OracleConfig);
+        Ok(CommitmentView::from_commitment(&c, oracle_configured))
+    }
+
     // -- internal --
 
     /// The single TTL-extension point for this contract's storage (#98).
@@ -2209,7 +2794,19 @@ impl EscrowContract {
             .ok_or(Error::NotInitialized)
     }
 
+    /// The one state write for `Commitment`, and therefore the one place
+    /// the test-build invariant checker hooks in (#225).
+    ///
+    /// `check_invariants` is compiled in only for `cfg(test)` (the unit
+    /// suite) or the `testutils` feature (so the integration suites in
+    /// `tests/` can assert the same thing with `--features testutils`). It
+    /// is absent from the release WASM — the release build enables neither
+    /// — so this costs the deployed contract exactly nothing; see the
+    /// "WASM Upload vs Instantiation" / build sections of
+    /// `docs/gas-costs.md` for the size discipline this respects.
     fn save(env: &Env, c: &Commitment) {
+        #[cfg(any(test, feature = "testutils"))]
+        c.check_invariants();
         env.storage().instance().set(&DataKey::Commitment, c);
     }
 
@@ -2226,6 +2823,30 @@ impl EscrowContract {
     // commitment (a valid `grade_index`, a non-empty allocation list, a
     // `new_buyer`, a `flagger` that belongs to the deal) stays at the call
     // site; the predicates cover everything the view can actually know.
+    //
+    // The *status* half of every predicate is not written here at all: each
+    // one opens with `require_status`, which reads the single declared
+    // transition table (`Method::allowed_from`, #227). Predicate order still
+    // matters and is unchanged — status first, then flags, then deadlines —
+    // which is what keeps the error-ordering expectations in `src/test.rs`
+    // and `tests/snapshot_replay.rs` valid.
+
+    /// The one status guard (#227): looks `method` up in the declared
+    /// transition table and refuses with `Error::InvalidState` when the
+    /// commitment's current status isn't one of its allowed sources.
+    ///
+    /// `Error::InvalidState` — not a per-method error — is deliberate: it is
+    /// what every hand-written guard returned before this table existed, so
+    /// centralizing them changes no observable behaviour, error variants
+    /// included. A method whose row is `None` (the two tranche-claim pairs)
+    /// has no status gate and this always passes.
+    fn require_status(c: &Commitment, method: Method) -> Result<(), Error> {
+        match method.allowed_from() {
+            None => Ok(()),
+            Some(allowed) if allowed.contains(&c.status) => Ok(()),
+            Some(_) => Err(Error::InvalidState),
+        }
+    }
 
     fn push_action(
         env: &Env,
@@ -2245,9 +2866,7 @@ impl EscrowContract {
     }
 
     fn can_set_allocation(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Draft {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::SetAllocation)?;
         if env.storage().instance().has(&DataKey::Allocation) {
             return Err(Error::AllocationAlreadySet);
         }
@@ -2255,30 +2874,19 @@ impl EscrowContract {
     }
 
     fn can_lock(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Draft {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::Lock)
     }
 
     fn can_mark_checkpoint(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Advance1Released {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::MarkCheckpoint)
     }
 
     fn can_ready_for_delivery(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Advance2Released {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ReadyForDelivery)
     }
 
     fn can_fund_remainder(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::FundRemainder)?;
         if c.remainder_funded {
             return Err(Error::RemainderAlreadyFunded);
         }
@@ -2289,9 +2897,7 @@ impl EscrowContract {
     }
 
     fn can_expire_remainder_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ExpireRemainderWindow)?;
         if c.remainder_funded {
             return Err(Error::RemainderAlreadyFunded);
         }
@@ -2302,24 +2908,24 @@ impl EscrowContract {
     }
 
     fn can_reclaim_on_nondelivery(c: &Commitment, now: u64) -> Result<(), Error> {
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::require_status(c, Method::ReclaimOnNondelivery)?;
         if now <= c.delivery_deadline {
             return Err(Error::DeliveryDeadlineNotPassed);
         }
         Ok(())
     }
 
-    fn can_confirm_delivery(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
+    fn can_expire_delivery_window(c: &Commitment, now: u64) -> Result<(), Error> {
+        Self::require_status(c, Method::ExpireDeliveryWindow)?;
+        let grace_deadline = c.delivery_deadline.saturating_add(c.remainder_window_secs);
+        if now <= grace_deadline {
+            return Err(Error::DeliveryGraceWindowNotPassed);
         }
+        Ok(())
+    }
+
+    fn can_confirm_delivery(c: &Commitment) -> Result<(), Error> {
+        Self::require_status(c, Method::ConfirmDelivery)?;
         if !c.remainder_funded {
             return Err(Error::RemainderNotFunded);
         }
@@ -2337,9 +2943,7 @@ impl EscrowContract {
     }
 
     fn can_settle(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::Settle)?;
         Self::tranches_resolved(c)?;
         if env.storage().instance().has(&DataKey::OracleConfig) {
             if !c.fx_resolved {
@@ -2352,10 +2956,19 @@ impl EscrowContract {
         Ok(())
     }
 
-    fn can_resolve_fx_shortfall(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
+    fn can_replace_oracle_config(env: &Env, c: &Commitment) -> Result<(), Error> {
+        Self::require_status(c, Method::ReplaceOracleConfig)?;
+        if c.fx_resolved {
+            return Err(Error::FxAlreadyResolved);
         }
+        if !env.storage().instance().has(&DataKey::OracleConfig) {
+            return Err(Error::OracleNotConfigured);
+        }
+        Ok(())
+    }
+
+    fn can_resolve_fx_shortfall(env: &Env, c: &Commitment) -> Result<(), Error> {
+        Self::require_status(c, Method::ResolveFxShortfall)?;
         Self::tranches_resolved(c)?;
         if c.fx_resolved {
             return Err(Error::FxAlreadyResolved);
@@ -2367,9 +2980,7 @@ impl EscrowContract {
     }
 
     fn can_refresh_fx_quote_status(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::RefreshFxQuoteStatus)?;
         if c.fx_resolved {
             return Err(Error::FxAlreadyResolved);
         }
@@ -2380,9 +2991,7 @@ impl EscrowContract {
     }
 
     fn can_fund_fx_shortfall(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::FundFxShortfall)?;
         if !c.fx_resolved {
             return Err(Error::FxNotResolved);
         }
@@ -2399,9 +3008,7 @@ impl EscrowContract {
     }
 
     fn can_expire_fx_shortfall_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ExpireFxShortfallWindow)?;
         if !c.fx_resolved {
             return Err(Error::FxNotResolved);
         }
@@ -2417,42 +3024,16 @@ impl EscrowContract {
         Ok(())
     }
 
-    fn is_pre_delivery_status(status: Status) -> bool {
-        matches!(
-            status,
-            Status::Draft
-                | Status::Locked
-                | Status::Advance1Released
-                | Status::CheckpointPassed
-                | Status::Advance2Released
-                | Status::ReadyForDelivery
-        )
-    }
-
     fn can_cancel(c: &Commitment) -> Result<(), Error> {
-        if !Self::is_pre_delivery_status(c.status) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::Cancel)
     }
 
     fn can_reassign_buyer(c: &Commitment) -> Result<(), Error> {
-        if !Self::is_pre_delivery_status(c.status) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ReassignBuyer)
     }
 
     fn can_flag_dispute(c: &Commitment, flagger: &Address) -> Result<(), Error> {
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery
-            | Status::Delivered => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::require_status(c, Method::FlagDispute)?;
         // Kept as the same Address PartialEq expression the #122 audit pins
         // in tests/address_equality.rs, now in one place for the view and the
         // real guard.
@@ -2460,20 +3041,18 @@ impl EscrowContract {
         if flagger != c.buyer && flagger != c.cooperative && flagger != c.warehouse_operator {
             return Err(Error::NotAParty);
         }
+        if c.dispute_count >= MAX_DISPUTE_FLAGS {
+            return Err(Error::DisputeCapReached);
+        }
         Ok(())
     }
 
     fn can_resolve_dispute(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Disputed {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ResolveDispute)
     }
 
     fn can_expire_dispute_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::Disputed {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ExpireDisputeWindow)?;
         if now <= c.dispute_deadline {
             return Err(Error::DisputeWindowNotPassed);
         }
@@ -2521,6 +3100,16 @@ impl EscrowContract {
     /// `advance1_bps + advance2_bps`. See module docs for why funding is
     /// split into this plus `fund_remainder`'s share instead of all at
     /// `lock`, the way earlier versions of this contract worked.
+    ///
+    /// Rounding: this floors the combined basis points once, while each
+    /// tranche payout floors separately, so up to one token unit per
+    /// commitment can stay in the contract after both advances are claimed.
+    /// It is never lost — every terminal path sweeps `balance()`: `cancel`
+    /// and `reclaim_on_nondelivery` refund it to the buyer, `settle` refunds
+    /// it to the buyer unless the settlement obligation still exceeds the
+    /// balance (then it goes to the cooperative with the rest), and
+    /// `expire_remainder_window`/`expire_fx_shortfall_window` sweep it to the
+    /// cooperative. Pinned by `tests/rounding_dust.rs` (#259).
     fn deposit_amount(c: &Commitment) -> i128 {
         Self::bps_amount(
             c.total_amount,
@@ -2581,10 +3170,32 @@ impl EscrowContract {
         }
     }
 
-    fn tranche_required_status(t: Tranche) -> Status {
+    /// The transition-table row for opening a tranche's window. Which
+    /// status admits each tranche is declared in `Method::allowed_from`, not
+    /// here — this only names which row applies.
+    fn open_tranche_method(t: Tranche) -> Method {
         match t {
-            Tranche::One => Status::Locked,
-            Tranche::Two => Status::CheckpointPassed,
+            Tranche::One => Method::ReleaseAdvance1,
+            Tranche::Two => Method::ReleaseAdvance2,
+        }
+    }
+
+    /// The transition-table row for claiming a tranche. That row is
+    /// deliberately ungated (`None`) — see `Method`'s doc — so this is only
+    /// the name of the row, not an extra status rule.
+    fn claim_tranche_method(t: Tranche) -> Method {
+        match t {
+            Tranche::One => Method::ClaimAdvance1,
+            Tranche::Two => Method::ClaimAdvance2,
+        }
+    }
+
+    /// The transition-table row for reclaiming a tranche; ungated for the
+    /// same reason as `claim_tranche_method`.
+    fn reclaim_tranche_method(t: Tranche) -> Method {
+        match t {
+            Tranche::One => Method::ReclaimAdvance1,
+            Tranche::Two => Method::ReclaimAdvance2,
         }
     }
 
@@ -2596,13 +3207,14 @@ impl EscrowContract {
     }
 
     fn can_open_tranche(c: &Commitment, t: Tranche) -> Result<(), Error> {
-        if c.status != Self::tranche_required_status(t) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Self::open_tranche_method(t))
     }
 
     fn can_claim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+        // Asks the table for this method's status rule (which is `None`:
+        // an opened window stays claimable whatever the status has since
+        // become) so every public method's rule is consulted in one place.
+        Self::require_status(c, Self::claim_tranche_method(t))?;
         if Self::tranche_deadline(c, t) == 0 {
             return Err(Error::NotYetOpened);
         }
@@ -2619,6 +3231,8 @@ impl EscrowContract {
     }
 
     fn can_reclaim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+        // Ungated row, same reasoning as `can_claim_tranche` above.
+        Self::require_status(c, Self::reclaim_tranche_method(t))?;
         if Self::tranche_deadline(c, t) == 0 {
             return Err(Error::NotYetOpened);
         }
@@ -2649,6 +3263,10 @@ impl EscrowContract {
         c.cooperative.require_auth();
         Self::can_claim_tranche(&c, t, env.ledger().timestamp())?;
 
+        let tranche_num = match t {
+            Tranche::One => 1u32,
+            Tranche::Two => 2u32,
+        };
         let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
         Self::set_tranche_claimed(&mut c, t);
@@ -2660,6 +3278,12 @@ impl EscrowContract {
                 &amount,
             );
         }
+        TrancheClaimed {
+            tranche: tranche_num,
+            to: c.cooperative.clone(),
+            amount,
+        }
+        .publish(env);
         Ok(())
     }
 
@@ -2668,6 +3292,10 @@ impl EscrowContract {
         c.buyer.require_auth();
         Self::can_reclaim_tranche(&c, t, env.ledger().timestamp())?;
 
+        let tranche_num = match t {
+            Tranche::One => 1u32,
+            Tranche::Two => 2u32,
+        };
         let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
         Self::set_tranche_expired(&mut c, t);
@@ -2679,6 +3307,12 @@ impl EscrowContract {
                 &amount,
             );
         }
+        TrancheReclaimed {
+            tranche: tranche_num,
+            to: c.buyer.clone(),
+            amount,
+        }
+        .publish(env);
         Ok(())
     }
 }
