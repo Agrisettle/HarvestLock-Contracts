@@ -986,7 +986,11 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 23 Nov 2026 — issue #284: added `scripts/test-asset.sh` and
+*Last updated: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
+`reclaimed_by_buyer` calculations into private helpers on `EscrowContract`
+with unit test coverage for all four claimed/reclaimed combinations. Zero
+behaviour change across `settle` and `resolve_fx_shortfall`.
+Prior entry: 23 Nov 2026 — issue #284: added `scripts/test-asset.sh` and
 documented per-role trustline prerequisites in `docs/trustline-prerequisites.md`.
 Deployment 12: issued a 7-decimal classic asset (`HLUSD`), configured issuer
 flags (`AUTH_REVOCABLE`, `AUTH_CLAWBACK_ENABLED`), deployed its Soroban Asset Contract

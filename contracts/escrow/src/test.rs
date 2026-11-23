@@ -6414,6 +6414,64 @@ fn save_rejects_disputed_without_an_open_dispute_window() {
     });
 }
 
+// ---------- issue #285: claimed_by_coop and reclaimed_by_buyer helpers ----------
+
+#[test]
+fn claimed_by_coop_all_four_combinations() {
+    let s = setup(1_500, 2_000);
+    let mut c = s.contract.get_commitment();
+    let adv1 = EscrowContract::bps_amount(c.total_amount, c.advance1_bps);
+    let adv2 = EscrowContract::bps_amount(c.total_amount, c.advance2_bps);
+
+    // 1. Neither tranche claimed (false, false)
+    c.advance1_claimed = false;
+    c.advance2_claimed = false;
+    assert_eq!(EscrowContract::claimed_by_coop(&c), 0);
+
+    // 2. Only advance 1 claimed (true, false)
+    c.advance1_claimed = true;
+    c.advance2_claimed = false;
+    assert_eq!(EscrowContract::claimed_by_coop(&c), adv1);
+
+    // 3. Only advance 2 claimed (false, true)
+    c.advance1_claimed = false;
+    c.advance2_claimed = true;
+    assert_eq!(EscrowContract::claimed_by_coop(&c), adv2);
+
+    // 4. Both advances claimed (true, true)
+    c.advance1_claimed = true;
+    c.advance2_claimed = true;
+    assert_eq!(EscrowContract::claimed_by_coop(&c), adv1 + adv2);
+}
+
+#[test]
+fn reclaimed_by_buyer_all_four_combinations() {
+    let s = setup(1_500, 2_000);
+    let mut c = s.contract.get_commitment();
+    let adv1 = EscrowContract::bps_amount(c.total_amount, c.advance1_bps);
+    let adv2 = EscrowContract::bps_amount(c.total_amount, c.advance2_bps);
+
+    // 1. Neither tranche expired/reclaimed (false, false)
+    c.advance1_expired = false;
+    c.advance2_expired = false;
+    assert_eq!(EscrowContract::reclaimed_by_buyer(&c), 0);
+
+    // 2. Only advance 1 expired/reclaimed (true, false)
+    c.advance1_expired = true;
+    c.advance2_expired = false;
+    assert_eq!(EscrowContract::reclaimed_by_buyer(&c), adv1);
+
+    // 3. Only advance 2 expired/reclaimed (false, true)
+    c.advance1_expired = false;
+    c.advance2_expired = true;
+    assert_eq!(EscrowContract::reclaimed_by_buyer(&c), adv2);
+
+    // 4. Both advances expired/reclaimed (true, true)
+    c.advance1_expired = true;
+    c.advance2_expired = true;
+    assert_eq!(EscrowContract::reclaimed_by_buyer(&c), adv1 + adv2);
+}
+
 mod fx_conversion_property {
     use super::*;
     use proptest::prelude::*;
