@@ -453,6 +453,8 @@ C=$(stellar contract deploy --wasm-hash "$WASM_HASH" --source-account deployer -
 
 # 3. Initialize both (identical parameters), then lock.
 #    native XLM SAC, 100,000,000 stroops, 15%/20% advance split.
+#    Note: For issued assets (e.g. HLUSD/USDC), see scripts/test-asset.sh
+#    and docs/trustline-prerequisites.md for trustline prerequisites.
 for id in "$A" "$C"; do
   stellar contract invoke --id "$id" --source-account buyer --network testnet -- \
     initialize \
@@ -563,6 +565,16 @@ soroban-cost-estimator estimate --wasm … --id "$A" --fn claim_advance_2 --netw
   Everything else in this document runs on the stock v0.1.0 binary.
 - **The two sessions are not directly comparable** — different SDK, different
   WASM. Use the same-session control table for deltas.
+- **The upload/deploy/`initialize` rows were measured on a different artifact
+  from the per-method rows above**, and that is unavoidable: this
+  environment's `stellar-cli` was built without the optional `additional-libs`
+  feature, so `stellar contract optimize` (and `build --optimize`) is a no-op
+  and the local build is the unoptimised **82,567-byte** module rather than
+  the ~15 KB optimized artifact the earlier sessions measured. The
+  upload/rent rows scale with module size (hence the large upload figure); the
+  `initialize` rows' non-refundable half (4,893–5,398 stroops) is
+  execution-only and does not. Re-measure on an optimized build before
+  comparing those absolute numbers against the per-method tables.
 - The SAC balance entries these claims/reclaims touched were created moments
   earlier by `lock` on the same instances. A nth-claim in a long-lived
   commitment may differ in the rent half; the execution half is state-size
@@ -573,46 +585,165 @@ soroban-cost-estimator estimate --wasm … --id "$A" --fn claim_advance_2 --netw
 
 ## WASM Upload vs Instantiation
 
-The deploy flow separates two distinct costs:
+The deploy flow separates three distinct costs: uploading a WASM version
+(once per version), creating a contract instance from that version (once
+per commitment), and `initialize`-ing that instance (once per commitment).
 
-| Operation | Description | Cost (stroops) | Notes |
-|-----------|-------------|----------------|-------|
-| **WASM upload** | One-time upload of the compiled `.wasm` to the Soroban network | ~TBD | Paid once per contract version; hash pinned in deployment config |
-| **Instantiation** | Creating a new commitment instance from an already-uploaded WASM hash | ~TBD | Marginal cost per commitment; scales with initial state size |
+**Measured 23 Nov 2026 against testnet**, with the `stellar-cli` recorded in
+[`cost-estimation.md`](./cost-estimation.md) §5 (**30.0.1**, `stellar-xdr`
+30.0.0), for the artifact this repo builds locally:
 
-To reproduce these measurements locally:
+- `target/wasm32v1-none/release/harvestlock_escrow.wasm`, **82,567 bytes**
+- SHA-256 **`70a9ef3240a0f198f94df687aad215e454dca2f7fa49920af8288767eb112ab6`**
+
+Every figure below is a **real charge from a submitted testnet transaction**
+— not a simulation estimate. `stellar contract upload|deploy|invoke --cost`
+prints the fee box after submission, and its rows are what these columns
+are: *inclusion* fee, the **non-refundable** resource fee (CPU
+instructions + storage read/write + transaction size), the **rent** charged
+up front (storage rent, plus the return value and events that ride in the
+same refundable bucket), how much of that refundable part the network
+returned once actual usage was known, and the net cost that actually left
+the account.
+
+### Upload, deploy, and `initialize`
+
+| Operation | Variant | Inclusion | Non-refundable resource fee | Rent charged | Rent refunded | **Net cost (stroops)** | Notes |
+|-----------|---------|-----------|-----------------------------|--------------|---------------|------------------------|-------|
+| **WASM upload** | 82,567-byte module, first upload of this hash | 100 | 238,760 | 30,854,171 | 4,650,296 | **26,442,735** | One-time per contract version; hash pinned in deployment config |
+| **Instantiation** | `stellar contract deploy --wasm-hash` | 100 | 3,342 | 12,188 | 6,667 | **8,963** | Marginal cost per commitment for the instance entry alone |
+| **`initialize`** | 3-grade schedule, no `oracle_config` | 100 | 4,893 | 4,092,383 | 618,696 | **3,478,680** | The ordinary pilot shape |
+| **`initialize`** | 16-grade schedule, no `oracle_config` | 100 | 5,398 | 4,366,765 | 659,853 | **3,712,410** | `MAX_GRADE_ENTRIES` costs ~233,730 more |
+| **`initialize`** | 3-grade schedule **+** `oracle_config` | 100 | 4,893 | 4,092,387 | 618,696 | **3,478,684** | The oracle config adds ~4 stroops of rent |
+| **`initialize`** | 16-grade schedule **+** `oracle_config` | 100 | 5,398 | 4,370,843 | 660,465 | **3,715,876** | Worst-case onboarding shape |
+
+**The per-commitment onboarding number the API needs** is *deploy +
+initialize*, paid every time a commitment is created:
+
+| Onboarding shape | Deploy | `initialize` | **Total (stroops)** | Total (XLM) |
+|------------------|--------|--------------|---------------------|-------------|
+| 3-grade, no oracle (default) | 8,963 | 3,478,680 | **3,487,643** | 0.3487543 |
+| 16-grade + oracle (worst case) | 8,963 | 3,715,876 | **3,724,839** | 0.3724839 |
+
+So onboarding a commitment costs about **0.35 XLM**, and the grade-count and
+oracle-config knobs move that by at most ~0.024 XLM. Uploading the version
+itself (~2.64 XLM) is a one-time-per-version cost, not a per-commitment one.
+
+Two findings worth carrying into the API's fee budget rather than reading
+off the table alone:
+
+- **`initialize`'s cost is dominated by rent, not computation.** 4,092,383 of
+the 4,097,376 charged stroops (99.9%) is the rent bucket, because the first
+call on any instance runs `bump_instance_ttl`, which extends the instance
+entry to the network maximum (see `docs/storage-ttl.md`). The non-refundable
+execution half is **4,893 stroops** — 0.00049 XLM — for every variant. A
+future change that re-rents less aggressively would move this row more than
+any code optimisation could.
+- **The first `initialize` after an upload is far more expensive than the
+rest.** Measured on a fresh deployment of a freshly uploaded hash:
+766,642,875 stroops charged, 115,000,228 refunded → **651,642,647 net**
+(~65 XLM), about 187× the steady-state `initialize` above. That is
+consistent with `Instance::extend_ttl` extending the *shared WASM code
+entry* along with the instance: rent on the code entry scales with the
+82,567-byte module, so whoever calls first on that hash pays it, once per
+uploaded hash rather than once per commitment. It does not change the
+per-commitment budget above (by then the code entry's TTL is already at
+max), but it is a real deployment-day cost and it is why a single
+`initialize` measured in isolation can look alarming.
+
+### TTL extension rent tradeoff
+
+The fresh-instance `initialize` row above is the available measured
+max-TTL-extension baseline: **4,092,383 stroops gross rent** (618,696 refunded
+in that simulation). To put a deadline-sized extension in context, assuming
+linear rent, a five-second ledger, and the test host's 6,312,000-ledger maximum:
+
+| Extension target | TTL ledgers | Gross rent |
+| --- | ---: | ---: |
+| Max TTL (measured `initialize`) | 6,312,000 | 4,092,383 |
+| 120 days (pro-rata estimate) | 2,073,600 | ~1,344,000 |
+| Difference | 4,238,400 | ~2,748,000 |
+
+The 120-day row is a pro-rata estimate from the measured baseline, **not** a
+second transaction measurement. It excludes any safety margin and later
+remainder, FX, or dispute windows; network rent settings, ledger interval,
+entry size, and current TTL also affect the actual fee. The contract retains
+max-TTL because `Draft` can be locked later and successfully resolved disputes
+can be reopened without consuming the lapse cap, so the current state machine
+does not provide a finite latest reachable deadline to use as a safe cap. See
+[`storage-ttl.md`](./storage-ttl.md#ttl-target-decision) for the reasoning.
+
+### Reproduce
 
 ```bash
-# Upload cost (no --fn flag — measures pure upload)
-soroban-cost-estimator estimate \
-  --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+# 0. The exact artifact measured (from repo root). Note the byte size and
+#    hash — this environment's stellar-cli was built without the optional
+#    `additional-libs` feature, so `--optimize` / `stellar contract optimize`
+#    is a no-op here and the artifact is the unoptimised 82,567-byte module.
+stellar contract build --locked
+sha256sum target/wasm32v1-none/release/harvestlock_escrow.wasm
+# 70a9ef3240a0f198f94df687aad215e454dca2f7fa49920af8288767eb112ab6
 
-# Instantiation cost (with --id pointing to the deployed contract address).
-# v0.1.0's `--arg` takes `key=value` pairs, one per flag, and type-infers each
-# value — see the tooling finding above for what that can and cannot express.
-soroban-cost-estimator estimate \
+# 1. A funded throwaway identity (testnet friendbot).
+stellar keys generate deployer --network testnet --fund
+
+# 2. Upload — once per WASM version. --cost prints the fee box after
+#    submission; the hash goes to stdout.
+WASM_HASH=$(stellar contract upload \
   --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm \
-  --id <DEPLOYED_CONTRACT_ID> \
-  --fn initialize \
-  --arg buyer=<BUYER> --arg cooperative=<SELLER> --arg warehouse_operator=<WAREHOUSE> \
-  --arg token=<TOKEN> --arg total_amount=100000000 --arg advance1_bps=1500 \
-  --arg advance2_bps=2000 --arg claim_window_secs=3600 --arg remainder_window_secs=3600 \
-  --arg delivery_window_secs=86400 --arg contracted_quantity=1000 \
-  --arg grade_price_bps=10000,9000,7500 --arg oracle_config=null
+  --source-account deployer --network testnet --cost 2>/dev/null | tail -1)
+
+# 3. Deploy — once per commitment, from the already-uploaded hash.
+ID=$(stellar contract deploy --wasm-hash "$WASM_HASH" \
+  --source-account deployer --network testnet --cost 2>/dev/null | tail -1)
+
+# 4. Initialize — once per instance, on a FRESH deploy for each variant below
+#    (initialize is one-shot; a second call is AlreadyInitialized).
+#    The native XLM SAC is used as `token`; the buyer is the source account.
+#    (For issued classic assets and trustline setup, see scripts/test-asset.sh & docs/trustline-prerequisites.md).
+TOKEN=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
+BT="--buyer $(stellar keys address deployer) --cooperative $(stellar keys address coop)"
+BT="$BT --warehouse-operator $(stellar keys address wh) --token $TOKEN"
+BT="$BT --total-amount 100000000 --advance1-bps 1500 --advance2-bps 2000"
+BT="$BT --claim-window-secs 3600 --remainder-window-secs 3600"
+BT="$BT --delivery-window-secs 86400 --contracted-quantity 1000"
+
+# 4a. 3 grades, no oracle
+stellar contract invoke --id "$ID" --source-account deployer --network testnet --cost -- \
+  initialize $BT --grade-price-bps '[10000,9000,7500]' --oracle-config null
+
+# 4b. 16 grades, no oracle (MAX_GRADE_ENTRIES)
+stellar contract invoke --id "$ID" --source-account deployer --network testnet --cost -- \
+  initialize $BT --oracle-config null \
+  --grade-price-bps '[10000,9800,9600,9400,9200,9000,8800,8600,8400,8200,8000,7800,7600,7400,7200,7000]'
+
+# 4c./4d. The same two, with an oracle config. This CLI version cannot take
+#    `Option<OracleConfig>` as inline JSON — it answers
+#    "Expected type optional user-defined type 'OracleConfig', but received:
+#    '{...}'" — so the value goes in a file and is passed with
+#    `--oracle_config-file-path` (underscores, as printed by the CLI's own
+#    suggestion):
+cat > /tmp/oracle.json <<'JSON'
+{"oracle_contract":"CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W","price_asset":"GBP","max_age_secs":86400,"denominated_amount":10000000000}
+JSON
+stellar contract invoke --id "$ID" --source-account deployer --network testnet --cost -- \
+  initialize $BT --grade-price-bps '[10000,9000,7500]' \
+  --oracle_config-file-path /tmp/oracle.json
 ```
 
-**This last invocation does not actually work, and the doc says so rather
-than pretending.** The estimator's `--arg` can only express a handful of
-types (bool, integers, strings) — it cannot express an `Address`, a
-`Vec<u32>` or an `Option<OracleConfig>`, all of which `initialize` takes.
-Measuring `initialize` this way is not possible with the tool as it stands.
+`oracle_contract` above is Reflector's testnet fiat oracle (see
+`reflector.rs`); `initialize` only records the config — it calls no oracle —
+so any deployed contract address works for a cost measurement.
 
-It doesn't matter for cost measurement: the estimator's job here is to
-measure an invocation **against an instance that is already deployed and
-already initialized**, which is exactly how it is used throughout this
-document. The deployment and initialization cost of a *new* instance is
-therefore out of reach of this tool, and is left as `~TBD` above rather
-than guessed at.
+**Why the CLI, and not `soroban-cost-estimator`:** the estimator's `--arg`
+can only express bool, integers and strings, so it still cannot encode
+`initialize`'s three `Address`es, its `Vec<u32>` or its
+`Option<OracleConfig>` (see the tooling finding above) — that limitation has
+not changed. The CLI has no such gap: `--grade-price-bps '[10000,9000,7500]'`
+for the vector and `--oracle_config-file-path` for the optional struct. This
+is exactly the division of labour [`cost-estimation.md`](./cost-estimation.md)
+recommends: the CLI is the source of record, the estimator an optional
+reporting add-on.
 
 ## Reproducibility
 

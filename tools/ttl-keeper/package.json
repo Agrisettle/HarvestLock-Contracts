@@ -1,0 +1,14 @@
+{
+  "name": "harvestlock-ttl-keeper",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test ttl-keeper.test.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.4.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  }
+}

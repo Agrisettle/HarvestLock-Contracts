@@ -91,7 +91,7 @@ bounded by a caller-chosen freshness bound rather than trusted outright.
 | **Cooperative** | Their Stellar key; the member list authored pre-`lock` | `set_allocation` (once, pre-`lock`), `claim_advance_*`, `ready_for_delivery`; co-sign `cancel` / `reassign_buyer`; flag a dispute | Attest checkpoint or delivery; cancel alone; force `settle` early; change or amend the allocation after `lock`; receive the remainder before the buyer funds it |
 | **Warehouse operator** | Their Stellar key; their own off-chain grading/appeals process | `mark_checkpoint`, `confirm_delivery` (the attestation that unlocks settlement); flag a dispute | Move funds — the contract never pays the operator anything; adjudicate disputes on chain; alter `grade_price_bps` (fixed at `initialize`); be over-paid or directed anywhere by any call |
 | **Any third party** (stranger, indexer, griefer) | Nothing on chain | Call the 8 permissionless functions, which can only *complete a check the deal already fixed*; call any view | Flag a dispute (`NotAParty`); call any gated function; supply an outcome, destination, or amount to any call; read anything secret — no confidentiality is claimed, none exists |
-| **Reflector oracle** (external) | Its own published quotes | Supply the rate `oracle_rate` / `resolve_fx_shortfall` / `refresh_fx_quote_status` read | Choose the staleness bound, the asset symbol, or the oracle address — all fixed by the buyer at `initialize`; supply a stale quote as if fresh (`OracleStale`, a hard error) |
+| **Reflector oracle** (external) | Its own published quotes | Supply the rate `oracle_rate` / `resolve_fx_shortfall` / `refresh_fx_quote_status` read | Choose the staleness bound, the asset symbol, or the oracle address — all fixed by the buyer at `initialize`; supply a stale or future-dated quote as if fresh (`OracleStale` / `OracleTimestampInFuture`, hard errors) |
 | **HarvestLock / API maintainers** (off-chain) | Which transactions get built and submitted; the reputation store | Build, sign-request, and submit transactions on behalf of users; censor users *off chain*; enforce the default/forfeiture bars app-side | Sign *as* any party, pause, upgrade, drain, or redirect the contract — no HarvestLock address exists anywhere in the contract (PRD §4.5) |
 | **Member farmers** (record subjects) | Their off-chain identity | Nothing — no member key is ever a contract principal | Read or alter their on-chain `member_hash` row; be paid by the contract (v1 `settle` pays the cooperative a lump sum) |
 | **Deployers / maintainers** | Source code, CI, the WASM hash | Ship a new contract version; review PRs | Change a deployed instance — there is no upgrade entrypoint, by design |
@@ -106,9 +106,9 @@ the only funds at risk before then are the buyer's own.
 
 ## The authorization surface in one screen
 
-30 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
+32 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
 single-party gates, 8 permissionless state changes, 3 multi-party mutual
-actions, 1 caller-authenticated flag, 5 no-auth views. The full table with
+actions, 1 caller-authenticated flag, 7 no-auth views. The full table with
 PRD citations is [`authorization-matrix.md`](./authorization-matrix.md) §1;
 this doc only assumes its central invariant:
 
@@ -317,15 +317,17 @@ Revisit if a real dispute ever collides with a deadline this way (see
 `flag_dispute`'s doc comment and [`dispute-scope.md`](./dispute-scope.md) §4).
 
 #### 16. A party flags a dispute to buy time
-**Verdict: accepted risk, and the contract does not bound the
-delay.** Any named party can pause the machine for up to
-`remainder_window_secs` at a time, and because `expire_dispute_window`
-restores the pre-dispute status while `flag_dispute` has no cooldown, bond,
-or per-commitment counter, the flagger can re-flag immediately after each
-expiry. The timeout bounds a *single* freeze, not the strategy. Two claims
-this entry used to make need correcting: a pause *can* change an outcome,
-because a cooperative can flag to block `reclaim_on_nondelivery` and use
-the window to obtain a late `confirm_delivery` (entry 28,
+**Verdict: defended, bounded by `MAX_DISPUTE_FLAGS`.** Any named party
+can pause the machine for up to `remainder_window_secs` at a time.
+`flag_dispute` now checks `dispute_count >= MAX_DISPUTE_FLAGS` (= 3) and
+returns `DisputeCapReached` once that threshold is reached.
+`expire_dispute_window` increments `dispute_count`; unanimous
+`resolve_dispute` does not, so a good-faith dispute that the parties
+resolve together does not cost them a flag. The aggregate delay is now
+bounded at `3 × remainder_window_secs`. Two additional notes: a pause
+*can* change an outcome, because a cooperative can flag to block
+`reclaim_on_nondelivery` and use the window to obtain a late
+`confirm_delivery` (entry 28,
 [`dispute-frontrunning.md`](./dispute-frontrunning.md) §3.1); and the
 freeze leaves other deadlines ticking (entry 15), so it buys time rather
 than curing anything. The flag itself also generates no reputation event,
@@ -466,19 +468,38 @@ scheme, which is the API's to keep — out of this contract's control.
 ### Keys, admin surface, and the token layer
 
 #### 26. Admin, upgrade, pause, or owner takeover
-**Verdict: defended by absence.** There is no admin key, no owner, no
+**Verdict: defended by absence, and the absence is checked against both the exported interface and the compiled artifact.** There is no admin key, no owner, no
 pause, and no upgrade function — nothing exists to steal or extend, which
 is the strongest form of PRD §4.5's "no unilateral drain, pause, or
-redirect" and §16.3's "no upgrade key" answer. No test is possible or
-needed for a capability that doesn't exist; the guard is that any PR adding
-one violates authorization-matrix §4 and PRD §4.5 explicitly. Since #244
-that guard is mechanical as well as a reviewer's judgement:
+redirect" and §16.3's "no upgrade key" answer. Any PR adding
+one violates authorization-matrix §4 and PRD §4.5 explicitly.
+
+Since #244 that guard is mechanical on the exported surface:
 `contracts/escrow/interface.snapshot` pins every exported function, and
 `.github/scripts/check_interface_snapshot.sh` fails on any new entry point
 and names it, so an `upgrade`/`set_admin`/`pause` can't be added without a
-visible diff to that file (docs/versioning.md §6). Consequence
-accepted in exchange: a deployed instance can't be patched in place — a
-change means a new WASM and a new contract ID.
+visible diff to that file (docs/versioning.md §6).
+
+Source review alone is not enough for this claim: a dependency, macro
+expansion, or stray `extern` declaration could link an upgrade or deployer
+host capability without any `pub fn` appearing. The guard on the compiled
+artifact is [`tools/wasm-imports`](../tools/wasm-imports/README.md)
+(#254): it scans the release WASM's import section, maps each short import
+name to its Soroban host function via `soroban-env-common`'s `env.json`,
+fails if `update_current_contract_wasm`, `upload_wasm`, or any of the
+deployer functions (`create_contract`, `create_contract_with_constructor`,
+`create_asset_contract`, `create_external_ref_contract`) is linked, and
+compares the full import list against the committed
+[`imports.snapshot`](../tools/wasm-imports/imports.snapshot) so a new host
+capability appears in review even before it is denylisted. The current
+release artifact imports 28 host functions, all ordinary Soroban surface —
+auth, instance storage/TTL, `call`, events, ledger facts, and
+value/collection encoding — with no `update_*`, `upload_wasm`, or `create_*`
+capability among them; the full list is the committed snapshot. Because a denylisted
+capability is a link-time property, not a reachable code path, there is no
+contract state in which to test for it at runtime; the WASM scan is the
+test. Consequence accepted in exchange: a deployed instance can't be
+patched in place — a change means a new WASM and a new contract ID.
 
 #### 27. One party's key is compromised
 **Verdict: accepted risk, bounded by the actor table.** A stolen key can
@@ -538,6 +559,44 @@ their own deal. Tests pin the mechanical half:
 `zero_claim_window_rejected_at_initialize`,
 `zero_remainder_window_rejected_at_initialize`,
 `zero_delivery_window_rejected_at_initialize`.
+
+**Sub-case: a token that *looks* like SEP-41 and nevertheless misbehaves (#264).**
+A *wrong* token address is a plainly buyer-borne mistake — the buyer picked
+an address that is not SEP-41 and the call fails on first use. A token that
+implements the right interface but has non-standard transfer semantics is a
+subtler matter: the buyer did pick a SEP-41-shaped contract, and the harm
+of a fee-on-transfer leg or a lying `balance()` lands on the cooperative
+(whose settlement is silently short, or whose `settle` traps mid-call),
+not on the buyer who chose the address. This is where "layer-shifted" gets
+narrower: the API can and does choose the token — the real deployments
+only ever pass a SAC (USDC testnet / USDC mainnet). Anything calling
+`initialize` directly still bypasses that, so the contract-side verdict
+stays "accepted risk," but the written-down requirement is now
+"**standard SEP-41 transfer semantics, ideally a Stellar Asset Contract
+(SAC)**" — stated in `initialize`'s doc comment, and pinned by
+`contracts/escrow/tests/nonstandard_token.rs`, which runs the lifecycle
+against two deliberately broken tokens and records what breaks:
+- **Fee-on-transfer** (`transfer(amount)` delivers `amount - fee`):
+  `lock` and `fund_remainder` each leave the escrow short by one fee, and
+  `settle`'s `coop_payment = min(owed, balance)` falls back to `balance`,
+  so the entire escrow drains to the cooperative and the buyer's refund
+  is zero. The buyer pays `TOTAL_AMOUNT` and gets nothing back. The
+  `settle`-leg fee further reduces the on-the-wire receipt; with a
+  fee-on-transfer token every edge between buyer wallet and cooperative
+  wallet silently eats a fee.
+- **`balance()` reports more than held**: `settle`'s coop-payment leg
+  reads the inflated number and the subsequent `token::transfer` traps
+  inside the token when it tries to move stroops that aren't really there.
+  Soroban's atomicity rolls back the call — `status` stays `Delivered`,
+  nothing drains. Same shape with `cancel`: the refund `transfer(balance)`
+  traps, nothing moves. The commitment is stuck, not drained — the
+  "wrongly refused" direction the threat model treats as recoverable,
+  not the "wrongly succeeds and moves money" direction it will not
+  cross.
+
+The on-chain mitigation is no stronger than §4.5's custody-model
+assumption — the buyer picked the token — but the requirement is now
+documented at both the function-doc-comment layer and here, not folklore.
 
 ## Out of scope
 
