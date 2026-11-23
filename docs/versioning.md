@@ -58,6 +58,17 @@ repo deploys a fresh instance per deal from whatever `ESCROW_WASM_HASH` is set
 **callers and the ABI** — does a client written against the previous build have
 to change — not about migrating live instances.
 
+Two companion documents carry the consequences of that immutability, and both
+key off the WASM hash rather than the version label:
+
+- [commitment-schema-history.md](./commitment-schema-history.md) — the exact
+  `Commitment`/`OracleConfig`/`AllocationMember`/`Status`/`Error` shape each
+  deployment below produced, its ScMap key order, and which changes break a
+  decoder built against the latest bindings. Use it to read an old instance.
+- [migration-runbook.md](./migration-runbook.md) — what a release does to
+  in-flight commitments, the per-status cost of unwinding one with `cancel`,
+  and the exact signing sequence for replacing it.
+
 ## 2. Bump rules (decision procedure for the next upload)
 
 Take the diff between the build you're about to upload and the last uploaded
@@ -95,6 +106,35 @@ Two corollaries:
   auth fix, the guard scripts) is `[Unreleased]` and only becomes `0.9.1` (see §3)
   the day it is uploaded.
 
+### 2.1 The read view's own `schema_version` (#256)
+
+§2 versions the *WASM*. One thing inside it has a second, faster-moving
+version: the client-facing commitment shape. `get_commitment` returns the
+storage struct `Commitment` itself, so adding a field for a storage reason is
+silently an ABI change for every indexer. `get_commitment_view` returns
+`CommitmentView` instead, with:
+
+- an explicit `schema_version` (currently `1`, mirroring
+  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`);
+- semantic sub-structs — `parties`, `terms`, `tranches`, `funding`,
+  `delivery`, `fx`, `dispute` — instead of storage order;
+- a documented stability promise: fields are only added, removed, renamed, or
+  re-meaninged with a `schema_version` bump. **Storage-only** changes to
+  `Commitment` never bump it. That is the whole point of the separate view.
+
+`get_commitment` stays for backward compatibility and remains the canonical
+on-chain record. New clients should read the view and reject a
+`schema_version` they don't understand.
+
+The view is a projection of the same single instance-storage read, not a
+second source of truth. Measured on the test host, `get_commitment` costs
+218,476 CPU instructions and `get_commitment_view` 223,471 (≈2.3% more,
+dominated by the shared storage read); the measurement is pinned by
+`get_commitment_view_costs_the_same_order_as_the_storage_struct`, which
+fails if the view ever starts re-reading storage. Host metering undercounts
+the WASM path, so treat those numbers as an order-of-magnitude check rather
+than a network fee estimate.
+
 ## 3. Retroactive mapping of Deployments 1–10
 
 Applying §2 to the recorded history. The "class" column is the input to the
@@ -114,6 +154,11 @@ CHANGELOG; full hashes and per-deployment detail are in HANDOFF.
 | 9 | 2026-09-06 | `7940147d…` | 26 | **BREAKING** — FX shortfall wired into `settle`'s gating; `OracleConfig` gains `denominated_amount` | `0.8.0` |
 | 10 | 2026-09-06 | `21a4bb2e…` | 29 | additive — dispute path (`flag_dispute`/`resolve_dispute`/`expire_dispute_window`), new `Disputed` status | `0.9.0` |
 | *(unreleased)* | — | *(not uploaded)* | — | ABI-identical: #138–#141 overlapping-role auth correctness fix + two CI guard scripts | next upload ⇒ **`0.9.1`** (patch) |
+
+Per-deployment struct shapes and decode compatibility for every hash in that
+table are in [commitment-schema-history.md](./commitment-schema-history.md); the
+operational meaning of a bump for deals that are already open is in
+[migration-runbook.md](./migration-runbook.md).
 
 Notes on the two judgement calls the history forces:
 

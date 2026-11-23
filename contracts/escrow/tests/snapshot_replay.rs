@@ -241,6 +241,7 @@ fn err_name(name: &str) -> Error {
         ("OracleNotConfigured", Error::OracleNotConfigured),
         ("OraclePriceUnavailable", Error::OraclePriceUnavailable),
         ("OracleStale", Error::OracleStale),
+        ("OracleTimestampInFuture", Error::OracleTimestampInFuture),
         ("FxAlreadyResolved", Error::FxAlreadyResolved),
         ("FxNotResolved", Error::FxNotResolved),
         ("FxShortfallUnfunded", Error::FxShortfallUnfunded),

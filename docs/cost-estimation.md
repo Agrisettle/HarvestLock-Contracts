@@ -133,14 +133,19 @@ cases.
 
 ## 5. Caveats on this comparison
 
-- **CLI version.** Verified against the `stellar-cli` present in this
-  environment (**22.0.0**). [HANDOFF.md](../HANDOFF.md)'s toolchain section
-  records the project having used **v28.0.0**. `invoke --cost` and `tx simulate`
-  exist in both; re-confirm their exact output shape against the version your CI
-  pins before finalizing anything that scripts on them.
-- **No live cost run is quoted here.** Producing actual numbers needs a funded
-  source account and a deployed instance on a reachable network; none was run
-  from this environment. The capability claims come from `--help` output (CLI)
-  and the tool's README (estimator), not from fresh executions.
+- **CLI version.** This comparison was originally verified against the
+  `stellar-cli` present in this environment (**22.0.0**);
+  [HANDOFF.md](../HANDOFF.md)'s toolchain section records the project having
+  used **v28.0.0**, and the upload/deploy/`initialize` measurements in
+  [`gas-costs.md`](./gas-costs.md#wasm-upload-vs-instantiation) were taken on
+  **30.0.1**. `invoke --cost` and `tx simulate` exist in all three;
+  re-confirm their exact output shape against the version your CI pins before
+  finalizing anything that scripts on them.
+- **No live cost run is quoted *in this document*.** Producing actual numbers
+  needs a funded source account and a deployed instance on a reachable
+  network; the §1–§4 capability claims come from `--help` output (CLI) and the
+  tool's README (estimator). The per-operation numbers, measured for real from
+  submitted testnet transactions, live in
+  [`gas-costs.md`](./gas-costs.md#wasm-upload-vs-instantiation).
 
 [#92]: https://github.com/Agrisettle/HarvestLock-Contracts/issues/92

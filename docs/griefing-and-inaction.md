@@ -20,12 +20,11 @@ each status pays), [`dispute-stalling.md`](./dispute-stalling.md)
   There is no keeper, no bounty, and no permissionless rescue for the two
   paths that matter most (`reclaim_on_nondelivery` is buyer-gated;
   `confirm_delivery` has no substitute).
-- **One scenario is genuinely stuck: the cooperative never delivers and
-  the buyer never calls `reclaim_on_nondelivery`.** The contract then
-  holds the escrow forever. No third party, not even the operator, can
-  move it. The only unilateral exit is the buyer's, and it is the buyer
-  who benefits from using it — so this needs *both* the cooperative's
-  non-performance and the buyer's inaction (or disappearance).
+- **The previously-stuck scenario (cooperative never delivers, buyer
+  absent) now has a permissionless escape hatch**: `expire_delivery_window`
+  is callable by anyone after `delivery_deadline + remainder_window_secs`.
+  It sets `Forfeited` and returns the balance to the buyer's address,
+  so a lost key no longer locks funds forever. See §2.
 - **Two near-stuck scenarios are worse than they look because the
   griefer pays nothing:** a cooperative that never signals
   `ready_for_delivery`, and an operator that never marks the checkpoint
@@ -50,6 +49,12 @@ each status pays), [`dispute-stalling.md`](./dispute-stalling.md)
 `R = 650,000`; delivery window 120 days. "Griefer cost" means what the
 party doing nothing loses by doing nothing.
 
+Clients no longer need to reproduce this table: the contract's
+`available_actions()` view returns the currently callable functions, each
+with its required `AuthParty` and bounding `ActionDeadline`, derived from
+the same private predicates the real guards use. This table remains the
+human-readable explanation of *why* each row is legal or not.
+
 | Required action | Who must act | What inaction blocks | Who can unstick, and how | Griefer cost | Verdict |
 | --- | --- | --- | --- | --- | --- |
 | `lock` (fund the deposit) | Buyer | Everything; the deal never starts | Nobody. Nothing is escrowed, so nothing is lost | 0 | Safe — no funds at risk |
@@ -64,7 +69,7 @@ party doing nothing loses by doing nothing.
 | `fund_fx_shortfall` | Buyer | `settle` never runs; escrow sits in `Delivered` | **Anyone** via `expire_fx_shortfall_window`; cooperative gets the escrow, buyer barred | Keeps the shortfall; loses the bar only | **Remedy is incomplete** (§3.2) |
 | `resolve_dispute` | All three | The freeze continues | **Anyone** via `expire_dispute_window` after the window; status restored exactly | 0; re-flag possible | Bounded per flag, unbounded in aggregate (`dispute-stalling.md`) |
 | `settle` | **Anyone** | Funds stay in `Delivered` | Anyone; normally the cooperative (it gets paid) or the buyer (it gets the refund) | — | Self-interested caller exists |
-| `reclaim_on_nondelivery` | **Buyer only** | The escrow never returns; `Forfeited` is never recorded | ***Nobody else.*** No permissionless fallback exists | 0; no record unless the buyer acts | **The one genuinely stuck state** (§2) |
+| `reclaim_on_nondelivery` | **Buyer only** | The escrow never returns without the buyer's key; `Forfeited` is never recorded | **Anyone** via `expire_delivery_window` after `delivery_deadline + remainder_window_secs` | 0; no record unless the buyer or the fallback acts | Formerly stuck; see §2 |
 | `cancel` | Buyer + cooperative | No early unwind; a terminal path may still exist | Nobody unilaterally — by design | 0; no record | Mutual by definition; the rescue path for a dead operator (§4.4) |
 | `reassign_buyer` | Current buyer + cooperative + incoming buyer | Irrelevant to funds | — | — | Not a griefing surface |
 
@@ -85,7 +90,7 @@ Two structural notes from the table:
   a specific party — but it means the contract's liveness depends on the
   operator and the buyer being present.
 
-## 2. The genuinely stuck state: cooperative silent, buyer absent
+## 2. The previously stuck state: cooperative silent, buyer absent
 
 Concrete: the buyer locks 350,000, the cooperative claims tranche 1
 (150,000), then never delivers, never signals ready-for-delivery, and
@@ -101,24 +106,29 @@ After `delivery_deadline`:
 - `expire_remainder_window` is not available: it needs
   `ReadyForDelivery`, which the cooperative never triggered.
 - `settle`, `reclaim_advance_*` as a rescue, `expire_dispute_window`,
-  `reassign_buyer` — none apply. `reassign_buyer` needs the current
-  buyer, the cooperative, *and* the incoming buyer; it cannot be used to
-  replace an absent cooperative.
+  `reassign_buyer` — none apply.
 - The operator has no function that can move the balance.
 
-So the 200,000 sits in the contract indefinitely. The buyer is the only
-party with a key to it, and the buyer is the party who has vanished. If
-the buyer is merely slow, the funds are recoverable; if the buyer's key
-is lost or the entity is gone, **there is no path for anyone**. The
-cooperative cannot even clear the commitment: it keeps the 150,000 it
-already claimed and the deal never reaches a terminal status, so
-`api/src/reputation.ts` never records the non-delivery. The cooperative
-that never delivered is not even struck.
+**After `delivery_deadline + remainder_window_secs`** (the grace period):
 
-This is the answer to the issue's "genuinely stuck" question. It is the
-only state where value is locked with no unilateral or permissionless
-exit, and it requires exactly the combination a real pilot can produce:
-a seller who stops performing and a buyer who stops monitoring.
+- **Anyone** can call `expire_delivery_window`. It is permissionless,
+  requires no auth, sets the status to `Forfeited`, and transfers the
+  200,000 to `c.buyer`'s address. If the buyer's key is merely lost, the
+  funds reach the address and the buyer can recover them off-chain or via
+  key recovery. The cooperative's non-delivery is now recorded as
+  `Forfeited` on-chain.
+
+The grace period — `remainder_window_secs`, the same window re-used by
+`fx_shortfall_deadline` and `dispute_deadline` — gives the buyer a full
+window to act unilaterally before the permissionless path opens. A buyer
+who is merely slow still has that window; only a genuinely absent or key-
+lost buyer falls through to the fallback.
+
+The cooperative cannot even clear the commitment prior to this: it keeps
+the 150,000 it already claimed and the deal does not reach a terminal
+status until `expire_delivery_window` (or `reclaim_on_nondelivery`) is
+called. `api/src/reputation.ts` does not record the non-delivery until
+one of those transitions happens.
 
 The mirror case — cooperative delivers, buyer disappears — is **not**
 stuck. `expire_remainder_window` and `expire_fx_shortfall_window` are
@@ -250,7 +260,7 @@ cooperative can accept without a penalty.
 | Buyer never funds FX shortfall | Yes | Anyone (`expire_fx_shortfall_window`) | Cooperative gets stale-rate value; shortfall lost |
 | Cooperative never claims advances | Yes | Buyer (`reclaim_advance_*`) | Buyer recovers the tranche after the window |
 | Cooperative never delivers, buyer present | Yes | Buyer (`reclaim_on_nondelivery`) | Buyer recovers the balance; strike recorded |
-| Cooperative never delivers, buyer absent | **No** | Nobody | **Funds stuck; no strike recorded** |
+| Cooperative never delivers, buyer absent | Yes (after grace) | Anyone (`expire_delivery_window` after `delivery_deadline + remainder_window_secs`) | Buyer's address receives balance; Forfeited recorded |
 | Cooperative never signals ready-for-delivery | Yes, but late | Buyer after `delivery_deadline`, or both via `cancel` | Deposit locked for the whole delivery window; no penalty |
 | Operator never marks checkpoint | Yes, but late | Buyer after `delivery_deadline` | Deposit locked; no penalty for the operator |
 | Operator never confirms delivery | Yes, but late | Buyer after `delivery_deadline`; or both via `cancel` | Remainder locked; no penalty for the operator |
@@ -294,10 +304,10 @@ for the full matrix.
 Listed so the gaps are explicit rather than implied, roughly in
 value-for-complexity order:
 
-1. **A permissionless forfeiture fallback** with a grace period after
-   `delivery_deadline` (destination fixed to the buyer, status
-   `Forfeited`), so §2 cannot happen. This also removes the buyer-gated
-   liveness assumption.
+1. ~~**A permissionless forfeiture fallback**~~ **Implemented** as
+   `expire_delivery_window` (callable after `delivery_deadline +
+   remainder_window_secs`, permissionless, transfers to the buyer,
+   status `Forfeited`). The genuinely-stuck scenario in §2 is closed.
 2. **A `delivery_deadline` guard on `confirm_delivery`**, so late
    delivery cannot beat the forfeiture right — the headline finding of
    [`dispute-frontrunning.md`](./dispute-frontrunning.md), and it also
