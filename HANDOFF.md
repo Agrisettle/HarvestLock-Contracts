@@ -619,7 +619,25 @@ verified to leave every measured value byte-identical on the zero-argument
 path. **Worth reporting upstream** — it blocks the tool for any contract
 with a `u32`/`i32`/`u64` parameter, which is most of them.
 
-**All eleven deployments' instances are validation artifacts, not
+**Deployment 12** (this session, 23 Nov 2026, Issue #284) — WASM hash
+`c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca` (82,917 bytes
+optimized, 34 exported functions). Deployed instance
+`CAB6NIVIIGZ47WM3Y3DFMFJCDAXPRMWBTNJBL74JC2LMC4CDBPBR4TI2`. This deployment
+closed the trustline visibility gap identified in #284: prior live walkthroughs
+relied on the native XLM SAC, which hides the trustline requirement. Added
+`scripts/test-asset.sh` to issue a 7-decimal classic asset (`HLUSD:GDHWDMKSONZUJP74QOLDGLXCW2RJLEDNB6JJOHNOEFGZVZRTKYFSPOZH`),
+configure issuer flags (`AUTH_REVOCABLE`, `AUTH_CLAWBACK_ENABLED`), deploy its
+Soroban Asset Contract (SAC `CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL`),
+establish trustlines for the buyer (`GDOIZBN5SS7QBB2AVJHYMVY47CJK63NB6NHIAN43EZYRU2DSCMI7LFKU`)
+and cooperative (`GD7MTFWUYJA3G7PTRRPH6PWHNEBUGBUFDZGWM2W4UXEQ75YQBNP7DSVI`),
+and mint 100,000,000 stroops to the buyer. Walked through live on testnet:
+instance initialized with the SAC as token, locked by buyer (35,000,000 stroop deposit
+transferred into escrow), tranche 1 released, and successfully claimed by cooperative
+(15,000,000 stroops transferred to cooperative), proving issued-asset settlement and
+trustline mechanics. Documented per-role trustline prerequisites in
+`docs/trustline-prerequisites.md`.
+
+**All twelve deployments' instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -968,7 +986,17 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 21 Nov 2026 — four-issue bundle (#254, #256, #258, #259):
+*Last updated: 23 Nov 2026 — issue #284: added `scripts/test-asset.sh` and
+documented per-role trustline prerequisites in `docs/trustline-prerequisites.md`.
+Deployment 12: issued a 7-decimal classic asset (`HLUSD`), configured issuer
+flags (`AUTH_REVOCABLE`, `AUTH_CLAWBACK_ENABLED`), deployed its Soroban Asset Contract
+(SAC `CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL`), added trustlines for
+buyer and cooperative, minted 100,000,000 stroops to buyer, and verified live on
+testnet through `initialize`, `lock`, `release_advance_1`, and `claim_advance_1`
+(cooperative balance: 15,000,000 stroops). Closes the trustline visibility gap
+from prior native-XLM-only walkthroughs.
+
+Prior entry: 21 Nov 2026 — four-issue bundle (#254, #256, #258, #259):
 one new contract read view, a real FX-decimals bug fix, rounding-dust tests,
 and a new WASM-capability guard. **No workflow files touched** (maintainer
 policy), and the contract's storage `Commitment` struct is unchanged.
