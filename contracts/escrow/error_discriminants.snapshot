@@ -60,3 +60,4 @@ DeliveryGraceWindowNotPassed = 41
 DisputeCapReached = 42
 DeliveryDeadlinePassed = 43
 OracleConversionOutOfRange = 44
+OracleTimestampInFuture = 45

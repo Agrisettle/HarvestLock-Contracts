@@ -430,6 +430,9 @@ pub enum Error {
     /// represented as an `i128`; settlement must not trap on unusable oracle
     /// values.
     OracleConversionOutOfRange = 44,
+    /// The configured Reflector oracle returned a quote timestamp later than
+    /// the current ledger timestamp; future quotes cannot satisfy freshness.
+    OracleTimestampInFuture = 45,
 }
 
 #[contracttype]
@@ -1546,7 +1549,10 @@ impl EscrowContract {
         }
 
         let now = env.ledger().timestamp();
-        let age = now.saturating_sub(quote.timestamp);
+        if quote.timestamp > now {
+            return Err(Error::OracleTimestampInFuture);
+        }
+        let age = now - quote.timestamp;
         if age > config.max_age_secs {
             return Err(Error::OracleStale);
         }
