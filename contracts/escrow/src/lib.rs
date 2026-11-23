@@ -169,6 +169,25 @@ use soroban_sdk::{
     Address, BytesN, Env, Symbol, Vec,
 };
 
+// Build metadata embedded in the WASM's `contractmetav0` custom section (#246),
+// so a deployed contract can say which version and source it came from without
+// a lookup in CHANGELOG.md. Read it back with:
+//
+//   stellar contract info meta --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+//
+// Both values come from Cargo, so there is one place to change each:
+// `version` from `contracts/escrow/Cargo.toml`'s `version` (kept in step with
+// the deployment line per docs/versioning.md §5), `repository` from the
+// workspace `[workspace.package] repository`. Deliberately no timestamp, git
+// hash or other build-environment value: those would differ between two clean
+// builds of the same commit and break the `build-wasm` reproducibility check.
+// See docs/versioning.md §6.
+soroban_sdk::contractmeta!(
+    key = "version",
+    val = concat!("escrow-v", env!("CARGO_PKG_VERSION"))
+);
+soroban_sdk::contractmeta!(key = "repository", val = env!("CARGO_PKG_REPOSITORY"));
+
 /// Maximum number of entries `initialize` accepts in `grade_price_bps`.
 /// Deliberately generous — the PRD's grading examples are 3 tiers (A/B/C),
 /// so 16 leaves headroom for any realistic refinement while keeping the
@@ -183,6 +202,19 @@ pub const MAX_GRADE_ENTRIES: u32 = 16;
 /// longer than that is a caller mistake, not a bigger cooperative. See the
 /// `AllocationTooLarge` error.
 pub const MAX_ALLOCATION_MEMBERS: u32 = 200;
+
+/// Largest `OracleConfig::denominated_amount` `initialize` accepts (#247):
+/// the biggest value for which `bps_amount(denominated_amount, 10_000)` —
+/// `denominated_amount * 10_000`, the largest multiply `resolve_fx_shortfall`
+/// performs on it, since `settlement_bps` never exceeds 10_000 — still fits
+/// in an `i128`. Anything above would make settlement trap on overflow
+/// rather than be refused up front with `InvalidOracleConfig`.
+///
+/// This bounds only the `bps_amount` step. The later
+/// `ngn_owed * rate.price` multiply depends on a live oracle value that
+/// `initialize` cannot know, and is the F4 finding pinned in
+/// `tests/oracle_fault_injection.rs`.
+pub const MAX_DENOMINATED_AMOUNT: i128 = i128::MAX / 10_000;
 
 /// Largest `total_amount` `initialize` accepts.
 ///
@@ -338,10 +370,14 @@ pub enum Error {
     InvalidAllocation = 22,
     /// `get_allocation` called before `set_allocation` ever ran.
     AllocationNotSet = 23,
-    /// `initialize`'s `oracle_config` was `Some` with `max_age_secs == 0`
-    /// — a zero staleness bound would reject every real quote, which is
-    /// never what a caller actually wants (that's what leaving
-    /// `oracle_config` as `None` is for).
+    /// `initialize`'s `oracle_config` was `Some` with either:
+    /// - `max_age_secs == 0`: a zero staleness bound would reject every
+    ///   real quote, which is never what a caller actually wants (that's
+    ///   what leaving `oracle_config` as `None` is for); or
+    /// - `denominated_amount <= 0` or `> MAX_DENOMINATED_AMOUNT` (#247):
+    ///   a non-positive value would make `resolve_fx_shortfall` owe the
+    ///   cooperative nothing after a full delivery, and an oversized one
+    ///   would overflow `bps_amount` and trap at settlement.
     InvalidOracleConfig = 24,
     /// `oracle_rate` or `resolve_fx_shortfall` called but `initialize`
     /// never set an `oracle_config` for this commitment — the only two
@@ -433,6 +469,20 @@ pub enum Error {
     /// The configured Reflector oracle returned a quote timestamp later than
     /// the current ledger timestamp; future quotes cannot satisfy freshness.
     OracleTimestampInFuture = 45,
+    /// The configured oracle contract could not answer at all (#245): the
+    /// cross-contract `lastprice` or `decimals` call failed in a way the
+    /// host lets the caller recover from. That covers an
+    /// `oracle_config.oracle_contract` with no contract deployed behind it,
+    /// a callee that panics or traps, and a callee whose reply doesn't
+    /// decode as the expected type. Distinct from `OraclePriceUnavailable`,
+    /// which means the oracle *did* answer and quotes no such asset.
+    ///
+    /// Not every failure can become this error: the host still aborts the
+    /// whole invocation, with no contract error to return, when the
+    /// callee uses up the transaction's shared CPU/memory budget. See the
+    /// header of `tests/oracle_fault_injection.rs` for which failures are
+    /// recoverable and which still abort.
+    OracleUnavailable = 46,
 }
 
 #[contracttype]
@@ -484,6 +534,15 @@ pub struct OracleConfig {
     /// oracle, read live at settlement and assumed immutable (see
     /// `docs/reflector-decimals-assumption.md`, issue #63); this field is
     /// the deal's value in the same 7-decimal units as `total_amount`.
+    ///
+    /// **Must be in `1..=MAX_DENOMINATED_AMOUNT`** (#247), or `initialize`
+    /// refuses with `InvalidOracleConfig`. Zero or negative would make
+    /// `resolve_fx_shortfall`'s `fx_adjusted_total <= 0`, so `settle` would
+    /// pay the cooperative nothing and refund everything to the buyer after
+    /// a full delivery. Above `MAX_DENOMINATED_AMOUNT` (`i128::MAX / 10_000`),
+    /// `bps_amount(denominated_amount, settlement_bps)` would overflow and
+    /// trap at settlement. Both mistakes are caught at deploy time instead
+    /// of only showing up when the deal settles.
     pub denominated_amount: i128,
 }
 
@@ -1419,6 +1478,19 @@ impl EscrowContract {
             if oc.max_age_secs == 0 {
                 return Err(Error::InvalidOracleConfig);
             }
+            // #247: `denominated_amount` is what decides the cooperative's
+            // payout on an oracle deal (`resolve_fx_shortfall` reprices it),
+            // so it gets the same "must be positive" bar `total_amount` gets
+            // above. Zero or negative would make `fx_adjusted_total <= 0`,
+            // clamp `owed_from_remainder` to 0, and let `settle` refund the
+            // whole escrow to the buyer after a full delivery. The upper
+            // bound rejects any value for which `bps_amount(_, 10_000)` —
+            // the largest multiplier `resolve_fx_shortfall` can apply, since
+            // `settlement_bps <= 10_000` — would overflow `i128` and trap at
+            // settlement instead of being refused here.
+            if oc.denominated_amount <= 0 || oc.denominated_amount > MAX_DENOMINATED_AMOUNT {
+                return Err(Error::InvalidOracleConfig);
+            }
         }
         buyer.require_auth();
 
@@ -1539,10 +1611,21 @@ impl EscrowContract {
     /// rather than re-reading storage, since `resolve_fx_shortfall`
     /// already has its own copy in hand and needs the rest of it
     /// (`denominated_amount`) right after this call.
+    ///
+    /// Uses the generated `try_lastprice`, not the panicking `lastprice`
+    /// (#245). A missing or crashing oracle, or a reply that doesn't decode
+    /// as `Option<PriceData>`, comes back as `Error::OracleUnavailable`
+    /// instead of aborting the caller's whole invocation.
     fn read_oracle_rate(env: &Env, config: &OracleConfig) -> Result<OracleRate, Error> {
         let client = ReflectorPulseClient::new(env, &config.oracle_contract);
-        let quote = client
-            .lastprice(&ReflectorAsset::Other(config.price_asset.clone()))
+        let quote =
+            match client.try_lastprice(&ReflectorAsset::Other(config.price_asset.clone())) {
+                Ok(Ok(quote)) => quote,
+                // Outer `Err`: the call itself failed (no contract there, the
+                // callee panicked or returned an error). Inner `Err`: it
+                // answered, but not with a value of the expected type.
+                Ok(Err(_)) | Err(_) => return Err(Error::OracleUnavailable),
+            }
             .ok_or(Error::OraclePriceUnavailable)?;
         if quote.price <= 0 {
             return Err(Error::OraclePriceInvalid);
@@ -2139,8 +2222,14 @@ impl EscrowContract {
             .ok_or(Error::OracleNotConfigured)?;
 
         let rate = Self::read_oracle_rate(&env, &oracle_config)?;
+        // `try_decimals`, not `decimals` (#245): `lastprice` just succeeded
+        // above, but the oracle can still fail on this second call, and
+        // that should also be a contract error rather than a host abort.
         let oracle_decimals =
-            ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+            match ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).try_decimals() {
+                Ok(Ok(decimals)) => decimals,
+                Ok(Err(_)) | Err(_) => return Err(Error::OracleUnavailable),
+            };
         let token_decimals = token::Client::new(&env, &c.token).decimals();
 
         let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
@@ -2218,9 +2307,20 @@ impl EscrowContract {
     /// instead of setting anything: "the oracle doesn't quote this asset
     /// at all" is a permanent configuration gap, not "come back later",
     /// and conflating the two would tell a watcher to wait for something
-    /// that may never arrive. Host-level failures (unreachable/crashed
-    /// oracle) likewise write nothing — same fault-injection findings as
-    /// `oracle_rate` (F1).
+    /// that may never arrive.
+    ///
+    /// An unreachable or crashing oracle (#245) now comes back as
+    /// `Error::OracleUnavailable`, not a host abort, and like
+    /// `OraclePriceUnavailable` it also writes nothing. Two reasons to
+    /// return the error rather than set `fx_quote_stale` or add a new flag:
+    /// (a) `oracle_config` has no setter, so an address with no contract
+    /// behind it is just as permanent a misconfiguration as an unquoted
+    /// asset, and telling a watcher to wait would be wrong; (b) a new
+    /// `Commitment` field would change `get_commitment`'s return shape (an
+    /// ABI change under docs/versioning.md §2) for information the caller
+    /// already gets from the error code. What changes for callers is that
+    /// the probe now *returns* that error code instead of aborting, so the
+    /// API can record why settlement is stuck instead of just "unreadable".
     ///
     /// The flag is **informational only**: no guard reads it, and
     /// `resolve_fx_shortfall` still enforces staleness itself — its

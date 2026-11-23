@@ -1213,6 +1213,108 @@ fn initialize_rejects_a_zero_max_age_secs_oracle_config() {
     assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
 }
 
+/// What a generated `try_initialize` returns.
+type TryInitializeResult =
+    Result<Result<(), soroban_sdk::ConversionError>, Result<Error, soroban_sdk::InvokeError>>;
+
+/// #247 helper: `initialize` with an otherwise-valid oracle config whose
+/// `denominated_amount` is `denominated_amount`. Returns the result and the
+/// client, so a test can check that nothing was stored.
+fn try_initialize_with_denominated_amount(
+    env: &Env,
+    denominated_amount: i128,
+) -> (TryInitializeResult, EscrowContractClient<'_>) {
+    let buyer = Address::generate(env);
+    let cooperative = Address::generate(env);
+    let warehouse = Address::generate(env);
+    let token_admin = Address::generate(env);
+    let (token_address, _token, _admin) = create_token(env, &token_admin);
+    let oracle_id = env.register(mock_oracle::MockOracle, ());
+
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(env, &contract_id);
+
+    let result = contract.try_initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &1_000_000,
+        &1_500,
+        &1_500,
+        &WINDOW,
+        &REMAINDER_WINDOW,
+        &DELIVERY_WINDOW,
+        &CONTRACTED_QUANTITY,
+        &Vec::from_array(env, GRADE_PRICE_BPS),
+        &Some(OracleConfig {
+            oracle_contract: oracle_id,
+            price_asset: Symbol::new(env, "NGN"),
+            max_age_secs: 3_600,
+            denominated_amount,
+        }),
+    );
+    (result, contract)
+}
+
+#[test]
+fn initialize_rejects_a_zero_denominated_amount() {
+    // #247: a zero deal value would make `resolve_fx_shortfall` owe the
+    // cooperative nothing, so `settle` would refund the buyer in full after
+    // a full delivery. Refused up front, same as `total_amount`'s ZeroAmount.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (result, contract) = try_initialize_with_denominated_amount(&env, 0);
+    assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
+    assert_eq!(
+        contract.try_get_oracle_config(),
+        Err(Ok(Error::NotInitialized)),
+        "a refused initialize must store nothing"
+    );
+}
+
+#[test]
+fn initialize_rejects_a_negative_denominated_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (result, _) = try_initialize_with_denominated_amount(&env, -1);
+    assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
+    let (result, _) = try_initialize_with_denominated_amount(&env, i128::MIN);
+    assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
+}
+
+#[test]
+fn initialize_rejects_a_denominated_amount_that_would_overflow_bps_amount() {
+    // #247: one past the bound, `denominated_amount * 10_000` (the
+    // `bps_amount` step at full `settlement_bps`) no longer fits in an i128.
+    let env = Env::default();
+    env.mock_all_auths();
+    assert!(MAX_DENOMINATED_AMOUNT.checked_mul(10_000).is_some());
+    assert!((MAX_DENOMINATED_AMOUNT + 1).checked_mul(10_000).is_none());
+
+    let (result, _) = try_initialize_with_denominated_amount(&env, MAX_DENOMINATED_AMOUNT + 1);
+    assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
+    let (result, _) = try_initialize_with_denominated_amount(&env, i128::MAX);
+    assert_eq!(result, Err(Ok(Error::InvalidOracleConfig)));
+}
+
+#[test]
+fn initialize_accepts_denominated_amount_at_both_bounds() {
+    // The smallest and largest accepted values both pass, so the guard is
+    // exactly `1..=MAX_DENOMINATED_AMOUNT` and doesn't reject more than it
+    // should.
+    for amount in [1, MAX_DENOMINATED_AMOUNT] {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (result, contract) = try_initialize_with_denominated_amount(&env, amount);
+        assert_eq!(result, Ok(Ok(())), "amount {amount} should be accepted");
+        assert_eq!(
+            contract.get_oracle_config().unwrap().denominated_amount,
+            amount
+        );
+    }
+}
+
 #[test]
 fn oracle_rate_is_callable_after_settlement() {
     // A pure read against Reflector's own history, not a state

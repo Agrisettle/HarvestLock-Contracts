@@ -468,12 +468,17 @@ scheme, which is the API's to keep — out of this contract's control.
 ### Keys, admin surface, and the token layer
 
 #### 26. Admin, upgrade, pause, or owner takeover
-**Verdict: defended by absence, and the absence is checked against the
-compiled artifact.** There is no admin key, no owner, no pause, and no
-upgrade function — nothing exists to steal or extend, which is the
-strongest form of PRD §4.5's "no unilateral drain, pause, or redirect" and
-§16.3's "no upgrade key" answer. Any PR adding one violates
-authorization-matrix §4 and PRD §4.5 explicitly.
+**Verdict: defended by absence, and the absence is checked against both the exported interface and the compiled artifact.** There is no admin key, no owner, no
+pause, and no upgrade function — nothing exists to steal or extend, which
+is the strongest form of PRD §4.5's "no unilateral drain, pause, or
+redirect" and §16.3's "no upgrade key" answer. Any PR adding
+one violates authorization-matrix §4 and PRD §4.5 explicitly.
+
+Since #244 that guard is mechanical on the exported surface:
+`contracts/escrow/interface.snapshot` pins every exported function, and
+`.github/scripts/check_interface_snapshot.sh` fails on any new entry point
+and names it, so an `upgrade`/`set_admin`/`pause` can't be added without a
+visible diff to that file (docs/versioning.md §6).
 
 Source review alone is not enough for this claim: a dependency, macro
 expansion, or stray `extern` declaration could link an upgrade or deployer
