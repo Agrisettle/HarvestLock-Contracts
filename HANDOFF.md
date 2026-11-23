@@ -968,7 +968,51 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 21 Nov 2026 — four-issue bundle (#254, #256, #258, #259):
+*Last updated: 23 Nov 2026 — two-issue bundle (#220, #221): one event
+encoding change, and a new fuzz crate for the XDR boundary. **No workflow
+files touched** (maintainer policy), and the contract's storage
+`Commitment` struct and every entry point's behaviour are unchanged.*
+
+- **#220 — event payload encoding.** `StatusChanged` and
+  `FxQuoteStaleChanged` now declare `#[contractevent(data_format =
+  "single-value")]`, the measured-smallest encoding for 0/1-data-field
+  events: a probe event is 128 bytes / 16,733 CPU vs 132 bytes / 17,798 CPU
+  for the default `map` (and 132 / 17,295 for `vec`). No consumer-visible
+  field changes — only the empty/one-value payload tag. Multi-field events
+  stay on the `map` default deliberately: `vec` is smaller
+  (192 → 120 bytes, ~4,236 fewer CPU instructions) but positional, and
+  `tests/event_sourcing.rs` rebuilds state from named fields, so the 72-byte
+  saving is not worth losing field names; `single-value` is illegal for them
+  anyway (the macro rejects >1 data field). New
+  `contracts/escrow/tests/event_cost.rs` reproduces the numbers offline via
+  `env.cost_estimate()` and asserts the documented ranking, including the
+  shipped `StatusChanged`. Write-up in `docs/gas-costs.md` §"Event emission
+  by `data_format`"; comments on both event declarations point there.
+- **#221 — XDR-boundary fuzzing.** New standalone crate `fuzz/` (not a
+  workspace member, so `cargo test` at the repo root never builds it) with a
+  cargo-fuzz target `entry_points` whose harness lives in `fuzz/src/lib.rs`.
+  Each iteration deploys token + escrow, initializes a valid commitment,
+  takes a short random walk through legal calls, then invokes one of the 34
+  public functions through `Env::try_invoke_contract` with values built from
+  fuzz bytes — declared shapes with fuzzed/oversized contents, wrong types,
+  wrong arity, malformed `OracleConfig`/`Option` shapes. Accepted outcomes
+  are a contract `Error`, a host/SDK conversion error, or success; a success
+  must leave a readable commitment that passes `check_invariants`, and any
+  escaping panic is a crash. The same harness runs as a 250-input
+  deterministic smoke test on stable (`cd fuzz && cargo test --lib`), which
+  is what has actually been run: clean. A full libFuzzer campaign needs
+  nightly and a time budget and was **not** run; no workflow file was
+  touched, so the smoke test is not in CI yet. Seeds live in
+  `fuzz/corpus/entry_points/`; generated `fuzz/test_snapshots/` is ignored.
+
+Verified: `cargo fmt --check` clean; `cargo test` **301 passing** (215 unit +
+86 integration across the fourteen suites, `event_cost` being the new one);
+`cd fuzz && cargo test --lib` 1 passing; both guard scripts green
+(discriminants 1..43; all 35 public-method doc comments name their auth
+party). Test-snapshot policy unchanged: new snapshots left untracked. The
+scratch `tests/tmp_measure.rs` used to collect the numbers was deleted.
+
+Prior entry: 21 Nov 2026 — four-issue bundle (#254, #256, #258, #259):
 one new contract read view, a real FX-decimals bug fix, rounding-dust tests,
 and a new WASM-capability guard. **No workflow files touched** (maintainer
 policy), and the contract's storage `Commitment` struct is unchanged.

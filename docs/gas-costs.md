@@ -22,6 +22,83 @@ compared without guessing at the SDK-version delta — see
 
 ---
 
+## Event emission by `data_format` (#220)
+
+`#[contractevent]` supports three wire encodings for an event's `data`
+payload. Event bytes are a billed resource (the network's
+`contract_events_size_bytes` limit is 16,384 bytes per transaction, and rent
+is charged per KB by `env.cost_estimate().fee()`'s `fee_per_contract_event_1kb:
+5000`), and the format is fixed at the type declaration, so every future
+emission of that event pays it. This section measures all three on the two
+shapes this contract actually has.
+
+These numbers are **in-process**, from `env.cost_estimate()` against the
+test host — not a submitted transaction. They are deterministic and useful
+for ranking and for catching a format regression; they are *not* comparable
+to the testnet tables above (no WASM instantiation, no rent, no envelope).
+Reproduce with:
+
+```bash
+cd contracts/escrow
+cargo test --test event_cost -- --nocapture
+```
+
+### Zero-data-field event (the `StatusChanged` shape)
+
+Two topics, no `data` fields. The only thing `data_format` changes is the
+empty container it carries.
+
+| `data_format` | Event bytes | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `map` (macro default) | 132 | 17,798 | 6,399 |
+| `vec` | 132 | 17,295 | 6,383 |
+| **`single-value`** | **128** | **16,733** | **6,306** |
+
+The two topics are `Status` values and are identical in all three rows; so
+is the event name. Only the payload tag differs. `single-value` is 4 bytes
+and ~1,065 CPU instructions cheaper than the default here.
+
+### Three-data-field event (the `DeliveryConfirmed` shape)
+
+One topic, three data fields.
+
+| `data_format` | Event bytes | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `map` (macro default) | 192 | 19,946 | 6,589 |
+| **`vec`** | **120** | **15,710** | **6,210** |
+| `single-value` | — | — | not legal: the macro requires at most one data field |
+
+`vec` is 72 bytes (37.5%) and ~4,236 CPU instructions smaller. The gap is
+the map's per-field name keys (`delivered_quantity`, `settlement_bps`, …),
+which `vec` replaces with position.
+
+### The rule this contract follows, and why
+
+- **`single-value` for events with 0 or 1 data field.** It is strictly the
+  smallest encoding, loses no information a consumer uses (there is no field
+  name to preserve), and is applied to the shipped `StatusChanged` and
+  `FxQuoteStaleChanged`. `StatusChanged` shipping at `single-value` measures
+  **120 bytes / 4,682 CPU / 503 memory bytes** when published by itself.
+- **`map` for events with two or more data fields.** `vec` is measurably
+  smaller, but at this scale the saving is not worth surrendering the field
+  names: 72 bytes is ~352 stroops per event at the SDK's 5,000-stroop/KB
+  snapshot rate, against a 16,384-byte transaction budget — while a
+  positional encoding makes every indexer depend on field order, and a
+  future field insertion silently reinterprets existing data. Named fields
+  keep the event stream self-describing, which is the property
+  `tests/event_sourcing.rs` relies on to rebuild state from events alone.
+  The default is therefore kept **deliberately**, not by inertia.
+- **`single-value` is not available for multi-field events at all** — the
+  macro rejects it at compile time, so it was never a candidate for
+  `DeliveryConfirmed`, `Payout`, `FxResolved`, or the other multi-field
+  events.
+
+The comment above each affected event in `contracts/escrow/src/lib.rs`
+points back to this section, so the next event author sees the measurement
+before choosing a format.
+
+---
+
 ## Results — delivery group (`mark_checkpoint`, `confirm_delivery`)
 
 Session 2, measured against instance
