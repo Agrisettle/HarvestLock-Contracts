@@ -6413,3 +6413,37 @@ fn save_rejects_disputed_without_an_open_dispute_window() {
         EscrowContract::save(&s.env, &corrupted);
     });
 }
+
+mod fx_conversion_property {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn checked_conversion_matches_u128_reference(
+            (denominated, price) in prop_oneof![
+                (0i128..=i64::MAX as i128, 1i128..=i64::MAX as i128),
+                Just((i128::MAX, 2i128)),
+            ],
+            decimals in 0u32..=50,
+        ) {
+            let numerator = (denominated as u128).checked_mul(price as u128);
+            let divisor = 10u128.checked_pow(decimals);
+            let expected = match (numerator, divisor) {
+                (Some(n), Some(d))
+                    if n <= i128::MAX as u128 && d <= i128::MAX as u128 =>
+                {
+                    Ok((n / d) as i128)
+                }
+                _ => Err(Error::OracleConversionOutOfRange),
+            };
+
+            prop_assert_eq!(
+                EscrowContract::checked_fx_conversion(denominated, price, decimals),
+                expected
+            );
+        }
+    }
+}
