@@ -453,6 +453,8 @@ C=$(stellar contract deploy --wasm-hash "$WASM_HASH" --source-account deployer -
 
 # 3. Initialize both (identical parameters), then lock.
 #    native XLM SAC, 100,000,000 stroops, 15%/20% advance split.
+#    Note: For issued assets (e.g. HLUSD/USDC), see scripts/test-asset.sh
+#    and docs/trustline-prerequisites.md for trustline prerequisites.
 for id in "$A" "$C"; do
   stellar contract invoke --id "$id" --source-account buyer --network testnet -- \
     initialize \
@@ -698,6 +700,7 @@ ID=$(stellar contract deploy --wasm-hash "$WASM_HASH" \
 # 4. Initialize — once per instance, on a FRESH deploy for each variant below
 #    (initialize is one-shot; a second call is AlreadyInitialized).
 #    The native XLM SAC is used as `token`; the buyer is the source account.
+#    (For issued classic assets and trustline setup, see scripts/test-asset.sh & docs/trustline-prerequisites.md).
 TOKEN=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
 BT="--buyer $(stellar keys address deployer) --cooperative $(stellar keys address coop)"
 BT="$BT --warehouse-operator $(stellar keys address wh) --token $TOKEN"
