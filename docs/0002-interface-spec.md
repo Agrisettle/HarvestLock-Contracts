@@ -505,13 +505,32 @@ Each method entry has the following fields:
 
 ---
 
+### 31. `available_actions`
+
+```json
+{
+  "name": "available_actions",
+  "args": [],
+  "returns": "Vec<Action>",
+  "errors": [],
+  "state_transition": null,
+  "auth_requirement": "permissionless"
+}
+```
+
+*No auth required — read-only view, callable by anyone. Returns every state-changing call the current commitment currently permits, each as an `Action { function, auth, deadline }` where `function` is the Soroban symbol to invoke, `auth` is the party whose `require_auth()` the call needs (or `Anyone` for permissionless calls), and `deadline` bounds the call by timestamp (`None` when no timing gate applies, `Inclusive(T)` when legal up to and including `T`, `Exclusive(T)` when legal only strictly after `T`).*
+
+*Every entry is produced by the same private guard predicate (`can_lock`, `can_claim_tranche`, `can_settle`, …) the real method calls, so the view cannot drift from the checks that actually authorize the call. `initialize` is deliberately excluded (there is no commitment to derive actions from before it runs — an empty list is returned), and the read-only getters/`oracle_rate` are excluded (they do not change state and are always callable). Oracle-backed actions are advertised purely from local state (a configured oracle and an unresolved FX step); quote freshness is an external read, so an advertised `resolve_fx_shortfall` can still return `Error::OracleStale` until the oracle publishes a fresh quote — the `fx_quote_stale` flag on `get_commitment` is the companion "waiting on a fresh quote" signal.*
+
+---
+
 ## Summary
 
-| Total Methods | 30 public methods |
+| Total Methods | 31 public methods |
 |---|---|
 | Auth-gated | 11 methods require explicit auth (buyer/cooperative/warehouse_operator) |
-| Permissionless | 19 methods are permissionless reads or state transitions that don't require auth |
-| State transitions | 12 methods change contract status, 8 are pure reads |
+| Permissionless | 20 methods are permissionless reads or state transitions that don't require auth |
+| State transitions | 12 methods change contract status, 9 are pure reads |
 | Error variants | 38 distinct `Error` variants across all methods |
 
 *This specification is deliberately JSON-structured so that SDK generators, test-harness automata, or a second independent client implementation can programmatically discover and validate every call site against the contract's actual interface, without needing to parse Rust doc comments or guess at argument ordering.*
