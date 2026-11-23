@@ -4,7 +4,8 @@
 //! contract calls *out* to a contract it does not control. Everything here
 //! drives that call through deliberately broken oracles and asserts the
 //! documented degradation — `OracleNotConfigured` / `OraclePriceUnavailable`
-//! / `OracleStale` — plus the non-positive-price guard
+//! / `OracleStale` / `OracleTimestampInFuture` — plus the
+//! non-positive-price guard
 //! (`OraclePriceInvalid`) — rather than a panic escaping or a wrong number
 //! coming back.
 //!
@@ -17,13 +18,11 @@
 //! `docs/reflector-decimals-assumption.md` for why the contract assumes the
 //! scale never changes and what happens if it does.
 //!
-//! ## Findings this harness produced (all real, all reproducible)
+//! ## Remaining findings and fixed regressions
 //!
-//! The three documented errors and the non-positive-price guard work exactly
-//! as advertised. Three things do **not**, and are pinned here as current
-//! behavior with `FINDING` markers rather than silently fixed, because each
-//! fix changes settlement math or the public error surface and needs a product
-//! decision:
+//! The documented errors and non-positive-price guard work exactly as
+//! advertised. Two unresolved findings are pinned here as current behavior;
+//! F2 is recorded below as a fixed regression.
 //!
 //! 1. **F1 — an unreachable oracle is not a graceful error.** Pointing
 //!    `oracle_config.oracle_contract` at an address with no contract (a
@@ -33,17 +32,15 @@
 //!    has no way to be repaired afterwards: `oracle_config` is set once at
 //!    `initialize` and has no setter. Callers (the API's staged-transaction
 //!    layer) must treat a host abort here as "this commitment is unreadable."
-//! 2. **F2 — a future-dated quote passes the staleness bound.** `read_oracle_rate`
-//!    computes `now.saturating_sub(quote.timestamp)`, so a quote stamped
-//!    *ahead* of the ledger gets age `0` and is accepted as maximally fresh.
-//!    A buggy or manipulated feed can pin the bound open indefinitely.
+//! F2 — future-dated quotes are now rejected by `read_oracle_rate` with the
+//! distinct `OracleTimestampInFuture` error, before calculating quote age.
 //! The former **F3 — no sanity bound on the price itself** finding is now
 //! closed: both negative and zero prices are rejected as
 //! `OraclePriceInvalid` by `oracle_rate()`, `resolve_fx_shortfall()`, and
 //! `refresh_fx_quote_status()` before any settlement state can be written.
 //! The regression test below keeps that decision pinned.
 //!
-//! 3. **F4/F5 — `resolve_fx_shortfall` has two unguarded arithmetic traps.**
+//! 2. **F4/F5 — `resolve_fx_shortfall` has two unguarded arithmetic traps.**
 //!    `ngn_owed * rate.price` and `10i128.pow(decimals)` are unchecked: a
 //!    huge price or a garbage `decimals()` (Reflector's real fiat oracle uses
 //!    14) aborts the call. Soroban's atomicity means no partial state is
@@ -406,34 +403,48 @@ fn an_unreachable_oracle_aborts_rather_than_degrading_to_a_documented_error() {
     );
 }
 
-/// F2 — a quote stamped in the future.
+/// F2 regression — a quote stamped in the future is rejected on both paths.
 #[test]
-fn a_future_dated_quote_bypasses_the_staleness_bound_for_as_long_as_it_stays_ahead() {
+fn future_dated_quotes_are_rejected_on_both_read_paths() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     // "Now" is 0; stamp the quote 10_000 seconds *ahead* of the ledger.
     s.oracle().set_quote(&FRESH_PRICE, &(s.w.now() + 10_000));
 
-    let rate = s.w.contract.oracle_rate();
     assert_eq!(
-        rate.timestamp, 10_000,
-        "FINDING F2: `now.saturating_sub(quote.timestamp)` clamps a future \
-         quote's age to 0, so it reads as maximally fresh"
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleTimestampInFuture))
     );
 
-    // The bypass lasts exactly as long as the ledger stays behind the stamp —
-    // once real time passes it, normal staleness applies again.
+    s.w.drive_to_delivered();
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleTimestampInFuture))
+    );
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved && c.fx_adjusted_total == 0 && c.fx_shortfall_deadline == 0);
+
+    // Once ledger time passes the stamp, normal staleness applies.
     s.w.advance(10_000 + MAX_AGE + 1);
     assert_eq!(s.w.contract.try_oracle_rate(), Err(Ok(Error::OracleStale)));
 
-    // The sharp version of the finding: nothing bounds how far ahead a quote
-    // may be stamped, so a feed (or a compromised one) that always reports a
-    // far-future timestamp is never rejected as stale at all.
+    // Even an extreme future timestamp is rejected, rather than accepted as
+    // fresh due to subtraction saturation.
     s.oracle().set_quote(&FRESH_PRICE, &u64::MAX);
     s.w.advance(MAX_AGE * 1_000);
-    assert!(
-        s.w.contract.try_oracle_rate().is_ok(),
-        "a maximally future-dated quote is accepted indefinitely"
+    assert_eq!(
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleTimestampInFuture))
     );
+}
+
+#[test]
+fn quote_timestamp_equal_to_now_is_accepted() {
+    let s = oracle_world(MAX_AGE, DENOMINATED);
+    s.oracle().set_quote(&FRESH_PRICE, &s.w.now());
+
+    let rate = s.w.contract.oracle_rate();
+    assert_eq!(rate.price, FRESH_PRICE);
+    assert_eq!(rate.timestamp, s.w.now());
 }
 
 /// F3 — non-positive prices are rejected on every oracle read path.

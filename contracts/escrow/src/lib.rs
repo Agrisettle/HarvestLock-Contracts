@@ -426,6 +426,9 @@ pub enum Error {
     /// belongs to the operator's confirmation window; strictly after it, only
     /// `reclaim_on_nondelivery` is legal (#199).
     DeliveryDeadlinePassed = 43,
+    /// The configured Reflector oracle returned a quote timestamp later than
+    /// the current ledger timestamp; future quotes cannot satisfy freshness.
+    OracleTimestampInFuture = 44,
 }
 
 #[contracttype]
@@ -1542,7 +1545,10 @@ impl EscrowContract {
         }
 
         let now = env.ledger().timestamp();
-        let age = now.saturating_sub(quote.timestamp);
+        if quote.timestamp > now {
+            return Err(Error::OracleTimestampInFuture);
+        }
+        let age = now - quote.timestamp;
         if age > config.max_age_secs {
             return Err(Error::OracleStale);
         }

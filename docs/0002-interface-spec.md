@@ -79,13 +79,13 @@ Each method entry has the following fields:
   "name": "oracle_rate",
   "args": [],
   "returns": "Result<OracleRate, Error>",
-  "errors": ["OracleNotConfigured", "OraclePriceUnavailable", "OracleStale"],
+  "errors": ["OracleNotConfigured", "OraclePriceUnavailable", "OracleStale", "OracleTimestampInFuture"],
   "state_transition": null,
   "auth_requirement": "permissionless"
 }
 ```
 
-*Reads the current rate for this commitment's configured oracle asset, enforcing the staleness bound. Pure read against Reflector's own stored history, not a state transition.*
+*Reads the current rate for this commitment's configured oracle asset, enforcing the staleness bound and rejecting quote timestamps later than the ledger timestamp. Pure read against Reflector's own stored history, not a state transition.*
 
 ### 4. `set_allocation`
 
@@ -339,7 +339,7 @@ Each method entry has the following fields:
   "name": "resolve_fx_shortfall",
   "args": [],
   "returns": "Result<(), Error>",
-  "errors": ["InvalidState", "TrancheUnresolved", "FxAlreadyResolved", "OracleNotConfigured"],
+  "errors": ["InvalidState", "TrancheUnresolved", "FxAlreadyResolved", "OracleNotConfigured", "OracleTimestampInFuture"],
   "state_transition": null,
   "auth_requirement": "permissionless"
 }
