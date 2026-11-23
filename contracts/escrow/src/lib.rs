@@ -2030,15 +2030,7 @@ impl EscrowContract {
         } else {
             Self::bps_amount(c.total_amount, c.settlement_bps)
         };
-        let claimed_by_coop = (if c.advance1_claimed {
-            Self::bps_amount(c.total_amount, c.advance1_bps)
-        } else {
-            0
-        }) + (if c.advance2_claimed {
-            Self::bps_amount(c.total_amount, c.advance2_bps)
-        } else {
-            0
-        });
+        let claimed_by_coop = Self::claimed_by_coop(&c);
         let owed_from_remainder = (adjusted_total - claimed_by_coop).max(0);
 
         // Effects before interaction — see `lock`'s comment for why.
@@ -2164,27 +2156,11 @@ impl EscrowContract {
             fx_in_denominated_decimals / 10i128.pow(7 - token_decimals)
         };
 
-        let claimed_by_coop = (if c.advance1_claimed {
-            Self::bps_amount(c.total_amount, c.advance1_bps)
-        } else {
-            0
-        }) + (if c.advance2_claimed {
-            Self::bps_amount(c.total_amount, c.advance2_bps)
-        } else {
-            0
-        });
+        let claimed_by_coop = Self::claimed_by_coop(&c);
         // Reclaimed tranches were returned to the buyer and are no longer in
         // escrow, so the coop has no claim on them; subtract them so we do not
         // charge the buyer a shortfall for funds they already recovered.
-        let reclaimed_by_buyer = (if c.advance1_expired {
-            Self::bps_amount(c.total_amount, c.advance1_bps)
-        } else {
-            0
-        }) + (if c.advance2_expired {
-            Self::bps_amount(c.total_amount, c.advance2_bps)
-        } else {
-            0
-        });
+        let reclaimed_by_buyer = Self::reclaimed_by_buyer(&c);
         let owed_from_remainder = (fx_adjusted_total - claimed_by_coop - reclaimed_by_buyer).max(0);
         let available_balance =
             token::Client::new(&env, &c.token).balance(&env.current_contract_address());
@@ -3221,6 +3197,32 @@ impl EscrowContract {
             c.total_amount,
             c.advance1_bps.saturating_add(c.advance2_bps),
         )
+    }
+
+    /// Sum of advance tranches already claimed by the cooperative (#285).
+    fn claimed_by_coop(c: &Commitment) -> i128 {
+        (if c.advance1_claimed {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_claimed {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        })
+    }
+
+    /// Sum of advance tranches already reclaimed by the buyer after expiry (#285).
+    fn reclaimed_by_buyer(c: &Commitment) -> i128 {
+        (if c.advance1_expired {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_expired {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        })
     }
 
     /// Field accessors for a given tranche, so `claim_tranche`/
