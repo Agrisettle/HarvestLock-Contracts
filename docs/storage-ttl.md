@@ -88,6 +88,30 @@ table still answers the issue's "every key" framing.
 | Contract WASM code entry (`ContractCode`) | persistent | `install`/`deploy` | host loads it on every call | deploy-time minimum, never extended | `Instance::extend_ttl` rents instance **and code** together — asserted in `dormant_instance_is_rescued_by_the_first_call` |
 | Token balances (escrow's holdings) | *not this contract's entry* — lives in the token contract's own ledger state | `lock`/`fund_*` transfers | `balance()` calls in `settle`/`expire_*`/`reclaim_*`/`cancel` | unaffected by escrow archival — this is *why* archival strands funds instead of destroying them | unchanged; still the token contract's own TTL story |
 
+## TTL target decision
+
+The implementation keeps topping the instance up to `max_ttl`; it does not
+cap the extension at `delivery_deadline` or another stored deadline. A
+deadline-derived horizon is not a reliable upper bound on a commitment's
+useful life: a `Draft` can remain open until someone locks it, and a dispute
+can be resolved by agreement without consuming the lapse cap, then opened
+again. Those paths can move the last reachable action later without a fixed
+maximum. Capping the TTL at a currently-known deadline could therefore archive
+a still-actionable commitment. Max-TTL remains the conservative choice until
+the lifecycle has a hard end time.
+
+The rent tradeoff is material. The testnet cost record in
+[`gas-costs.md`](./gas-costs.md#ttl-extension-rent-tradeoff) measured **4,092,383
+stroops gross rent** for the fresh-instance `initialize` extension to max TTL.
+For scale, if rent were linear in TTL and a ledger closed every five seconds,
+120 days is 2,073,600 ledgers, or **32.9%** of the test host's 6,312,000-ledger
+max TTL. A hypothetical extension of that length would be about **1,344,000
+stroops**, roughly **2,748,000 stroops less** than the measured max-TTL
+extension. This is an illustrative pro-rata estimate, not a second measured
+transaction: actual rent depends on the network's rent settings, ledger
+interval, entry size, current TTL, and any safety/window allowance. It also
+does not cover the unbounded lifecycle cases above.
+
 ## The fix (what changed in `lib.rs`)
 
 - New internal `bump_instance_ttl(env)`: `let max_ttl =
@@ -100,7 +124,8 @@ table still answers the issue's "every key" framing.
   (`initialize` deliberately can't call `load`, there's nothing stored
   yet).
 - Strategy: re-rent **only when remaining TTL < half the network
-  maximum**, topping back to the maximum. Consequences: (a) a dormant
+  maximum**, topping back to the maximum. The choice to retain max-TTL,
+  rather than cap at a known deadline, is explained above. Consequences: (a) a dormant
   commitment is rescued by the *first* touch of any kind, including the
   API's routine permissionless reads; (b) once topped, steady-state
   calls cost no rent at all (no-op above the threshold — asserted in
