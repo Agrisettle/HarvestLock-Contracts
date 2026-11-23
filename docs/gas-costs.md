@@ -749,6 +749,26 @@ reporting add-on.
 
 WASM builds are verified reproducible in CI (`.github/workflows/test.yml`, job "Verify WASM build reproducibility"). The SHA-256 hash of `target/wasm32v1-none/release/harvestlock_escrow.wasm` must match between two consecutive clean builds. Current hash: see latest CI run.
 
+## Offline WASM size budget
+
+The committed release artifact is **82,567 bytes** (the build measured on
+23 Nov 2026 above). To catch material size regressions without adding a live
+network or another tool dependency, run this after `stellar contract build
+--locked`:
+
+```bash
+bash .github/scripts/check_wasm_size.sh
+```
+
+The script compares
+`target/wasm32v1-none/release/harvestlock_escrow.wasm` with
+[`contracts/escrow/wasm_size.baseline`](../contracts/escrow/wasm_size.baseline),
+prints the baseline, current size, and delta, and fails when growth exceeds
+5 KiB (5,120 bytes). If a larger artifact is intentional, update the baseline
+in the same PR and explain the increase; the check does not alter workflows.
+Per the [PR template](../.github/PULL_REQUEST_TEMPLATE.md), a maintainer can
+wire this command into `.github/workflows/test.yml`.
+
 ## Supply-Chain Health
 
 `cargo deny check advisories bans` runs in CI to catch yanked or unmaintained dependencies. See `deny.toml` for configuration. As of this writing, the dependency tree is minimal (`soroban-sdk = "29.0.1"` only) and passes all checks cleanly.
