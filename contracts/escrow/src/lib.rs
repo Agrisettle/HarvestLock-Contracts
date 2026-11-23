@@ -133,6 +133,28 @@
 //! the network maximum (see `bump_instance_ttl`'s doc comment). The full
 //! key-by-key audit, the residual expiry risk, and the operational
 //! mitigations live in `docs/storage-ttl.md`.
+//!
+//! **The state machine is declared once, not once per function (#227)**:
+//! every status guard on a state-changing call is a single
+//! `require_status(&c, Method::X)` lookup into the one const transition
+//! table below (`Method` + `Method::allowed_from`). Read that table top to
+//! bottom and you have the whole machine: which method each status admits,
+//! and — via its `None` rows — which two calls are deliberately not
+//! status-gated at all (`claim_advance_*`/`reclaim_advance_*`, whose
+//! windows stay actionable while a dispute is open; see `Method`'s doc).
+//! Nothing in this file may re-state a source-status list by hand: a new
+//! guard is a new table row, so the "Disputed blocks everything" property
+//! and the "pre-delivery range" are each written once instead of a dozen
+//! times. The guard *order* (status first, then flags, then deadlines) is
+//! untouched by that centralization, which is what keeps the existing
+//! error-ordering expectations valid.
+//!
+//! **Test builds assert the same invariants on every write (#225)**:
+//! `save` calls `Commitment::check_invariants` under
+//! `cfg(any(test, feature = "testutils"))`, so the field doc comments that
+//! state things like "0 = not yet opened" or "`Draft` whenever `status`
+//! isn't `Disputed`" are checked by every test that writes state, not only
+//! by whoever rereads them. It compiles out of the release WASM entirely.
 
 #![no_std]
 
@@ -692,6 +714,93 @@ pub struct Commitment {
     pub dispute_count: u32,
 }
 
+/// The invariants the state machine is allowed to rely on (#225), every one
+/// of which previously lived only in a field doc comment above.
+///
+/// Test-only by construction: the whole block is `cfg`'d to `test` /
+/// `testutils`, and `save` calls it before every write, so the hundreds of
+/// existing tests each double as an invariant test on every state write —
+/// including `initialize`'s, which writes through `save` too. It is absent
+/// from the release WASM (neither cfg is set there), so the deployed
+/// contract pays nothing for it.
+///
+/// Panicking rather than returning an error is deliberate: a violation means
+/// this contract wrote an impossible state, which is a bug here, not a
+/// caller mistake to report to a caller. A panic makes every test that
+/// reaches the bad write fail, whether or not it knows the invariant exists.
+#[cfg(any(test, feature = "testutils"))]
+impl Commitment {
+    /// No auth required — test-build-only check of in-memory state: it calls
+    /// nothing, writes nothing, and has no caller-supplied input. Panics (see
+    /// this impl's doc) rather than returning an error.
+    pub fn check_invariants(&self) {
+        // A tranche is resolved at most once, and in one direction.
+        assert!(
+            !(self.advance1_claimed && self.advance1_expired),
+            "invariant: advance1_claimed && advance1_expired"
+        );
+        assert!(
+            !(self.advance2_claimed && self.advance2_expired),
+            "invariant: advance2_claimed && advance2_expired"
+        );
+        // "0 = not yet opened": neither flag can be set before the window
+        // that sets it exists.
+        if self.advance1_deadline == 0 {
+            assert!(
+                !self.advance1_claimed && !self.advance1_expired,
+                "invariant: advance1 flags set with advance1_deadline == 0"
+            );
+        }
+        if self.advance2_deadline == 0 {
+            assert!(
+                !self.advance2_claimed && !self.advance2_expired,
+                "invariant: advance2 flags set with advance2_deadline == 0"
+            );
+        }
+        // The commitment is frozen iff a dispute window is open, and the
+        // pre-dispute status is only a real value while it is.
+        assert!(
+            (self.status == Status::Disputed) == (self.dispute_deadline != 0),
+            "invariant: status == Disputed iff dispute_deadline != 0"
+        );
+        if self.status == Status::Disputed {
+            // `flag_dispute` never accepts `Draft`, so `Draft` can only be
+            // the unset sentinel — never a real restore target.
+            assert!(
+                self.dispute_pre_status != Status::Draft,
+                "invariant: dispute_pre_status == Draft while Disputed"
+            );
+        } else {
+            assert!(
+                self.dispute_pre_status == Status::Draft,
+                "invariant: dispute_pre_status != Draft outside Disputed"
+            );
+        }
+        // The remainder can only be funded inside a window that was opened.
+        if self.remainder_funded {
+            assert!(
+                self.remainder_deadline != 0,
+                "invariant: remainder_funded with remainder_deadline == 0"
+            );
+        }
+        // A shortfall exists iff it has a deadline to cure it by.
+        assert!(
+            (self.fx_shortfall_amount > 0) == (self.fx_shortfall_deadline != 0),
+            "invariant: fx_shortfall_amount > 0 iff fx_shortfall_deadline != 0"
+        );
+        // Settlement cannot owe more than the agreed full value.
+        assert!(
+            self.settlement_bps <= 10_000,
+            "invariant: settlement_bps > 10_000"
+        );
+        // The delivery window is opened at creation, never before it.
+        assert!(
+            self.delivery_deadline >= self.created_at,
+            "invariant: delivery_deadline < created_at"
+        );
+    }
+}
+
 /// The version of the [`CommitmentView`] read shape.
 ///
 /// Bumped whenever a field is added, removed, renamed, or changes meaning —
@@ -1056,6 +1165,139 @@ pub struct OracleConfigReplaced {
     pub new_oracle_contract: Address,
 }
 
+/// The pre-delivery range: every status `cancel` and `reassign_buyer`
+/// accept. Past `Delivered` the buyer no longer gates any remaining action,
+/// so moving a position or unwinding the deal there would be a no-op
+/// dressed up as a real transfer — see those functions' doc comments.
+const PRE_DELIVERY: &[Status] = &[
+    Status::Draft,
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+];
+
+/// The range with funds already at stake or a claim outstanding, but no
+/// delivery attested yet: the two seller-failure paths
+/// (`reclaim_on_nondelivery`, `expire_delivery_window`) are reachable
+/// exactly here, and `Draft` is deliberately excluded (nothing was ever
+/// escrowed at that point).
+const LOCKED_THROUGH_READY: &[Status] = &[
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+];
+
+/// The dispute window: everything the three named parties can freeze — from
+/// the first status with money escrowed (`Locked`) through the operator's
+/// delivery attestation (`Delivered`). Not `Draft` (nothing to freeze), not
+/// any terminal status, and not `Disputed` itself (a dispute can't be
+/// re-flagged while it is already open).
+const LOCKED_THROUGH_DELIVERED: &[Status] = &[
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+    Status::Delivered,
+];
+
+/// One status-gated public method — the key into the declared transition
+/// table, [`Self::allowed_from`].
+///
+/// This enum plus that one function **is** the state machine's source of
+/// truth (#227). Every `can_*` guard in this file begins with
+/// `Self::require_status(c, Method::X)`, so a method's accepted source
+/// statuses are written exactly once; before this table existed, the same
+/// `Locked..=ReadyForDelivery` range was hand-copied into four different
+/// guard functions and `Disputed`-is-never-accepted was implied by a dozen
+/// separate lists that all had to stay in sync. Adding a call means adding
+/// a row here, and a status that admits nothing can be read off the table
+/// directly.
+///
+/// Two rows (`ClaimAdvance1`/`ClaimAdvance2`, `ReclaimAdvance1`/
+/// `ReclaimAdvance2`) declare **no** status gate, and that is deliberate,
+/// not an omission: an advance window, once opened, stays claimable (or
+/// reclaimable) while `advanceN_deadline` is open regardless of what the
+/// deal's status has since moved on to — crop progress doesn't wait on
+/// paperwork, and a dispute freeze deliberately does not stop a tranche
+/// window that is already ticking (pinned by
+/// `claim_advance_1_while_disputed_still_pays` and
+/// `reclaim_advance_1_while_disputed_still_refunds`). Their real guards are
+/// the deadline/flag predicates in `can_claim_tranche`/
+/// `can_reclaim_tranche`, which is why the table says `None` rather than
+/// listing every status.
+#[derive(Clone, Copy)]
+enum Method {
+    SetAllocation,
+    Lock,
+    ReleaseAdvance1,
+    ClaimAdvance1,
+    ReclaimAdvance1,
+    MarkCheckpoint,
+    ReleaseAdvance2,
+    ClaimAdvance2,
+    ReclaimAdvance2,
+    ReadyForDelivery,
+    FundRemainder,
+    ExpireRemainderWindow,
+    ReclaimOnNondelivery,
+    ExpireDeliveryWindow,
+    ConfirmDelivery,
+    Settle,
+    ResolveFxShortfall,
+    RefreshFxQuoteStatus,
+    ReplaceOracleConfig,
+    FundFxShortfall,
+    ExpireFxShortfallWindow,
+    Cancel,
+    ReassignBuyer,
+    FlagDispute,
+    ResolveDispute,
+    ExpireDisputeWindow,
+}
+
+impl Method {
+    /// The declared transition table: for each method, the source statuses
+    /// it accepts. `None` means "this method has no status gate at all"
+    /// (see the enum's doc for the two tranche pairs, and why).
+    ///
+    /// An empty list is never used: a method reachable from nowhere is far
+    /// more likely to be a table mistake than a real state, and is
+    /// impossible to exercise.
+    const fn allowed_from(self) -> Option<&'static [Status]> {
+        match self {
+            Method::SetAllocation | Method::Lock => Some(&[Status::Draft]),
+            Method::ReleaseAdvance1 => Some(&[Status::Locked]),
+            Method::MarkCheckpoint => Some(&[Status::Advance1Released]),
+            Method::ReleaseAdvance2 => Some(&[Status::CheckpointPassed]),
+            Method::ReadyForDelivery => Some(&[Status::Advance2Released]),
+            Method::ClaimAdvance1
+            | Method::ReclaimAdvance1
+            | Method::ClaimAdvance2
+            | Method::ReclaimAdvance2 => None,
+            Method::FundRemainder | Method::ExpireRemainderWindow | Method::ConfirmDelivery => {
+                Some(&[Status::ReadyForDelivery])
+            }
+            Method::ReclaimOnNondelivery | Method::ExpireDeliveryWindow => {
+                Some(LOCKED_THROUGH_READY)
+            }
+            Method::Settle
+            | Method::ResolveFxShortfall
+            | Method::RefreshFxQuoteStatus
+            | Method::ReplaceOracleConfig
+            | Method::FundFxShortfall
+            | Method::ExpireFxShortfallWindow => Some(&[Status::Delivered]),
+            Method::Cancel | Method::ReassignBuyer => Some(PRE_DELIVERY),
+            Method::FlagDispute => Some(LOCKED_THROUGH_DELIVERED),
+            Method::ResolveDispute | Method::ExpireDisputeWindow => Some(&[Status::Disputed]),
+        }
+    }
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -1210,9 +1452,11 @@ impl EscrowContract {
             dispute_deadline: 0,
             dispute_count: 0,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Commitment, &commitment);
+        // Through `save` like every other write, so the initial state is
+        // covered by the same test-build invariant checker (#225) — the
+        // `Draft` state it writes is the one every later invariant is
+        // relative to.
+        Self::save(&env, &commitment);
         if let Some(oc) = oracle_config {
             env.storage().instance().set(&DataKey::OracleConfig, &oc);
         }
@@ -2640,7 +2884,19 @@ impl EscrowContract {
             .ok_or(Error::NotInitialized)
     }
 
+    /// The one state write for `Commitment`, and therefore the one place
+    /// the test-build invariant checker hooks in (#225).
+    ///
+    /// `check_invariants` is compiled in only for `cfg(test)` (the unit
+    /// suite) or the `testutils` feature (so the integration suites in
+    /// `tests/` can assert the same thing with `--features testutils`). It
+    /// is absent from the release WASM — the release build enables neither
+    /// — so this costs the deployed contract exactly nothing; see the
+    /// "WASM Upload vs Instantiation" / build sections of
+    /// `docs/gas-costs.md` for the size discipline this respects.
     fn save(env: &Env, c: &Commitment) {
+        #[cfg(any(test, feature = "testutils"))]
+        c.check_invariants();
         env.storage().instance().set(&DataKey::Commitment, c);
     }
 
@@ -2657,6 +2913,30 @@ impl EscrowContract {
     // commitment (a valid `grade_index`, a non-empty allocation list, a
     // `new_buyer`, a `flagger` that belongs to the deal) stays at the call
     // site; the predicates cover everything the view can actually know.
+    //
+    // The *status* half of every predicate is not written here at all: each
+    // one opens with `require_status`, which reads the single declared
+    // transition table (`Method::allowed_from`, #227). Predicate order still
+    // matters and is unchanged — status first, then flags, then deadlines —
+    // which is what keeps the error-ordering expectations in `src/test.rs`
+    // and `tests/snapshot_replay.rs` valid.
+
+    /// The one status guard (#227): looks `method` up in the declared
+    /// transition table and refuses with `Error::InvalidState` when the
+    /// commitment's current status isn't one of its allowed sources.
+    ///
+    /// `Error::InvalidState` — not a per-method error — is deliberate: it is
+    /// what every hand-written guard returned before this table existed, so
+    /// centralizing them changes no observable behaviour, error variants
+    /// included. A method whose row is `None` (the two tranche-claim pairs)
+    /// has no status gate and this always passes.
+    fn require_status(c: &Commitment, method: Method) -> Result<(), Error> {
+        match method.allowed_from() {
+            None => Ok(()),
+            Some(allowed) if allowed.contains(&c.status) => Ok(()),
+            Some(_) => Err(Error::InvalidState),
+        }
+    }
 
     fn push_action(
         env: &Env,
@@ -2676,9 +2956,7 @@ impl EscrowContract {
     }
 
     fn can_set_allocation(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Draft {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::SetAllocation)?;
         if env.storage().instance().has(&DataKey::Allocation) {
             return Err(Error::AllocationAlreadySet);
         }
@@ -2686,30 +2964,19 @@ impl EscrowContract {
     }
 
     fn can_lock(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Draft {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::Lock)
     }
 
     fn can_mark_checkpoint(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Advance1Released {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::MarkCheckpoint)
     }
 
     fn can_ready_for_delivery(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Advance2Released {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ReadyForDelivery)
     }
 
     fn can_fund_remainder(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::FundRemainder)?;
         if c.remainder_funded {
             return Err(Error::RemainderAlreadyFunded);
         }
@@ -2720,9 +2987,7 @@ impl EscrowContract {
     }
 
     fn can_expire_remainder_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ExpireRemainderWindow)?;
         if c.remainder_funded {
             return Err(Error::RemainderAlreadyFunded);
         }
@@ -2733,14 +2998,7 @@ impl EscrowContract {
     }
 
     fn can_reclaim_on_nondelivery(c: &Commitment, now: u64) -> Result<(), Error> {
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::require_status(c, Method::ReclaimOnNondelivery)?;
         if now <= c.delivery_deadline {
             return Err(Error::DeliveryDeadlineNotPassed);
         }
@@ -2748,14 +3006,7 @@ impl EscrowContract {
     }
 
     fn can_expire_delivery_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::require_status(c, Method::ExpireDeliveryWindow)?;
         let grace_deadline = c.delivery_deadline.saturating_add(c.remainder_window_secs);
         if now <= grace_deadline {
             return Err(Error::DeliveryGraceWindowNotPassed);
@@ -2764,9 +3015,7 @@ impl EscrowContract {
     }
 
     fn can_confirm_delivery(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::ReadyForDelivery {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ConfirmDelivery)?;
         if !c.remainder_funded {
             return Err(Error::RemainderNotFunded);
         }
@@ -2784,9 +3033,7 @@ impl EscrowContract {
     }
 
     fn can_settle(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::Settle)?;
         Self::tranches_resolved(c)?;
         if env.storage().instance().has(&DataKey::OracleConfig) {
             if !c.fx_resolved {
@@ -2800,9 +3047,7 @@ impl EscrowContract {
     }
 
     fn can_replace_oracle_config(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ReplaceOracleConfig)?;
         if c.fx_resolved {
             return Err(Error::FxAlreadyResolved);
         }
@@ -2813,9 +3058,7 @@ impl EscrowContract {
     }
 
     fn can_resolve_fx_shortfall(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ResolveFxShortfall)?;
         Self::tranches_resolved(c)?;
         if c.fx_resolved {
             return Err(Error::FxAlreadyResolved);
@@ -2827,9 +3070,7 @@ impl EscrowContract {
     }
 
     fn can_refresh_fx_quote_status(env: &Env, c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::RefreshFxQuoteStatus)?;
         if c.fx_resolved {
             return Err(Error::FxAlreadyResolved);
         }
@@ -2840,9 +3081,7 @@ impl EscrowContract {
     }
 
     fn can_fund_fx_shortfall(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::FundFxShortfall)?;
         if !c.fx_resolved {
             return Err(Error::FxNotResolved);
         }
@@ -2859,9 +3098,7 @@ impl EscrowContract {
     }
 
     fn can_expire_fx_shortfall_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::Delivered {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ExpireFxShortfallWindow)?;
         if !c.fx_resolved {
             return Err(Error::FxNotResolved);
         }
@@ -2877,42 +3114,16 @@ impl EscrowContract {
         Ok(())
     }
 
-    fn is_pre_delivery_status(status: Status) -> bool {
-        matches!(
-            status,
-            Status::Draft
-                | Status::Locked
-                | Status::Advance1Released
-                | Status::CheckpointPassed
-                | Status::Advance2Released
-                | Status::ReadyForDelivery
-        )
-    }
-
     fn can_cancel(c: &Commitment) -> Result<(), Error> {
-        if !Self::is_pre_delivery_status(c.status) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::Cancel)
     }
 
     fn can_reassign_buyer(c: &Commitment) -> Result<(), Error> {
-        if !Self::is_pre_delivery_status(c.status) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ReassignBuyer)
     }
 
     fn can_flag_dispute(c: &Commitment, flagger: &Address) -> Result<(), Error> {
-        match c.status {
-            Status::Locked
-            | Status::Advance1Released
-            | Status::CheckpointPassed
-            | Status::Advance2Released
-            | Status::ReadyForDelivery
-            | Status::Delivered => {}
-            _ => return Err(Error::InvalidState),
-        }
+        Self::require_status(c, Method::FlagDispute)?;
         // Kept as the same Address PartialEq expression the #122 audit pins
         // in tests/address_equality.rs, now in one place for the view and the
         // real guard.
@@ -2927,16 +3138,11 @@ impl EscrowContract {
     }
 
     fn can_resolve_dispute(c: &Commitment) -> Result<(), Error> {
-        if c.status != Status::Disputed {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ResolveDispute)
     }
 
     fn can_expire_dispute_window(c: &Commitment, now: u64) -> Result<(), Error> {
-        if c.status != Status::Disputed {
-            return Err(Error::InvalidState);
-        }
+        Self::require_status(c, Method::ExpireDisputeWindow)?;
         if now <= c.dispute_deadline {
             return Err(Error::DisputeWindowNotPassed);
         }
@@ -3054,10 +3260,32 @@ impl EscrowContract {
         }
     }
 
-    fn tranche_required_status(t: Tranche) -> Status {
+    /// The transition-table row for opening a tranche's window. Which
+    /// status admits each tranche is declared in `Method::allowed_from`, not
+    /// here — this only names which row applies.
+    fn open_tranche_method(t: Tranche) -> Method {
         match t {
-            Tranche::One => Status::Locked,
-            Tranche::Two => Status::CheckpointPassed,
+            Tranche::One => Method::ReleaseAdvance1,
+            Tranche::Two => Method::ReleaseAdvance2,
+        }
+    }
+
+    /// The transition-table row for claiming a tranche. That row is
+    /// deliberately ungated (`None`) — see `Method`'s doc — so this is only
+    /// the name of the row, not an extra status rule.
+    fn claim_tranche_method(t: Tranche) -> Method {
+        match t {
+            Tranche::One => Method::ClaimAdvance1,
+            Tranche::Two => Method::ClaimAdvance2,
+        }
+    }
+
+    /// The transition-table row for reclaiming a tranche; ungated for the
+    /// same reason as `claim_tranche_method`.
+    fn reclaim_tranche_method(t: Tranche) -> Method {
+        match t {
+            Tranche::One => Method::ReclaimAdvance1,
+            Tranche::Two => Method::ReclaimAdvance2,
         }
     }
 
@@ -3069,13 +3297,14 @@ impl EscrowContract {
     }
 
     fn can_open_tranche(c: &Commitment, t: Tranche) -> Result<(), Error> {
-        if c.status != Self::tranche_required_status(t) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Self::open_tranche_method(t))
     }
 
     fn can_claim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+        // Asks the table for this method's status rule (which is `None`:
+        // an opened window stays claimable whatever the status has since
+        // become) so every public method's rule is consulted in one place.
+        Self::require_status(c, Self::claim_tranche_method(t))?;
         if Self::tranche_deadline(c, t) == 0 {
             return Err(Error::NotYetOpened);
         }
@@ -3092,6 +3321,8 @@ impl EscrowContract {
     }
 
     fn can_reclaim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+        // Ungated row, same reasoning as `can_claim_tranche` above.
+        Self::require_status(c, Self::reclaim_tranche_method(t))?;
         if Self::tranche_deadline(c, t) == 0 {
             return Err(Error::NotYetOpened);
         }

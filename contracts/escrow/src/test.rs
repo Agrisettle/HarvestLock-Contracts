@@ -4146,10 +4146,13 @@ mod dispute_round_trip_property {
     proptest! {
         /// A dispute round-trip changes `Commitment` in exactly three
         /// fields (`status` restored, `dispute_pre_status` back to
-        /// `Draft`, `dispute_deadline` back to 0) and moves no tokens.
-        /// Every other field in `Commitment` — and every token balance —
-        /// is byte-identical before `flag_dispute` and after
-        /// `resolve_dispute`/`expire_dispute_window`.
+        /// `Draft`, `dispute_deadline` back to 0) plus the one documented
+        /// exception — `dispute_count`, which only `expire_dispute_window`
+        /// increments, because a lapsed window counts against the
+        /// `MAX_DISPUTE_FLAGS` cap while a unanimous `resolve_dispute`
+        /// deliberately does not — and moves no tokens. Every other field in
+        /// `Commitment`, and every token balance, is byte-identical before
+        /// `flag_dispute` and after `resolve_dispute`/`expire_dispute_window`.
         #[test]
         fn dispute_round_trip_changes_nothing_but_the_dispute_fields(
             status in arb_status(),
@@ -4204,9 +4207,14 @@ mod dispute_round_trip_property {
             // pre-flag snapshot, byte-for-byte. Both exit paths restore
             // `dispute_pre_status` to `Draft` and `dispute_deadline` to
             // 0 — which is also exactly their value *before* the flag,
-            // since `status` wasn't `Disputed` then — so the overall
-            // comparison is unqualified equality.
-            prop_assert_eq!(&before, &after);
+            // since `status` wasn't `Disputed` then — so the only field
+            // that legitimately differs is the lapse counter, and only on
+            // the timeout path (see this test's doc comment).
+            let mut expected = before;
+            if matches!(exit, Exit::Expire) {
+                expected.dispute_count += 1;
+            }
+            prop_assert_eq!(&expected, &after);
             prop_assert_eq!(balances_before, balances_after);
         }
     }
@@ -6363,4 +6371,45 @@ mod proptest_fund_conservation {
             forfeited_lifecycle(advance1_bps, advance2_bps)?;
         }
     }
+}
+
+// ---------- #225: the test-build invariant checker actually fires ----------
+
+/// The checker is worth nothing if a violation doesn't fail the test that
+/// produced it. `save` is private, so this hand-corrupts a real commitment
+/// in place and writes it back through the exact path every production
+/// write uses — if `check_invariants` were not wired into `save`, this
+/// would pass silently instead of panicking.
+#[test]
+#[should_panic(expected = "invariant: advance1_claimed && advance1_expired")]
+fn save_rejects_a_commitment_whose_tranche_is_both_claimed_and_expired() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+
+    let mut corrupted = s.contract.get_commitment();
+    corrupted.advance1_deadline = 1;
+    corrupted.advance1_claimed = true;
+    corrupted.advance1_expired = true;
+
+    s.env.as_contract(&s.contract.address, || {
+        EscrowContract::save(&s.env, &corrupted);
+    });
+}
+
+/// Same hand-corruption route, the other end of the invariant list: a
+/// `Disputed` status with no open dispute window is exactly the state
+/// `flag_dispute` can never leave behind, and the checker says so.
+#[test]
+#[should_panic(expected = "invariant: status == Disputed iff dispute_deadline != 0")]
+fn save_rejects_disputed_without_an_open_dispute_window() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+
+    let mut corrupted = s.contract.get_commitment();
+    corrupted.status = Status::Disputed;
+    corrupted.dispute_pre_status = Status::Locked;
+
+    s.env.as_contract(&s.contract.address, || {
+        EscrowContract::save(&s.env, &corrupted);
+    });
 }
