@@ -1,0 +1,51 @@
+# Offline per-method resource baseline for HarvestLock escrow (#222).
+#
+# Regenerate deliberately, with the change that moved the numbers in hand:
+#   BLESS_BUDGET=1 cargo test -p harvestlock-escrow --test budget
+#
+# Then review this diff. tests/budget.rs fails if any metric below grows by
+# more than 1% against the current build, and names the method, the metric,
+# both values and the delta. A missing or extra method also fails.
+#
+# Format: one line per exported method:
+#   <method> cpu=<insns> mem=<bytes> read_entries=<n> write_entries=<n> \
+#            read_bytes=<n> write_bytes=<n>
+#
+# cpu/mem come from env.cost_estimate().budget(); entries/bytes come from
+# env.cost_estimate().resources() for the same single measured call. These are
+# host-model figures for native Rust execution under the test env (hermetic,
+# no network), not testnet fee quotes — see docs/gas-costs.md.
+initialize cpu=174713 mem=94027 read_entries=4 write_entries=2 read_bytes=0 write_bytes=1592
+get_oracle_config cpu=210524 mem=105800 read_entries=2 write_entries=0 read_bytes=0 write_bytes=0
+oracle_rate cpu=227794 mem=117783 read_entries=3 write_entries=0 read_bytes=0 write_bytes=0
+replace_oracle_config cpu=330563 mem=149518 read_entries=6 write_entries=3 read_bytes=0 write_bytes=1888
+set_allocation cpu=278165 mem=132976 read_entries=4 write_entries=2 read_bytes=0 write_bytes=1836
+get_allocation cpu=207813 mem=107412 read_entries=2 write_entries=0 read_bytes=0 write_bytes=0
+lock cpu=498856 mem=201204 read_entries=7 write_entries=4 read_bytes=92 write_bytes=2040
+release_advance_1 cpu=284273 mem=116037 read_entries=2 write_entries=1 read_bytes=0 write_bytes=1528
+claim_advance_1 cpu=505828 mem=202688 read_entries=7 write_entries=4 read_bytes=92 write_bytes=2048
+reclaim_advance_1 cpu=503548 mem=196185 read_entries=7 write_entries=4 read_bytes=0 write_bytes=2048
+mark_checkpoint cpu=307806 mem=125844 read_entries=4 write_entries=2 read_bytes=0 write_bytes=1600
+release_advance_2 cpu=286353 mem=116563 read_entries=2 write_entries=1 read_bytes=0 write_bytes=1528
+claim_advance_2 cpu=506613 mem=204048 read_entries=7 write_entries=4 read_bytes=92 write_bytes=2048
+reclaim_advance_2 cpu=504321 mem=197137 read_entries=7 write_entries=4 read_bytes=0 write_bytes=2048
+ready_for_delivery cpu=308550 mem=126524 read_entries=4 write_entries=2 read_bytes=0 write_bytes=1600
+fund_remainder cpu=507714 mem=200188 read_entries=7 write_entries=4 read_bytes=0 write_bytes=2048
+expire_remainder_window cpu=368642 mem=161914 read_entries=4 write_entries=1 read_bytes=0 write_bytes=1524
+reclaim_on_nondelivery cpu=553347 mem=205331 read_entries=7 write_entries=4 read_bytes=0 write_bytes=2044
+expire_delivery_window cpu=530528 mem=196226 read_entries=5 write_entries=3 read_bytes=0 write_bytes=1972
+confirm_delivery cpu=315154 mem=127861 read_entries=4 write_entries=2 read_bytes=0 write_bytes=1596
+settle cpu=555698 mem=200319 read_entries=5 write_entries=3 read_bytes=0 write_bytes=1968
+resolve_fx_shortfall cpu=462503 mem=200035 read_entries=5 write_entries=1 read_bytes=0 write_bytes=1744
+refresh_fx_quote_status cpu=343517 mem=145818 read_entries=3 write_entries=1 read_bytes=0 write_bytes=1744
+fund_fx_shortfall cpu=543729 mem=217409 read_entries=7 write_entries=4 read_bytes=0 write_bytes=2264
+expire_fx_shortfall_window cpu=587196 mem=216084 read_entries=5 write_entries=3 read_bytes=0 write_bytes=2192
+cancel cpu=574297 mem=215733 read_entries=9 write_entries=5 read_bytes=0 write_bytes=2116
+reassign_buyer cpu=346155 mem=144647 read_entries=8 write_entries=4 read_bytes=0 write_bytes=1736
+flag_dispute cpu=309969 mem=126104 read_entries=4 write_entries=2 read_bytes=0 write_bytes=1592
+resolve_dispute cpu=354239 mem=145616 read_entries=8 write_entries=4 read_bytes=0 write_bytes=1736
+expire_dispute_window cpu=287782 mem=117022 read_entries=2 write_entries=1 read_bytes=0 write_bytes=1520
+get_status cpu=175053 mem=92216 read_entries=2 write_entries=0 read_bytes=0 write_bytes=0
+get_commitment cpu=223757 mem=96695 read_entries=2 write_entries=0 read_bytes=0 write_bytes=0
+available_actions cpu=197663 mem=94838 read_entries=2 write_entries=0 read_bytes=0 write_bytes=0
+get_commitment_view cpu=227296 mem=97205 read_entries=2 write_entries=0 read_bytes=0 write_bytes=0

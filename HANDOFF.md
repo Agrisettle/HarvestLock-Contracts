@@ -986,6 +986,50 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
+*Last updated: 24 Nov 2026 — #222, offline per-method CPU/memory budget
+baseline. **No contract code changed.** New
+`contracts/escrow/tests/budget.rs` drives every one of the contract's **34
+exported methods** to a state where the call genuinely succeeds, resets
+`env.cost_estimate().budget()` immediately before the measured call so
+scenario setup cannot leak in, and records CPU instructions, peak memory
+bytes, read/write entry counts and read/write byte counts against the new
+committed `contracts/escrow/budget.snapshot`. Coverage includes the oracle
+paths (`oracle_rate`, `resolve_fx_shortfall`, `refresh_fx_quote_status`,
+`fund_fx_shortfall`, `expire_fx_shortfall_window`, plus
+`replace_oracle_config`; reads go to an in-process fixed-quote oracle) and the
+multi-party paths
+(`reassign_buyer`, `resolve_dispute`, `cancel`). Adding, removing or renaming
+a method fails the suite until the harness and baseline are updated.
+
+The tolerance is **1%**, not the issue's suggested 5%: native host metering
+is deterministic here (two `BLESS_BUDGET=1` runs produced a byte-identical
+snapshot), while the smallest meaningful regression — one extra read of the
+stored `Commitment` — adds ~11k instructions, i.e. only ~1.9% of the heaviest
+method. Verified rather than assumed: injecting exactly that extra read into
+`cancel` failed the suite with
+`cancel cpu: 574297 -> 584725 (+1.8%) exceeds 1%`, then the probe was reverted.
+The baseline was re-blessed on top of current `upstream/main`: `initialize`
+moved +1,295 CPU with the new `CommitmentTerms` argument shape, and methods
+that publish `StatusChanged` carry the upstream default `map` encoding (the
+`single-value` switch is still an open PR, #345). Neither is a behavior change
+from this work.
+Re-bless workflow, format and the native-vs-WASM caveat are documented in
+`docs/gas-costs.md`'s new "Offline regression baseline" section, with a
+cross-link from `docs/cost-estimation.md` §4. The suite disables Soroban's
+`test_snapshots/*.json` capture for its envs, so the baseline adds no
+footprint artifacts per run.
+
+Verified at this HEAD: `cargo fmt --check` clean; `cargo test --no-fail-fast`
+**331 passing, 0 failing, 3 ignored** (231 unit; 100 across the 15 integration
+targets, including this new budget suite's 3/3). The pre-existing
+`clippy::too_many_arguments` warnings on contract entry points are unchanged
+and still not CI-gated.
+
+*Last updated: 23 Nov 2026 — two-issue bundle (#220, #221): one event
+encoding change, and a new fuzz crate for the XDR boundary. **No workflow
+files touched** (maintainer policy), and the contract's storage
+`Commitment` struct and every entry point's behaviour are unchanged.*
+
 *Last updated: 24 Nov 2026 — four-issue bundle (#274, #275, #276, #277).
 **No workflow files touched** (maintainer policy). New terminal `Error`
 variant `LockAfterDeliveryDeadline = 47`, so `error_discriminants.snapshot`
