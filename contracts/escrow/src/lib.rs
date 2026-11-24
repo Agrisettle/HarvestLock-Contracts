@@ -2913,14 +2913,6 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_extend_delivery_deadline(&c, now, c.delivery_deadline.saturating_add(1)),
-            "extend_delivery_deadline",
-            AuthParty::BuyerAndCooperative,
-            ActionDeadline::Inclusive(c.delivery_deadline),
-        );
-        Self::push_action(
-            &env,
-            &mut actions,
             Self::can_open_tranche(&c, Tranche::One),
             "release_advance_1",
             AuthParty::Anyone,
@@ -3069,6 +3061,14 @@ impl EscrowContract {
             "expire_fx_shortfall_window",
             AuthParty::Anyone,
             ActionDeadline::Exclusive(c.fx_shortfall_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
+            Self::can_extend_delivery_deadline(&c, now, c.delivery_deadline.saturating_add(1)),
+            "extend_delivery_deadline",
+            AuthParty::BuyerAndCooperative,
+            ActionDeadline::Inclusive(c.delivery_deadline),
         );
         Self::push_action(
             &env,
