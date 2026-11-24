@@ -38,7 +38,7 @@
 //! All absolute deadlines here follow one boundary rule: the recorded
 //! deadline timestamp is the *last* second on which the original window
 //! is still open, and every deadline-triggered failure path opens
-//! strictly after it. So at `now == deadline`, `fund_remainder`,
+//! strictly after it. So at `now == deadline`, `lock`, `fund_remainder`,
 //! `fund_fx_shortfall` and `resolve_dispute` still succeed, while
 //! `expire_remainder_window`, `expire_fx_shortfall_window`,
 //! `reclaim_on_nondelivery` and `expire_dispute_window` still refuse — a
@@ -162,6 +162,15 @@
 extern crate std;
 
 mod reflector;
+
+/// The shared test harness (#274): one copy of the fixtures, constants and
+/// clock helpers behind every suite — the in-crate unit tests in
+/// `src/test.rs` and the integration suites in `tests/`. Declared here rather
+/// than duplicated so the two can't drift; see the module's own docs for how
+/// each suite reaches it and why the integration suites need the `testutils`
+/// feature (which `Cargo.toml`'s self dev-dependency turns on for them).
+#[cfg(any(test, feature = "testutils"))]
+pub mod testutils;
 
 use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
 use soroban_sdk::{
@@ -483,6 +492,15 @@ pub enum Error {
     /// header of `tests/oracle_fault_injection.rs` for which failures are
     /// recoverable and which still abort.
     OracleUnavailable = 46,
+    /// `lock` called after `delivery_deadline` has *strictly* passed
+    /// (`now > delivery_deadline`) — the deadline second itself is still in
+    /// time, matching every other deadline here. The delivery window is the
+    /// cooperative's time to perform and it starts at `initialize` (see
+    /// `Commitment::delivery_deadline`), so a lock that lands after it would
+    /// hand the buyer an immediate `reclaim_on_nondelivery` — a `Forfeited`
+    /// strike against a cooperative that never had a window to deliver in
+    /// (#277).
+    LockAfterDeliveryDeadline = 47,
 }
 
 #[contracttype]
@@ -680,6 +698,19 @@ pub struct Commitment {
     /// once at `initialize` — unlike the tranche/remainder deadlines,
     /// this one doesn't depend on some other call happening first, so
     /// there's no "0 = unset" state for it.
+    ///
+    /// **The delivery window starts at `initialize`, not at `lock`**: it is
+    /// the cooperative's time to reach `Delivered`, anchored to the moment
+    /// the deal was created (`created_at`), and it is therefore already
+    /// ticking while the commitment sits in `Draft`. That is deliberate —
+    /// the window is the buyer's protection against a cooperative that
+    /// never delivers, and re-anchoring it at `lock` would let a buyer
+    /// extend it by simply locking late. The complementary guard is on the
+    /// other side of that trade-off (#277): `lock` refuses once
+    /// `now > delivery_deadline` with
+    /// [`Error::LockAfterDeliveryDeadline`], so a buyer can never lock into
+    /// a window that has already closed and immediately forfeit the
+    /// cooperative's position via `reclaim_on_nondelivery`.
     pub delivery_deadline: u64,
 
     /// 0 = not yet opened. Once `release_advance_1` runs, this is set to
@@ -693,7 +724,12 @@ pub struct Commitment {
     pub advance2_claimed: bool,
     pub advance2_expired: bool,
 
-    /// 0 = not yet opened. Set by `ready_for_delivery`.
+    /// Set by `ready_for_delivery` when the remainder is non-zero and by
+    /// `fund_remainder` once the buyer's second deposit lands. **Also set by
+    /// `ready_for_delivery` itself when the remainder is zero** (#275): a
+    /// deposit covering all of `total_amount` (advance bps summing to 10 000)
+    /// leaves nothing to fund, so the window opens already satisfied and the
+    /// buyer can't be defaulted for skipping a call that moves no tokens.
     pub remainder_deadline: u64,
     pub remainder_funded: bool,
 
@@ -847,6 +883,16 @@ impl Commitment {
             assert!(
                 self.remainder_deadline != 0,
                 "invariant: remainder_funded with remainder_deadline == 0"
+            );
+        }
+        // #275: a deposit that already covers `total_amount` leaves nothing
+        // for `fund_remainder` to escrow, so the remainder window opens
+        // already satisfied — there is no state where a zero remainder is
+        // unfunded and the buyer can be defaulted over it.
+        if self.remainder_deadline != 0 && EscrowContract::remainder_amount(self) == 0 {
+            assert!(
+                self.remainder_funded,
+                "invariant: zero remainder left unfunded with a window open"
             );
         }
         // A shortfall exists iff it has a deadline to cure it by.
@@ -1718,6 +1764,23 @@ impl EscrowContract {
     /// amount. See module docs for why this changed from earlier versions
     /// of this contract, which escrowed everything here.
     ///
+    /// Requires buyer auth.
+    ///
+    /// **Refused once `delivery_deadline` has strictly passed (#277)**: the
+    /// delivery window counts from `initialize`, not from this call (see
+    /// `Commitment::delivery_deadline` for why), so locking after it would
+    /// buy the buyer a same-second `reclaim_on_nondelivery` and a free
+    /// `Forfeited` against a cooperative that never had time to deliver.
+    /// The deadline second itself is still in time — `now > delivery_deadline`
+    /// is the only rejection (`RemainderWindowPassed`/`ClaimWindowPassed`
+    /// use the same inclusive cut-off), so
+    /// `lock_exactly_at_the_delivery_deadline_still_succeeds` pins the
+    /// boundary from both sides. Rejecting here is the guard half of the
+    /// fix; the alternative considered and not taken was re-anchoring
+    /// `delivery_deadline` to `max(delivery_deadline, lock time + window)`,
+    /// which would have let a buyer extend the cooperative's deadline
+    /// unilaterally.
+    ///
     /// No prior SEP-41 `approve()` needed — verified live against real
     /// testnet, not assumed. Soroban's single-transaction nested-
     /// authorization model means the buyer's signature on the top-level
@@ -1729,7 +1792,7 @@ impl EscrowContract {
     /// replaces it with what was actually verified.)
     pub fn lock(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        Self::can_lock(&c)?;
+        Self::can_lock(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
         let deposit = Self::deposit_amount(&c);
@@ -1850,11 +1913,30 @@ impl EscrowContract {
     /// `release_advance_*`: this one has real stakes for the buyer (it
     /// starts the clock that can end in `Defaulted`), so it shouldn't be
     /// triggerable by just anyone.
+    ///
+    /// **A zero remainder is funded here, not by a token transfer (#275).**
+    /// `lock` escrows `advance1_bps + advance2_bps` of `total_amount` and
+    /// `fund_remainder` escrows the rest; when an advance split sums to
+    /// exactly 10 000 bps the deposit *is* `total_amount`, so there is no
+    /// remainder to send. Requiring `fund_remainder` anyway would let a
+    /// fully-prepaid buyer be marked `Defaulted` — and lose the whole
+    /// deposit to the cooperative — by not making a call that moves zero
+    /// tokens before `remainder_deadline`. So when the remainder is zero,
+    /// this call sets `remainder_funded` itself, which keeps
+    /// `expire_remainder_window`'s buyer-default (`RemainderAlreadyFunded`)
+    /// and `confirm_delivery`'s gate (`RemainderNotFunded`) meaningful: the
+    /// first is unreachable, the second already satisfied. No
+    /// `RemainderFunded` event is emitted for it, because no funds were
+    /// funded — the state is observable in `get_commitment`.
     pub fn ready_for_delivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_ready_for_delivery(&c)?;
         c.cooperative.require_auth();
         c.remainder_deadline = env.ledger().timestamp() + c.remainder_window_secs;
+        // #275: nothing left to escrow, so nothing to default on.
+        if Self::remainder_amount(&c) == 0 {
+            c.remainder_funded = true;
+        }
         Self::set_status(&env, &mut c, Status::ReadyForDelivery);
         Self::save(&env, &c);
         Ok(())
@@ -1872,12 +1954,20 @@ impl EscrowContract {
     /// `expire_remainder_window` needs strictly more than the deadline,
     /// which is what keeps the boundary from being ambiguous — the two
     /// calls are never both legal at the same timestamp.
+    ///
+    /// **A zero remainder is already funded (#275)**: when
+    /// `advance1_bps + advance2_bps == 10_000`, `lock` has escrowed the
+    /// whole `total_amount`, `ready_for_delivery` marked the remainder
+    /// funded on the buyer's behalf, and this call refuses with
+    /// `RemainderAlreadyFunded` instead of transferring zero tokens. The
+    /// deal can go straight to `confirm_delivery` — no no-op call is
+    /// required, and none can be held against the buyer.
     pub fn fund_remainder(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_fund_remainder(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
-        let remainder = c.total_amount - Self::deposit_amount(&c);
+        let remainder = Self::remainder_amount(&c);
 
         // Effects before interaction — see `lock`'s comment for why.
         c.remainder_funded = true;
@@ -1914,6 +2004,12 @@ impl EscrowContract {
     /// weren't already scoped to benefit the buyer specifically. Anyone —
     /// including an off-chain watcher — can trigger it once the fact of
     /// the matter (deadline passed, unfunded) is true.
+    ///
+    /// **Unreachable for a fully-prepaid commitment (#275)**: when the
+    /// advance bps sum to 10 000 there is no remainder, `ready_for_delivery`
+    /// marks it funded, and this call refuses with
+    /// `RemainderAlreadyFunded` — the buyer can never be defaulted for not
+    /// sending zero tokens.
     pub fn expire_remainder_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_expire_remainder_window(&c, env.ledger().timestamp())?;
@@ -1948,7 +2044,10 @@ impl EscrowContract {
     ///
     /// Not reachable from `Draft`: nothing's ever been escrowed at that
     /// point, so there's nothing to reclaim and no real event has
-    /// occurred worth recording as a forfeiture.
+    /// occurred worth recording as a forfeiture. Since `lock` refuses once
+    /// `delivery_deadline` has passed (#277), there is also no way to reach
+    /// `Locked` with the delivery window already closed, so this sweep can
+    /// only ever fire against a window the cooperative actually had.
     pub fn reclaim_on_nondelivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_reclaim_on_nondelivery(&c, env.ledger().timestamp())?;
@@ -2706,10 +2805,14 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_lock(&c),
+            Self::can_lock(&c, now),
             "lock",
             AuthParty::Buyer,
-            ActionDeadline::None,
+            // #277: `lock` is only legal while the delivery window that
+            // `initialize` started is still open, so advertise that bound
+            // rather than "no deadline" — an advertised action must always
+            // be one the contract would actually accept.
+            ActionDeadline::Inclusive(c.delivery_deadline),
         );
         Self::push_action(
             &env,
@@ -3051,8 +3154,17 @@ impl EscrowContract {
         Ok(())
     }
 
-    fn can_lock(c: &Commitment) -> Result<(), Error> {
-        Self::require_status(c, Method::Lock)
+    fn can_lock(c: &Commitment, now: u64) -> Result<(), Error> {
+        Self::require_status(c, Method::Lock)?;
+        // #277: the delivery window starts at `initialize`, so a lock past
+        // its end would leave the cooperative no time to deliver and hand
+        // the buyer an immediate `reclaim_on_nondelivery`. The deadline
+        // second itself still belongs to the window, like every other
+        // deadline in this file.
+        if now > c.delivery_deadline {
+            return Err(Error::LockAfterDeliveryDeadline);
+        }
+        Ok(())
     }
 
     fn can_mark_checkpoint(c: &Commitment) -> Result<(), Error> {
@@ -3303,6 +3415,16 @@ impl EscrowContract {
             c.total_amount,
             c.advance1_bps.saturating_add(c.advance2_bps),
         )
+    }
+
+    /// What `fund_remainder` still has to escrow: `total_amount` minus the
+    /// deposit `lock` already took. Zero exactly when the two advances add up
+    /// to 10_000 bps on an amount large enough for the floor in
+    /// `deposit_amount` to be exact — the fully-prepaid case #275 is about,
+    /// where `ready_for_delivery` marks the remainder funded rather than
+    /// asking the buyer for a zero-value transfer.
+    fn remainder_amount(c: &Commitment) -> i128 {
+        c.total_amount - Self::deposit_amount(c)
     }
 
     /// Sum of advance tranches already claimed by the cooperative (#285).

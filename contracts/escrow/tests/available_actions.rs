@@ -160,6 +160,15 @@ fn draft_with_allocation() -> World {
     w
 }
 
+/// The other side of #277's boundary: still `Draft`, but the delivery window
+/// `initialize` started has strictly passed, so `lock` is no longer possible.
+fn draft_after_delivery_deadline() -> World {
+    let w = plain_world();
+    let deadline = w.contract.get_commitment().delivery_deadline;
+    w.set_time(deadline + 1);
+    w
+}
+
 fn locked() -> World {
     let w = plain_world();
     w.contract.lock();
@@ -583,7 +592,15 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                     AuthParty::Cooperative,
                     none(),
                 ));
-                v.push_back(act(&w.env, "lock", AuthParty::Buyer, none()));
+                // #277: `lock` stops being legal once the delivery window
+                // that `initialize` started is over, so the advertised bound
+                // is that window's end, not "no deadline".
+                v.push_back(act(
+                    &w.env,
+                    "lock",
+                    AuthParty::Buyer,
+                    at(w.contract.get_commitment().delivery_deadline),
+                ));
                 push_pre_delivery_common(w, &mut v);
                 v
             },
@@ -606,7 +623,12 @@ fn scenarios() -> std::vec::Vec<Scenario> {
             setup: draft_with_allocation,
             expected: |w| {
                 let mut v = Vec::new(&w.env);
-                v.push_back(act(&w.env, "lock", AuthParty::Buyer, none()));
+                v.push_back(act(
+                    &w.env,
+                    "lock",
+                    AuthParty::Buyer,
+                    at(w.contract.get_commitment().delivery_deadline),
+                ));
                 push_pre_delivery_common(w, &mut v);
                 v
             },
@@ -615,6 +637,26 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 absent(Call::SetAllocation, Error::AllocationAlreadySet),
                 absent(Call::Release1, Error::InvalidState),
                 absent(Call::FlagDispute, Error::InvalidState),
+            ],
+        },
+        Scenario {
+            name: "Draft, after the overall delivery deadline",
+            setup: draft_after_delivery_deadline,
+            expected: |w| {
+                let mut v = Vec::new(&w.env);
+                v.push_back(act(
+                    &w.env,
+                    "set_allocation",
+                    AuthParty::Cooperative,
+                    none(),
+                ));
+                push_pre_delivery_common(w, &mut v);
+                v
+            },
+            advertised: vec![Call::SetAllocation, Call::Cancel, Call::Reassign],
+            absent: vec![
+                absent(Call::Lock, Error::LockAfterDeliveryDeadline),
+                absent(Call::ReclaimNondelivery, Error::InvalidState),
             ],
         },
         Scenario {

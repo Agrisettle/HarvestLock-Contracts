@@ -73,6 +73,22 @@ human-readable explanation of *why* each row is legal or not.
 | `cancel` | Buyer + cooperative | No early unwind; a terminal path may still exist | Nobody unilaterally — by design | 0; no record | Mutual by definition; the rescue path for a dead operator (§4.4) |
 | `reassign_buyer` | Current buyer + cooperative + incoming buyer | Irrelevant to funds | — | — | Not a griefing surface |
 
+Two rows are narrower than they look, and both were tightened/loosened
+recently:
+
+- **`fund_remainder` does not apply to a fully-prepaid deal (#275).** When
+  `advance1_bps + advance2_bps == 10_000` the deposit `lock` escrowed *is*
+  `total_amount`, so there is no remainder: `ready_for_delivery` marks it
+  funded, `expire_remainder_window` refuses with `RemainderAlreadyFunded`,
+  and the buyer cannot be defaulted for skipping a call that would transfer
+  zero tokens.
+- **`lock` is only possible inside the delivery window (#277).** The window
+  runs from `initialize` (`created_at + delivery_window_secs`), so a buyer
+  cannot wait it out and then lock; `lock` refuses with
+  `LockAfterDeliveryDeadline`. That removes the sequence where a late lock
+  was immediately followed by `reclaim_on_nondelivery` — a `Forfeited`
+  strike against a cooperative that never had a window to perform in.
+
 Two structural notes from the table:
 
 - **Every permissionless function is unpriced.** There is no caller fee.
