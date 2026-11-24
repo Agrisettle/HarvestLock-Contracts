@@ -25,6 +25,10 @@
 # `oracle_config` may be `null` for a plain deal, or an object with
 #   oracle_contract, price_asset, max_age_secs, denominated_amount
 # for an oracle-configured deal (passed via --oracle_config-file-path).
+#
+# Since #270 the eight numeric/list terms above are sent to `initialize` as
+# one named `CommitmentTerms` JSON object (`--terms`), not as positional
+# flags; the parties, the token and `oracle_config` stay separate arguments.
 set -eu
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -112,6 +116,10 @@ delivery_window_secs=$(jq -r '.delivery_window_secs' "$terms_file")
 contracted_quantity=$(jq -r '.contracted_quantity' "$terms_file")
 grade_price_bps=$(jq -c '.grade_price_bps' "$terms_file")
 oracle_config=$(jq -c '.oracle_config' "$terms_file")
+# The eight agreed terms as one struct (#270). Kept as JSON so the CLI can
+# encode the named fields; the values are the same flat fields the file has
+# always carried.
+terms_json=$(jq -c '{total_amount, advance1_bps, advance2_bps, claim_window_secs, remainder_window_secs, delivery_window_secs, contracted_quantity, grade_price_bps}' "$terms_file")
 
 # Validate every required terms field is present and non-null.
 require_field() {
@@ -144,9 +152,7 @@ if [ "$oracle_config" = "null" ] || [ -z "$oracle_config" ]; then
         initialize \
         --buyer "$buyer_addr" --cooperative "$coop_addr" --warehouse-operator "$wh_addr" \
         --token "$token_addr" \
-        --total-amount "$total_amount" --advance1-bps "$advance1_bps" --advance2-bps "$advance2_bps" \
-        --claim-window-secs "$claim_window_secs" --remainder-window-secs "$remainder_window_secs" --delivery-window-secs "$delivery_window_secs" \
-        --contracted-quantity "$contracted_quantity" --grade-price-bps "$grade_price_bps" \
+        --terms "$terms_json" \
         --oracle-config null
 else
     oracle_file=$(mktemp)
@@ -155,9 +161,7 @@ else
         initialize \
         --buyer "$buyer_addr" --cooperative "$coop_addr" --warehouse-operator "$wh_addr" \
         --token "$token_addr" \
-        --total-amount "$total_amount" --advance1-bps "$advance1_bps" --advance2-bps "$advance2_bps" \
-        --claim-window-secs "$claim_window_secs" --remainder-window-secs "$remainder_window_secs" --delivery-window-secs "$delivery_window_secs" \
-        --contracted-quantity "$contracted_quantity" --grade-price-bps "$grade_price_bps" \
+        --terms "$terms_json" \
         --oracle_config-file-path "$oracle_file"
     rm -f "$oracle_file"
 fi

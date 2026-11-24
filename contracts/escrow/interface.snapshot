@@ -91,7 +91,7 @@ fn get_commitment() -> Result<Commitment, Error>
 fn get_commitment_view() -> Result<CommitmentView, Error>
 fn get_oracle_config() -> Result<Option<OracleConfig>, Error>
 fn get_status() -> Result<Status, Error>
-fn initialize(buyer: Address, cooperative: Address, warehouse_operator: Address, token: Address, total_amount: i128, advance1_bps: u32, advance2_bps: u32, claim_window_secs: u64, remainder_window_secs: u64, delivery_window_secs: u64, contracted_quantity: u32, grade_price_bps: Vec<u32>, oracle_config: Option<OracleConfig>) -> Result<(), Error>
+fn initialize(buyer: Address, cooperative: Address, warehouse_operator: Address, token: Address, terms: CommitmentTerms, oracle_config: Option<OracleConfig>) -> Result<(), Error>
 fn lock() -> Result<(), Error>
 fn mark_checkpoint() -> Result<(), Error>
 fn oracle_rate() -> Result<OracleRate, Error>
@@ -169,7 +169,7 @@ struct CommitmentTerms.advance1_bps: u32
 struct CommitmentTerms.advance2_bps: u32
 struct CommitmentTerms.claim_window_secs: u64
 struct CommitmentTerms.contracted_quantity: u32
-struct CommitmentTerms.delivery_deadline: u64
+struct CommitmentTerms.delivery_window_secs: u64
 struct CommitmentTerms.grade_price_bps: Vec<u32>
 struct CommitmentTerms.remainder_window_secs: u64
 struct CommitmentTerms.total_amount: i128

@@ -77,7 +77,9 @@
 mod common;
 
 use common::{world, World};
-use harvestlock_escrow::{Error, EscrowContract, EscrowContractClient, OracleConfig, Status};
+use harvestlock_escrow::{
+    CommitmentTerms, Error, EscrowContract, EscrowContractClient, OracleConfig, Status,
+};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{token, Address, Env, Symbol, Vec};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -273,14 +275,16 @@ fn build_with(
         &cooperative,
         &warehouse,
         &token_address,
-        &common::TOTAL_AMOUNT,
-        &1_500,
-        &1_500,
-        &common::WINDOW,
-        &common::REMAINDER_WINDOW,
-        &common::DELIVERY_WINDOW,
-        &common::CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, common::GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: common::TOTAL_AMOUNT,
+            advance1_bps: 1_500,
+            advance2_bps: 1_500,
+            claim_window_secs: common::WINDOW,
+            remainder_window_secs: common::REMAINDER_WINDOW,
+            delivery_window_secs: common::DELIVERY_WINDOW,
+            contracted_quantity: common::CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, common::GRADE_PRICE_BPS),
+        },
         &Some(OracleConfig {
             oracle_contract,
             price_asset: Symbol::new(&env, "NGN"),

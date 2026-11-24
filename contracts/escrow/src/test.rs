@@ -102,14 +102,7 @@ fn setup_in(
         &cooperative,
         &warehouse,
         &token_address,
-        &total_amount,
-        &advance1_bps,
-        &advance2_bps,
-        &window,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(env, GRADE_PRICE_BPS),
+        &terms(env, total_amount, advance1_bps, advance2_bps, window),
         &None,
     );
 
@@ -121,6 +114,30 @@ fn setup_in(
         cooperative,
         warehouse,
         total_amount,
+    }
+}
+
+/// The eight agreed terms `initialize` takes as one struct (#270), at this
+/// fixture's standard remainder/delivery windows, quantity and grade
+/// schedule. A test that cares about one term changes only that term, so
+/// every other one matches the fixture instead of being re-typed per call
+/// site.
+fn terms(
+    env: &Env,
+    total_amount: i128,
+    advance1_bps: u32,
+    advance2_bps: u32,
+    claim_window_secs: u64,
+) -> CommitmentTerms {
+    CommitmentTerms {
+        total_amount,
+        advance1_bps,
+        advance2_bps,
+        claim_window_secs,
+        remainder_window_secs: REMAINDER_WINDOW,
+        delivery_window_secs: DELIVERY_WINDOW,
+        contracted_quantity: CONTRACTED_QUANTITY,
+        grade_price_bps: Vec::from_array(env, GRADE_PRICE_BPS),
     }
 }
 
@@ -238,14 +255,7 @@ fn cannot_initialize_twice() {
         &s.cooperative,
         &s.warehouse,
         &s.token.address,
-        &s.total_amount,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&s.env, GRADE_PRICE_BPS),
+        &terms(&s.env, s.total_amount, 1_000, 1_000, WINDOW),
         &None,
     );
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
@@ -284,14 +294,7 @@ fn initialize_allows_buyer_cooperative_and_warehouse_to_be_one_address() {
         &one_principal,
         &one_principal,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 1_000_000, 1_000, 1_000, WINDOW),
         &None,
     );
     assert_eq!(
@@ -333,14 +336,7 @@ fn zero_total_amount_rejected_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &0,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 0, 1_000, 1_000, WINDOW),
         &None,
     );
     assert_eq!(result, Err(Ok(Error::ZeroAmount)));
@@ -364,14 +360,7 @@ fn zero_claim_window_rejected_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &0,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 1_000_000, 1_000, 1_000, 0),
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
@@ -395,14 +384,16 @@ fn zero_remainder_window_rejected_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &0,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: 0,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
@@ -426,14 +417,16 @@ fn zero_delivery_window_rejected_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &0,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: 0,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidWindow)));
@@ -457,14 +450,7 @@ fn advance_bps_over_10000_rejected_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &6_000,
-        &5_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 1_000_000, 6_000, 5_000, WINDOW),
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidBps)));
@@ -490,14 +476,7 @@ fn max_total_amount_is_accepted_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &MAX_TOTAL_AMOUNT,
-        &10_000,
-        &0,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, MAX_TOTAL_AMOUNT, 10_000, 0, WINDOW),
         &None,
     );
     assert_eq!(
@@ -529,14 +508,7 @@ fn total_amount_over_max_is_rejected_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &(MAX_TOTAL_AMOUNT + 1),
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, (MAX_TOTAL_AMOUNT + 1), 1_000, 1_000, WINDOW),
         &None,
     );
     assert_eq!(result, Err(Ok(Error::AmountTooLarge)));
@@ -1045,14 +1017,7 @@ fn setup_with_oracle_denomination(
         &cooperative,
         &warehouse,
         &token_address,
-        &total_amount,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, total_amount, 1_500, 1_500, WINDOW),
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
@@ -1127,14 +1092,7 @@ fn oracle_rate_fails_when_the_oracle_has_never_quoted_this_asset() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 1_000_000, 1_500, 1_500, WINDOW),
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
@@ -1195,14 +1153,7 @@ fn initialize_rejects_a_zero_max_age_secs_oracle_config() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 1_000_000, 1_500, 1_500, WINDOW),
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
@@ -1239,14 +1190,7 @@ fn try_initialize_with_denominated_amount(
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(env, GRADE_PRICE_BPS),
+        &terms(env, 1_000_000, 1_500, 1_500, WINDOW),
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(env, "NGN"),
@@ -1415,14 +1359,7 @@ fn resolve_fx_with_token_decimals(token_decimals: u32, total_amount: i128) -> Se
         &cooperative,
         &warehouse,
         &token_id,
-        &total_amount,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, total_amount, 1_500, 1_500, WINDOW),
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
@@ -2977,14 +2914,16 @@ fn initialize_rejects_zero_contracted_quantity() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &0,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: 0,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidQuantity)));
@@ -3008,14 +2947,16 @@ fn initialize_rejects_empty_grade_schedule() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::new(&env),
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::new(&env),
+        },
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidGradeSchedule)));
@@ -3039,14 +2980,16 @@ fn initialize_rejects_a_grade_priced_over_10000_bps() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, [10_000, 10_001]),
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, [10_000, 10_001]),
+        },
         &None,
     );
     assert_eq!(result, Err(Ok(Error::InvalidGradeSchedule)));
@@ -3075,14 +3018,16 @@ fn initialize_rejects_a_grade_schedule_over_max_entries() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &over_cap,
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: over_cap,
+        },
         &None,
     );
     assert_eq!(result, Err(Ok(Error::GradeScheduleTooLong)));
@@ -3111,14 +3056,16 @@ fn initialize_accepts_a_grade_schedule_at_max_entries() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &1_000,
-        &1_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &at_cap,
+        &CommitmentTerms {
+            total_amount: 1_000_000,
+            advance1_bps: 1_000,
+            advance2_bps: 1_000,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: at_cap,
+        },
         &None,
     );
     assert_eq!(contract.get_status(), Status::Draft);
@@ -3472,6 +3419,85 @@ fn reassign_buyer_transfers_reclaim_rights_to_the_new_buyer() {
         s.total_amount - deposit,
         "original buyer should receive nothing from reclaim after reassignment, only keep what they never funded"
     );
+}
+
+/// #273 — `reassign_buyer` is reachable from `Draft`, where the old buyer has
+/// paid nothing yet. That is the one window where a wrong wallet gets charged:
+/// every existing reassignment test starts at `Locked` or later, after the
+/// deposit has already moved.
+///
+/// This test swaps the buyer while still `Draft` and then checks all four
+/// consequences: the deposit comes from the new buyer's balance, the outgoing
+/// buyer's balance is untouched, the outgoing buyer's signature no longer
+/// authorizes `lock`, and both refund paths pay the new buyer.
+#[test]
+fn reassign_buyer_in_draft_charges_and_refunds_the_new_buyer() {
+    let s = setup(1_500, 1_500); // 15% + 15% = a 30% deposit
+    let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
+    let new_buyer = Address::generate(&s.env);
+    // Fund the incoming buyer with exactly the deposit, so their closing
+    // balance measures what `lock` pulled from them and nothing else.
+    token::StellarAssetClient::new(&s.env, &s.token.address).mint(&new_buyer, &deposit);
+    let outgoing_balance = s.token.balance(&s.buyer);
+    assert_eq!(outgoing_balance, s.total_amount);
+
+    s.contract.reassign_buyer(&new_buyer);
+    assert_eq!(s.contract.get_status(), Status::Draft);
+    assert_eq!(s.contract.get_commitment().buyer, new_buyer);
+
+    // The outgoing buyer's auth is no longer accepted for `lock`.
+    // `mock_auths` authorizes exactly this invocation for A and fails every
+    // other `require_auth()`, so the host refuses before anything moves.
+    let lock_invoke = mock_invoke(&s.contract.address, "lock", ().into_val(&s.env));
+    s.env.mock_auths(&[MockAuth {
+        address: &s.buyer,
+        invoke: &lock_invoke,
+    }]);
+    assert!(
+        s.contract.try_lock().is_err(),
+        "the outgoing buyer's signature must not authorize lock after reassignment"
+    );
+    assert_eq!(s.contract.get_status(), Status::Draft);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+    assert_eq!(s.token.balance(&new_buyer), deposit);
+
+    // The current buyer's signature is the one `lock` requires, and it is
+    // their wallet the deposit comes out of.
+    s.env.mock_all_auths();
+    s.contract.lock();
+    assert_eq!(s.contract.get_status(), Status::Locked);
+    assert_eq!(s.token.balance(&s.contract.address), deposit);
+    assert_eq!(s.token.balance(&new_buyer), 0, "the deposit came from B");
+    assert_eq!(
+        s.token.balance(&s.buyer),
+        outgoing_balance,
+        "A's balance must be untouched"
+    );
+
+    // A mutual unwind refunds the current buyer, not the one who signed at
+    // `initialize`.
+    s.contract.cancel();
+    assert_eq!(s.contract.get_status(), Status::Cancelled);
+    assert_eq!(s.token.balance(&new_buyer), deposit);
+    assert_eq!(s.token.balance(&s.buyer), outgoing_balance);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+
+    // The seller-non-delivery path is the other refund route, and it also
+    // pays whoever holds the buyer position at the time.
+    let s = setup(1_500, 1_500);
+    let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
+    let new_buyer = Address::generate(&s.env);
+    token::StellarAssetClient::new(&s.env, &s.token.address).mint(&new_buyer, &deposit);
+    let outgoing_balance = s.token.balance(&s.buyer);
+
+    s.contract.reassign_buyer(&new_buyer);
+    s.contract.lock();
+    advance_time(&s, DELIVERY_WINDOW + 1);
+    s.contract.reclaim_on_nondelivery();
+
+    assert_eq!(s.contract.get_status(), Status::Forfeited);
+    assert_eq!(s.token.balance(&new_buyer), deposit);
+    assert_eq!(s.token.balance(&s.buyer), outgoing_balance);
 }
 
 #[test]
@@ -5580,14 +5606,7 @@ fn advance_bps_summing_to_exactly_10000_is_accepted_at_initialize() {
         &cooperative,
         &warehouse,
         &token_address,
-        &1_000_000,
-        &5_000,
-        &5_000,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &terms(&env, 1_000_000, 5_000, 5_000, WINDOW),
         &None,
     );
 }
@@ -5719,7 +5738,14 @@ fn get_commitment_view_maps_every_commitment_field() {
     assert_eq!(v.terms.advance2_bps, c.advance2_bps);
     assert_eq!(v.terms.claim_window_secs, c.claim_window_secs);
     assert_eq!(v.terms.remainder_window_secs, c.remainder_window_secs);
-    assert_eq!(v.terms.delivery_deadline, c.delivery_deadline);
+    // #270: the view reports the *agreed* delivery window, the same field
+    // name `initialize` takes, rather than the absolute deadline derived
+    // from it. `created_at + delivery_window_secs` is that deadline.
+    assert_eq!(v.terms.delivery_window_secs, DELIVERY_WINDOW);
+    assert_eq!(
+        v.terms.delivery_window_secs,
+        c.delivery_deadline - c.created_at
+    );
     assert_eq!(v.terms.contracted_quantity, c.contracted_quantity);
     assert_eq!(v.terms.grade_price_bps, c.grade_price_bps);
 
@@ -6724,14 +6750,7 @@ mod oracle_identity_rate_differential {
             &cooperative,
             &warehouse,
             &token_address,
-            &TOTAL_AMOUNT,
-            &advance1_bps,
-            &advance2_bps,
-            &WINDOW,
-            &REMAINDER_WINDOW,
-            &DELIVERY_WINDOW,
-            &CONTRACTED_QUANTITY,
-            &Vec::from_array(&env, GRADE_PRICE_BPS),
+            &terms(&env, TOTAL_AMOUNT, advance1_bps, advance2_bps, WINDOW),
             &oracle_config,
         );
 
