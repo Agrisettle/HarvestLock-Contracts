@@ -114,8 +114,12 @@ storage struct `Commitment` itself, so adding a field for a storage reason is
 silently an ABI change for every indexer. `get_commitment_view` returns
 `CommitmentView` instead, with:
 
-- an explicit `schema_version` (currently `1`, mirroring
-  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`);
+- an explicit `schema_version` (currently `2`, mirroring
+  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`). Version `2` is #270:
+  `terms.delivery_deadline` became the agreed `terms.delivery_window_secs`,
+  making `terms` the very same `CommitmentTerms` type `initialize` accepts;
+  version-1 readers recompute the absolute deadline as
+  `created_at + terms.delivery_window_secs`. No other field moved;
 - semantic sub-structs — `parties`, `terms`, `tranches`, `funding`,
   `delivery`, `fx`, `dispute` — instead of storage order;
 - a documented stability promise: fields are only added, removed, renamed, or

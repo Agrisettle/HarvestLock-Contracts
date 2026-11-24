@@ -17,7 +17,7 @@ mod common;
 
 use common::*;
 use harvestlock_escrow::{
-    Action, ActionDeadline, AllocationMember, AuthParty, Error, EscrowContract,
+    Action, ActionDeadline, AllocationMember, AuthParty, CommitmentTerms, Error, EscrowContract,
     EscrowContractClient, OracleConfig, Status,
 };
 use soroban_sdk::testutils::{Address as _, EnvTestConfig};
@@ -125,14 +125,16 @@ fn oracle_world(denominated_amount: i128) -> World {
         &cooperative,
         &warehouse,
         &token_address,
-        &TOTAL_AMOUNT,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL_AMOUNT,
+            advance1_bps: 1_500,
+            advance2_bps: 1_500,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),

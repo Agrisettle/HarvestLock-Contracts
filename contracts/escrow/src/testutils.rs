@@ -49,7 +49,7 @@
 //! because `src/test.rs`'s thousands of existing assertions predate the
 //! unification and there is no behavior worth changing in renaming them.
 
-use crate::{EscrowContract, EscrowContractClient, Status};
+use crate::{CommitmentTerms, EscrowContract, EscrowContractClient, Status};
 use soroban_sdk::testutils::{Address as _, Ledger as _, MockAuthInvoke};
 use soroban_sdk::{token, Address, Env, Val, Vec};
 
@@ -148,6 +148,77 @@ impl Terms {
     pub fn delivery_window(mut self, delivery_window_secs: u64) -> Self {
         self.delivery_window_secs = delivery_window_secs;
         self
+    }
+}
+
+/// [`Terms`] as the single agreed-terms struct `initialize` takes (#270) —
+/// the grade schedule becomes an on-chain `Vec` here, which is why this needs
+/// an `Env` and [`Terms`] itself does not.
+pub fn commitment_terms(env: &Env, terms: &Terms) -> CommitmentTerms {
+    CommitmentTerms {
+        total_amount: terms.total_amount,
+        advance1_bps: terms.advance1_bps,
+        advance2_bps: terms.advance2_bps,
+        claim_window_secs: terms.claim_window_secs,
+        remainder_window_secs: terms.remainder_window_secs,
+        delivery_window_secs: terms.delivery_window_secs,
+        contracted_quantity: terms.contracted_quantity,
+        grade_price_bps: Vec::from_array(env, terms.grade_price_bps),
+    }
+}
+
+/// A minimal Reflector-shaped oracle for suites that need a *working* read.
+///
+/// Same XDR wire shape as `reflector.rs`'s `Asset`/`PriceData`, and as the
+/// deliberately-broken `FaultyOracle` in `tests/oracle_fault_injection.rs`
+/// (Soroban matches cross-contract calls on XDR shape, not Rust type
+/// identity), but with no fault-injection hooks: `tests/window_overflow.rs`
+/// only needs `resolve_fx_shortfall` to reach its deadline write, and with the
+/// mock here every suite that wants that read shares one definition instead of
+/// carrying its own copy (#271).
+pub mod mock_oracle {
+    use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Asset {
+        Stellar(Address),
+        Other(Symbol),
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct PriceData {
+        pub price: i128,
+        pub timestamp: u64,
+    }
+
+    #[contract]
+    pub struct MockOracle;
+
+    #[contractimpl]
+    impl MockOracle {
+        /// Records `price` as quoted at `timestamp`. The escrow contract
+        /// checks that timestamp against the ledger clock at read time, so
+        /// a caller testing a large `now` passes that same `now` here.
+        pub fn set_price(env: Env, price: i128, timestamp: u64) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("price"), &(price, timestamp));
+        }
+
+        pub fn lastprice(env: Env, _asset: Asset) -> Option<PriceData> {
+            env.storage()
+                .instance()
+                .get::<_, (i128, u64)>(&symbol_short!("price"))
+                .map(|(price, timestamp)| PriceData { price, timestamp })
+        }
+
+        /// The real fiat oracle quotes 14 decimals; the escrow contract reads
+        /// this live and uses it to rescale the conversion.
+        pub fn decimals(_env: Env) -> u32 {
+            14
+        }
     }
 }
 
@@ -259,14 +330,7 @@ pub fn world_in_with_terms(
         &cooperative,
         &warehouse,
         &token_address,
-        &terms.total_amount,
-        &terms.advance1_bps,
-        &terms.advance2_bps,
-        &terms.claim_window_secs,
-        &terms.remainder_window_secs,
-        &terms.delivery_window_secs,
-        &terms.contracted_quantity,
-        &Vec::from_array(env, terms.grade_price_bps),
+        &commitment_terms(env, &terms),
         &None,
     );
 

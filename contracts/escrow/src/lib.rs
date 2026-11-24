@@ -918,7 +918,15 @@ impl Commitment {
 /// Bumped whenever a field is added, removed, renamed, or changes meaning —
 /// see `docs/versioning.md` §2. Storage-only changes to [`Commitment`] do
 /// **not** bump it; that is the whole point of the view.
-pub const COMMITMENT_VIEW_SCHEMA_VERSION: u32 = 1;
+///
+/// **Version 2 (#270)**: `terms.delivery_deadline` became
+/// `terms.delivery_window_secs`, so the agreed-terms struct is literally
+/// the same type `initialize` accepts (named fields in both directions)
+/// instead of two look-alike shapes. A reader written against version 1
+/// must recompute the absolute deadline as `created_at +
+/// terms.delivery_window_secs`; that is the only field whose meaning
+/// moved, and every other field kept its name and meaning.
+pub const COMMITMENT_VIEW_SCHEMA_VERSION: u32 = 2;
 
 /// The three named parties plus the settlement token.
 #[contracttype]
@@ -931,16 +939,48 @@ pub struct CommitmentParties {
 }
 
 /// The deal's agreed terms and windows, fixed at `initialize`.
+///
+/// **The one definition of "the terms" (#270).** `initialize` takes this
+/// struct instead of a run of eight positional arguments, and
+/// `get_commitment_view` returns the same struct as `terms` — so the
+/// generated bindings, the read model, and `docs/0002-interface-spec.md`
+/// all name the same fields. That is the whole point: `advance1_bps` and
+/// `advance2_bps` are adjacent `u32`s, and `claim_window_secs`,
+/// `remainder_window_secs` and `delivery_window_secs` are adjacent `u64`s,
+/// so a positional swap type-checked and silently produced a different
+/// deal. A named field cannot be swapped silently, and generated clients
+/// carry the names through.
+///
+/// `delivery_window_secs` is the *window length*, not the absolute
+/// deadline: `initialize` computes `delivery_deadline = created_at +
+/// delivery_window_secs` once and stores that absolute value in
+/// [`Commitment`]. The view reconstructs the window as
+/// `delivery_deadline - created_at`, which is exactly the value passed
+/// here, so the read shape reports the *agreed term* rather than a
+/// clock-derived one. Every other field is stored verbatim.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitmentTerms {
     pub total_amount: i128,
+    /// Basis points of `total_amount` released at lock-in. 0-10_000, and
+    /// `advance1_bps + advance2_bps <= 10_000`.
     pub advance1_bps: u32,
+    /// Basis points released at the mid-season checkpoint. Together with
+    /// `advance1_bps` this defines the deposit `lock` escrows.
     pub advance2_bps: u32,
+    /// How long the cooperative has to claim an advance once it opens.
     pub claim_window_secs: u64,
+    /// How long the buyer has to fund the remainder once
+    /// `ready_for_delivery` opens the window.
     pub remainder_window_secs: u64,
-    pub delivery_deadline: u64,
+    /// How long after `created_at` the cooperative has to reach
+    /// `Delivered`. Must be > 0.
+    pub delivery_window_secs: u64,
+    /// The quantity the buyer is contracting for, in caller-defined units.
     pub contracted_quantity: u32,
+    /// Pre-agreed grade -> price multiplier table, in basis points
+    /// (10_000 = full price). Non-empty, at most `MAX_GRADE_ENTRIES`
+    /// entries, every entry <= 10_000.
     pub grade_price_bps: Vec<u32>,
 }
 
@@ -1060,7 +1100,12 @@ impl CommitmentView {
                 advance2_bps: c.advance2_bps,
                 claim_window_secs: c.claim_window_secs,
                 remainder_window_secs: c.remainder_window_secs,
-                delivery_deadline: c.delivery_deadline,
+                // The stored field is the absolute deadline `initialize`
+                // computed; subtract `created_at` to report the agreed
+                // window itself. `check_invariants` guarantees
+                // `delivery_deadline >= created_at`, so this cannot
+                // underflow.
+                delivery_window_secs: c.delivery_deadline - c.created_at,
                 contracted_quantity: c.contracted_quantity,
                 grade_price_bps: c.grade_price_bps.clone(),
             },
@@ -1476,24 +1521,43 @@ impl EscrowContract {
     /// reason. The only thing an abandoned Draft leaves behind is its
     /// storage entry, whose lifetime (and eventual archival) is covered by
     /// docs/storage-ttl.md — a dead record, not lost money.
+    ///
+    /// **Signature (#270)**: the eight numeric/list terms travel as one
+    /// named [`CommitmentTerms`] struct rather than eight positional
+    /// parameters, so a swapped `advance1_bps`/`advance2_bps` — or
+    /// `claim_window_secs`/`remainder_window_secs` — can no longer
+    /// type-check, and generated clients name every field. The parties and
+    /// the optional `oracle_config` stay standalone arguments: an
+    /// `Address` cannot be confused for another `Address` by position in
+    /// the way adjacent `u32`/`u64` terms can, and `OracleConfig` is a
+    /// separate optional concern, not an agreed term. Per
+    /// docs/versioning.md §2 this is a MINOR **BREAKING** change; the
+    /// migration is one call-site reshape, with validation and stored
+    /// state identical to before.
     pub fn initialize(
         env: Env,
         buyer: Address,
         cooperative: Address,
         warehouse_operator: Address,
         token: Address,
-        total_amount: i128,
-        advance1_bps: u32,
-        advance2_bps: u32,
-        claim_window_secs: u64,
-        remainder_window_secs: u64,
-        delivery_window_secs: u64,
-        contracted_quantity: u32,
-        grade_price_bps: Vec<u32>,
+        terms: CommitmentTerms,
         // Some if this deal needs the oracle_rate conversion path — see
         // the module doc. None for a plain deal.
         oracle_config: Option<OracleConfig>,
     ) -> Result<(), Error> {
+        // Destructured once, so every guard and the stored struct below
+        // read exactly the names the positional parameters used to have.
+        // The validation order is unchanged.
+        let CommitmentTerms {
+            total_amount,
+            advance1_bps,
+            advance2_bps,
+            claim_window_secs,
+            remainder_window_secs,
+            delivery_window_secs,
+            contracted_quantity,
+            grade_price_bps,
+        } = terms;
         if env.storage().instance().has(&DataKey::Commitment) {
             return Err(Error::AlreadyInitialized);
         }

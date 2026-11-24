@@ -156,6 +156,43 @@ WASM by [`scripts/gen-bindings.sh`](./scripts/gen-bindings.sh), with a
 template's "CI is maintainer-managed" note (#266). No contract code
 changed; no deployment entry until the next build goes to testnet.
 
+`initialize` now takes its eight agreed terms as one named
+`CommitmentTerms` struct (#270) — a **MINOR `**BREAKING**`** change per
+docs/versioning.md §2, because a caller written against the positional form
+must reshape one call. The parties and the optional `oracle_config` stay
+standalone arguments: an `Address` cannot be confused by position the way
+the numeric terms could. Eight positional parameters had become a real
+hazard — `advance1_bps`/`advance2_bps` are adjacent `u32`s and
+`claim_window_secs`/`remainder_window_secs`/`delivery_window_secs` are
+adjacent `u64`s, so a swap type-checked and silently produced a different
+deal. No validation, stored field or state transition changed: every
+existing rejection test still returns the same `Error` for the same input,
+only its call shape moved. `get_commitment_view`'s `terms` is now the same
+type, with `delivery_deadline` replaced by the agreed
+`delivery_window_secs`, so the view's `schema_version` moves to `2`
+(docs/versioning.md §2.1). Migration: reshape the call site, and where a
+view consumer read `terms.delivery_deadline`, compute
+`created_at + terms.delivery_window_secs`. Generated TypeScript bindings
+must be refreshed with `scripts/gen-bindings.sh`; the committed
+`examples/ts` snapshot predates the change and is not checked by CI.
+
+Three coverage issues landed with it. A differential proptest (#269) runs
+the same plan — random bps splits, claim windows, open times and attempt
+times — against tranche 1 (from `Locked`) and tranche 2 (from
+`CheckpointPassed`) and asserts identical rule-level observations: the
+deadline the open wrote, whether the attempt was accepted or which exact
+`Error` refused it, the claimed/expired flags, and that each transfer
+matches that tranche's own bps amount and pays the party the action names.
+`tests/window_overflow.rs` gains `resolve_fx_shortfall`'s
+`fx_shortfall_deadline = now + remainder_window_secs` as its fifth
+property, plus pinned `u64::MAX` boundary cases (#271), using the shared
+minimal mock Reflector now in `tests/common/mod.rs`; the paragraph that
+left that site out as out of scope is gone. And a `Draft`-stage
+reassignment test (#273) proves that swapping the buyer before `lock`
+charges the **new** buyer's wallet, leaves the outgoing buyer's balance
+untouched, refuses the outgoing buyer's signature for `lock`, and pays
+both refund paths (`cancel`, `reclaim_on_nondelivery`) to the new buyer.
+
 ## [Deployment 11] — 2026-10-20
 
 ### Added

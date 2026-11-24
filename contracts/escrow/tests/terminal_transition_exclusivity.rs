@@ -14,7 +14,9 @@
 //! The two known overlapping pairs remain ignored until their precedence is
 //! decided in #348.
 
-use harvestlock_escrow::{EscrowContract, EscrowContractClient, OracleConfig, Status};
+use harvestlock_escrow::{
+    CommitmentTerms, EscrowContract, EscrowContractClient, OracleConfig, Status,
+};
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec};
@@ -102,14 +104,16 @@ fn scene(
         &cooperative,
         &warehouse,
         &token_address,
-        &TOTAL_AMOUNT,
-        &CLAIMED_ADVANCE_BPS,
-        &CLAIMED_ADVANCE_BPS,
-        &claim_window,
-        &remainder_window,
-        &delivery_window,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL_AMOUNT,
+            advance1_bps: CLAIMED_ADVANCE_BPS,
+            advance2_bps: CLAIMED_ADVANCE_BPS,
+            claim_window_secs: claim_window,
+            remainder_window_secs: remainder_window,
+            delivery_window_secs: delivery_window,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &oracle_config,
     );
 

@@ -38,14 +38,7 @@ Each method entry has the following fields:
     { "name": "cooperative", "type": "Address" },
     { "name": "warehouse_operator", "type": "Address" },
     { "name": "token", "type": "Address" },
-    { "name": "total_amount", "type": "i128" },
-    { "name": "advance1_bps", "type": "u32" },
-    { "name": "advance2_bps", "type": "u32" },
-    { "name": "claim_window_secs", "type": "u64" },
-    { "name": "remainder_window_secs", "type": "u64" },
-    { "name": "delivery_window_secs", "type": "u64" },
-    { "name": "contracted_quantity", "type": "u32" },
-    { "name": "grade_price_bps", "type": "Vec<u32>" },
+    { "name": "terms", "type": "CommitmentTerms" },
     { "name": "oracle_config", "type": "Option<OracleConfig>" }
   ],
   "returns": "Result<(), Error>",
@@ -56,6 +49,28 @@ Each method entry has the following fields:
 ```
 
 *Creates the commitment in `Draft`. No funds move yet. Requires the buyer's auth.*
+
+`CommitmentTerms` is the one agreed-terms struct (#270), shared with
+`get_commitment_view`'s `terms` field so generated clients, indexers and this
+document all use the same field names:
+
+| field | type | meaning |
+|---|---|---|
+| `total_amount` | `i128` | the deal's total value; `> 0` and `<= MAX_TOTAL_AMOUNT` |
+| `advance1_bps` | `u32` | basis points of `total_amount` released at lock-in |
+| `advance2_bps` | `u32` | basis points released at the mid-season checkpoint; `advance1_bps + advance2_bps <= 10_000` |
+| `claim_window_secs` | `u64` | how long the cooperative has to claim an opened advance; `> 0` |
+| `remainder_window_secs` | `u64` | how long the buyer has to fund the remainder (also the FX cure window and the dispute-freeze bound); `> 0` |
+| `delivery_window_secs` | `u64` | how long after creation the cooperative has to reach `Delivered`; `> 0` |
+| `contracted_quantity` | `u32` | contracted quantity in caller-defined units; `> 0` |
+| `grade_price_bps` | `Vec<u32>` | grade -> price multiplier schedule; non-empty, at most `MAX_GRADE_ENTRIES` entries, every entry `<= 10_000` |
+
+Before #270 these eight terms were positional arguments. Three adjacent
+`u64` windows and two adjacent `u32` bps values meant a swap type-checked and
+silently produced a different deal; named fields make that impossible, and
+the generated bindings carry the names through. `initialize`'s `terms` is the
+same type `get_commitment_view` returns, so a client can round-trip the
+values it reads without renaming a single field.
 
 ### 2. `get_oracle_config`
 
