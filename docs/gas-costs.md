@@ -125,7 +125,7 @@ A metric growing by more than **1%** fails the test with a per-method diff:
 
 ```text
 per-method budget regressed beyond 1% against contracts/escrow/budget.snapshot:
-  cancel cpu: 573232 -> 583660 (+1.8%) exceeds 1%
+  cancel cpu: 574297 -> 584725 (+1.8%) exceeds 1%
 ```
 
 The bound is tighter than the 5% the issue suggested on purpose: native host

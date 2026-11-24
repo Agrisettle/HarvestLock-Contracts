@@ -41,7 +41,9 @@
 //! this is a *relative* regression guard against the same build harness, not a
 //! fee quote. Absolute testnet charges stay in `docs/gas-costs.md`.
 
-use harvestlock_escrow::{AllocationMember, EscrowContract, EscrowContractClient, OracleConfig};
+use harvestlock_escrow::{
+    AllocationMember, CommitmentTerms, EscrowContract, EscrowContractClient, OracleConfig,
+};
 use soroban_sdk::testutils::{Address as _, EnvTestConfig, Ledger as _};
 use soroban_sdk::{token, Address, BytesN, Env, Symbol, Vec as OnChainVec};
 use std::collections::{BTreeMap, BTreeSet};
@@ -331,19 +333,22 @@ fn scene(with_oracle: bool) -> Scene {
         denominated_amount: ORACLE_DENOMINATED,
     });
 
+    let terms = CommitmentTerms {
+        total_amount: TOTAL_AMOUNT,
+        advance1_bps: ADVANCE1_BPS,
+        advance2_bps: ADVANCE2_BPS,
+        claim_window_secs: WINDOW,
+        remainder_window_secs: REMAINDER_WINDOW,
+        delivery_window_secs: DELIVERY_WINDOW,
+        contracted_quantity: CONTRACTED_QUANTITY,
+        grade_price_bps: OnChainVec::from_array(&env, GRADE_PRICE_BPS),
+    };
     contract.initialize(
         &buyer,
         &cooperative,
         &warehouse,
         &token_address,
-        &TOTAL_AMOUNT,
-        &ADVANCE1_BPS,
-        &ADVANCE2_BPS,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &OnChainVec::from_array(&env, GRADE_PRICE_BPS),
+        &terms,
         &config,
     );
 
@@ -420,20 +425,23 @@ fn record_all() -> std::vec::Vec<(&'static str, Sample)> {
             stranger: cooperative.clone(),
             oracle: None,
         };
+        let terms = CommitmentTerms {
+            total_amount: TOTAL_AMOUNT,
+            advance1_bps: ADVANCE1_BPS,
+            advance2_bps: ADVANCE2_BPS,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: OnChainVec::from_array(&env, GRADE_PRICE_BPS),
+        };
         rec.measure(&scene, "initialize", || {
             scene.contract.initialize(
                 &buyer,
                 &cooperative,
                 &warehouse,
                 &token_address,
-                &TOTAL_AMOUNT,
-                &ADVANCE1_BPS,
-                &ADVANCE2_BPS,
-                &WINDOW,
-                &REMAINDER_WINDOW,
-                &DELIVERY_WINDOW,
-                &CONTRACTED_QUANTITY,
-                &OnChainVec::from_array(&env, GRADE_PRICE_BPS),
+                &terms,
                 &None,
             )
         });

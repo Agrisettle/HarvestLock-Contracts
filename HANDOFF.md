@@ -1007,11 +1007,12 @@ snapshot), while the smallest meaningful regression — one extra read of the
 stored `Commitment` — adds ~11k instructions, i.e. only ~1.9% of the heaviest
 method. Verified rather than assumed: injecting exactly that extra read into
 `cancel` failed the suite with
-`cancel cpu: 573232 -> 583660 (+1.8%) exceeds 1%`, then the probe was reverted.
-The baseline was re-blessed after rebasing onto `origin/per-method`: every
-status-changing method moved by −1,065 CPU against the pre-rebase snapshot,
-which is upstream #220's `single-value` event encoding moving through these
-methods, not a behavior change from this work.
+`cancel cpu: 574297 -> 584725 (+1.8%) exceeds 1%`, then the probe was reverted.
+The baseline was re-blessed on top of current `upstream/main`: `initialize`
+moved +1,295 CPU with the new `CommitmentTerms` argument shape, and methods
+that publish `StatusChanged` carry the upstream default `map` encoding (the
+`single-value` switch is still an open PR, #345). Neither is a behavior change
+from this work.
 Re-bless workflow, format and the native-vs-WASM caveat are documented in
 `docs/gas-costs.md`'s new "Offline regression baseline" section, with a
 cross-link from `docs/cost-estimation.md` §4. The suite disables Soroban's
@@ -1019,11 +1020,8 @@ cross-link from `docs/cost-estimation.md` §4. The suite disables Soroban's
 footprint artifacts per run.
 
 Verified at this HEAD: `cargo fmt --check` clean; `cargo test --no-fail-fast`
-**319 passing, 1 failing, 3 ignored** (222 unit; 97 across the 15 integration
-targets, including this new budget suite's 3/3). The single failure is
-`terminal_transition_exclusivity::fx_funding_and_expiry_are_exclusive`, a
-pre-existing upstream proptest that fails with `Error(Contract, #12)` and is
-unrelated to this change (no contract code is touched here). The pre-existing
+**331 passing, 0 failing, 3 ignored** (231 unit; 100 across the 15 integration
+targets, including this new budget suite's 3/3). The pre-existing
 `clippy::too_many_arguments` warnings on contract entry points are unchanged
 and still not CI-gated.
 
@@ -1032,45 +1030,90 @@ encoding change, and a new fuzz crate for the XDR boundary. **No workflow
 files touched** (maintainer policy), and the contract's storage
 `Commitment` struct and every entry point's behaviour are unchanged.*
 
-- **#220 — event payload encoding.** `StatusChanged` and
-  `FxQuoteStaleChanged` now declare `#[contractevent(data_format =
-  "single-value")]`, the measured-smallest encoding for 0/1-data-field
-  events: a probe event is 128 bytes / 16,733 CPU vs 132 bytes / 17,798 CPU
-  for the default `map` (and 132 / 17,295 for `vec`). No consumer-visible
-  field changes — only the empty/one-value payload tag. Multi-field events
-  stay on the `map` default deliberately: `vec` is smaller
-  (192 → 120 bytes, ~4,236 fewer CPU instructions) but positional, and
-  `tests/event_sourcing.rs` rebuilds state from named fields, so the 72-byte
-  saving is not worth losing field names; `single-value` is illegal for them
-  anyway (the macro rejects >1 data field). New
-  `contracts/escrow/tests/event_cost.rs` reproduces the numbers offline via
-  `env.cost_estimate()` and asserts the documented ranking, including the
-  shipped `StatusChanged`. Write-up in `docs/gas-costs.md` §"Event emission
-  by `data_format`"; comments on both event declarations point there.
-- **#221 — XDR-boundary fuzzing.** New standalone crate `fuzz/` (not a
-  workspace member, so `cargo test` at the repo root never builds it) with a
-  cargo-fuzz target `entry_points` whose harness lives in `fuzz/src/lib.rs`.
-  Each iteration deploys token + escrow, initializes a valid commitment,
-  takes a short random walk through legal calls, then invokes one of the 34
-  public functions through `Env::try_invoke_contract` with values built from
-  fuzz bytes — declared shapes with fuzzed/oversized contents, wrong types,
-  wrong arity, malformed `OracleConfig`/`Option` shapes. Accepted outcomes
-  are a contract `Error`, a host/SDK conversion error, or success; a success
-  must leave a readable commitment that passes `check_invariants`, and any
-  escaping panic is a crash. The same harness runs as a 250-input
-  deterministic smoke test on stable (`cd fuzz && cargo test --lib`), which
-  is what has actually been run: clean. A full libFuzzer campaign needs
-  nightly and a time budget and was **not** run; no workflow file was
-  touched, so the smoke test is not in CI yet. Seeds live in
-  `fuzz/corpus/entry_points/`; generated `fuzz/test_snapshots/` is ignored.
+*Last updated: 24 Nov 2026 — four-issue bundle (#274, #275, #276, #277).
+**No workflow files touched** (maintainer policy). New terminal `Error`
+variant `LockAfterDeliveryDeadline = 47`, so `error_discriminants.snapshot`
+and `interface.snapshot` grew by one line each and the WASM needs a rebuild
+before the interface guard is re-run.*
 
-Verified: `cargo fmt --check` clean; `cargo test` **301 passing** (215 unit +
-86 integration across the fourteen suites, `event_cost` being the new one);
-`cd fuzz && cargo test --lib` 1 passing; both guard scripts green
-(discriminants 1..43; all 35 public-method doc comments name their auth
-party). Test-snapshot policy unchanged: new snapshots left untracked. The
-scratch `tests/tmp_measure.rs` used to collect the numbers was deleted.
-*Last updated: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
+- **#277 — `lock` refuses once the delivery window has passed.** The window
+  is `created_at + delivery_window_secs`, anchored at `initialize`, and
+  `delivery_deadline`'s field doc now says so (and why it is not anchored at
+  `lock`: re-anchoring would let a buyer extend the cooperative's deadline
+  unilaterally). `can_lock` gained a `now` argument and the
+  `now > delivery_deadline` guard, `available_actions` advertises `lock`
+  with `ActionDeadline::Inclusive(delivery_deadline)` instead of `None`, and
+  the deadline second itself is still in time. Closes the
+  late-lock-then-`reclaim_on_nondelivery` sequence. Tests: the exact
+  boundary from both sides, and the sequence itself (three tests).
+- **#275 — a zero remainder is funded by `ready_for_delivery`.** With
+  `advance1_bps + advance2_bps == 10_000` the deposit is `total_amount`, so
+  the remainder is 0 and requiring `fund_remainder`
+  let a fully-prepaid buyer be `Defaulted` — and lose the deposit — for not
+  sending zero tokens. New private helper `remainder_amount`, used by
+  `ready_for_delivery` (auto-fund), `fund_remainder` (transfers it) and the
+  new test-build invariant "a zero remainder is never left unfunded while
+  its window is open". `expire_remainder_window` is now unreachable for that
+  shape (`RemainderAlreadyFunded`). Tests: the full lifecycle for the 10 000
+  bps case, the default path refusing after the window lapses, and the
+  9 999 bps near-miss that must still be funded by the buyer (three tests).
+- **#274 — one test harness.** `crate::testutils` (new
+  `contracts/escrow/src/testutils.rs`, declared
+  `#[cfg(any(test, feature = "testutils"))]`) now holds the windows, the
+  grade schedule, token minting, the clock helpers, `World`/`Setup` and the
+  drive helpers, with a `Terms` builder. `src/test.rs` does
+  `use crate::testutils::*` and `tests/common/mod.rs` is a re-export shim;
+  no test body changed. Integration suites link this crate without
+  `cfg(test)`, so `Cargo.toml` gained a *dev-only self-dependency*
+  (`harvestlock-escrow = { path = ".", features = ["testutils"] }`) — plain
+  `cargo test` needs no `--features` flag, and the release WASM is
+  unaffected. `Cargo.lock` gained exactly one line (the crate's own package
+  listing itself as a dependency) and `--locked` builds stay valid.
+- **#276 — downstream integration example.** `examples/escrow-reader/` is a
+  minimal contract that imports the escrow's built WASM with
+  `soroban_sdk::contractimport!` and reads `get_status`/`get_commitment`
+  across the boundary, plus a test that registers the escrow *from that
+  WASM*. Deliberately **not** a member of the root workspace: the import
+  needs the escrow artifact at compile time, which would otherwise break
+  `cargo llvm-cov --workspace` and `stellar contract build` on a clean
+  checkout. Its README and the root README's "Building and testing" section
+  document the supported pattern (WASM import, not the rlib) and the build
+  order: `stellar contract build --package harvestlock-escrow`, then
+  `cargo test --manifest-path examples/escrow-reader/Cargo.toml`. Measured
+  locally: the example's own WASM is 8,156 bytes and exports exactly the two
+  read functions — it does not embed the escrow.
+
+Verified in this session: `cargo check --tests --locked` and `cargo build
+--tests --locked` (every test target compiles and links against the new
+harness), `stellar contract build --locked` for the escrow and for the
+example, the example's test target type-checks, `check_error_discriminants.sh`,
+`check_auth_docs.sh`, `check_wasm_size.sh` (87,640 bytes, +5,073 against the
+stale 82,567 baseline, inside the 5,120 budget) and
+`check_interface_snapshot.sh`. Once the PR's CI ran, `cargo test --locked`
+was also run locally in full: **230 unit tests (229 passing, 1 ignored) and
+96 across `tests/` (94 passing, 2 ignored)**, all green — the warnings it
+prints (unused `Ledger`/`TrancheClaimed`/`TrancheReclaimed`/`TOTAL_AMOUNT`/
+`Error` imports in `event_sourcing`, `nonstandard_token` and
+`state_machine_model`) are pre-existing and CI does not run Clippy or
+`-D warnings`.
+
+**Also fixed here, inherited from `main`:** `main` at `25dffee` was red.
+`terminal_transition_exclusivity::fx_funding_and_expiry_are_exclusive` built
+its pre-state with `prefix_claims = false`, leaving a tranche open, and then
+called `resolve_fx_shortfall`, which shares `settle`'s `tranches_resolved`
+guard (`cannot_resolve_fx_shortfall_before_tranches_are_resolved` pins that
+guard deliberately — it needs final, settled figures). The call was
+correctly refused with `TrancheUnresolved`, so the pair was never
+comparable; `cargo test`, `code coverage`, the 28.0.0 SDK differential and
+the mutation job all failed on that one test. The pair's pre-state now
+always claims both advances (the `prefix_claims` axis still varies in the
+other pairs, where it is meaningful), and a third `#[should_panic]`
+invariant test (`save_rejects_a_zero_remainder_left_unfunded_with_its_window_open`)
+keeps #275's new invariant from being weakenable to a no-op — without it,
+mutating the guard to `remainder_deadline == 0` would let every lifecycle
+test pass and the mutation job would report a survivor.
+
+Prior entry: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
 `reclaimed_by_buyer` calculations into private helpers on `EscrowContract`
 with unit test coverage for all four claimed/reclaimed combinations. Zero
 behaviour change across `settle` and `resolve_fx_shortfall`.
