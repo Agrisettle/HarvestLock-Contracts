@@ -1862,13 +1862,24 @@ impl EscrowContract {
         let deposit = Self::deposit_amount(&c);
 
         // State is updated and saved *before* the external transfer
-        // (checks-effects-interactions): if a reentrant call somehow
-        // landed mid-transfer, it would see `Locked` already and be
-        // rejected by the guard above, instead of being able to pull the
-        // deposit a second time before this invocation's save lands.
-        // The standard SAC/native token used here has no such hook — this
-        // is defensive hardening against a future token type, not a
-        // response to a demonstrated exploit against the current one.
+        // (checks-effects-interactions), so the effect is committed even
+        // if the transfer itself later fails: Soroban then rolls the whole
+        // invocation back, including this save, so an `Err` still leaves
+        // nothing behind.
+        //
+        // Two layers defend a mid-transfer re-entry, and `tests/reentrancy.rs`
+        // pins which one actually applies. On soroban-env-host 29.0.1 the
+        // host rejects any call back into a contract already on the call
+        // stack ("Contract re-entry is not allowed") *before* this
+        // contract's frame runs, so a hostile token's callback is stopped at
+        // the host — the saved `Locked` status is never even read. The
+        // ordering is retained as defence in depth: if a future host or a
+        // different token standard ever allowed that callback through, the
+        // re-entrant call would see `Locked` already and be rejected by the
+        // guard above instead of pulling the deposit a second time. The
+        // standard SAC/native token used here has no callback hook at all;
+        // this remains hardening against a future token type, not a response
+        // to a demonstrated exploit against the current one.
         Self::set_status(&env, &mut c, Status::Locked);
         Self::save(&env, &c);
 

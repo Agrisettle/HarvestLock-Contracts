@@ -131,6 +131,7 @@ libraries a fresh Linux runner is missing.
 - **Dispute scope**: [`docs/dispute-scope.md`](./docs/dispute-scope.md) — what `flag_dispute`/`resolve_dispute` cover (a bounded pause) and deliberately don't (arbitration)
 - **Threat model**: [`docs/threat-model.md`](./docs/threat-model.md) — the actor table and the attack register, with a defended/accepted verdict and the test that holds each defended one
 - **Terminal outcomes**: [`docs/terminal-outcomes.md`](./docs/terminal-outcomes.md) — what the buyer, cooperative, and operator actually walk away with in `Settled`/`Defaulted`/`Forfeited`/`Cancelled`, cross-referenced against the off-chain reputation consequences
+- **Events**: [`docs/events.md`](./docs/events.md) — every event's topic layout, data fields, emitting calls, the RPC `getEvents` filter for each, and how `contracts/escrow/events.snapshot` pins the serialized shape in CI
 - **Dispute stalling**: [`docs/dispute-stalling.md`](./docs/dispute-stalling.md) — whether a losing party gains by flagging a spurious dispute, and why unanimous resolution is not a deterrent
 - **Race exposure**: [`docs/dispute-frontrunning.md`](./docs/dispute-frontrunning.md) — the deadline races around `flag_dispute`, `confirm_delivery`, the expiry sweeps, and one-shot FX resolution
 - **Griefing by inaction**: [`docs/griefing-and-inaction.md`](./docs/griefing-and-inaction.md) — who can unstick each required action, and the one state where funds are genuinely stranded
