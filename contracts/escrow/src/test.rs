@@ -28,6 +28,7 @@ const MAX_ALLOCATION_XDR_BYTES: usize = 24_000;
 #[test]
 fn buyer_and_cooperative_can_extend_delivery_deadline_once_before_expiry() {
     let s = setup(1_500, 1_500);
+    s.contract.lock();
     let original = s.contract.get_commitment().delivery_deadline;
     s.contract.extend_delivery_deadline(&(original + 100));
     assert_eq!(
@@ -39,13 +40,13 @@ fn buyer_and_cooperative_can_extend_delivery_deadline_once_before_expiry() {
 #[test]
 fn extending_delivery_deadline_rejects_non_extension_and_dispute_state() {
     let s = setup(1_500, 1_500);
+    s.contract.lock();
     let original = s.contract.get_commitment().delivery_deadline;
     assert_eq!(
         s.contract.try_extend_delivery_deadline(&original),
         Err(Ok(Error::DeliveryDeadlineNotExtended))
     );
 
-    s.contract.lock();
     s.contract.flag_dispute(&s.buyer);
     assert_eq!(
         s.contract.try_extend_delivery_deadline(&(original + 100)),
@@ -5610,9 +5611,9 @@ fn cancel_after_an_allocation_is_recorded_leaves_the_ledger_orphaned_not_an_erro
 
     // And it was not swept away as part of the unwind — there is no cleanup
     // path for it, so the orphan is permanent. Read through the contract's own
-    // storage context, since the entry is instance-scoped to it.
+    // storage context, since the entry is persistent and scoped to it.
     let still_recorded = s.env.as_contract(&s.contract.address, || {
-        s.env.storage().instance().has(&DataKey::Allocation)
+        s.env.storage().persistent().has(&DataKey::Allocation)
     });
     assert!(still_recorded);
 
