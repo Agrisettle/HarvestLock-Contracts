@@ -36,9 +36,6 @@
 //! those same boundaries by hand for each tranche; this suite is what proves
 //! the two tranches agree with each other.
 
-#[path = "common/mod.rs"]
-mod common;
-
 use harvestlock_escrow::{CommitmentTerms, Error, EscrowContract, EscrowContractClient, Status};
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, EnvTestConfig, Ledger as _};
