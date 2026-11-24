@@ -637,7 +637,34 @@ transferred into escrow), tranche 1 released, and successfully claimed by cooper
 trustline mechanics. Documented per-role trustline prerequisites in
 `docs/trustline-prerequisites.md`.
 
-**All twelve deployments' instances are validation artifacts, not
+**Deployment 13** (this session, 24 Nov 2026, Issue #286) — Scripted full lifecycle
+e2e verification on testnet with real transaction hashes recorded for every step
+across three distinct scenarios: happy path, buyer default (`expire_remainder_window`),
+and seller non-delivery (`reclaim_on_nondelivery`). Orchestrated via `scripts/e2e.sh`
+using `scripts/deploy.sh` and issued test asset `HLUSD` (`CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL`)
+from `scripts/test-asset.sh`. Each call was submitted on testnet with retry resilience,
+asserting `get_status` and on-chain token balances after every step, producing complete
+structured JSON transcripts (`transcripts/e2e-testnet-latest.json` and timestamped run logs)
+and corresponding snapshot replay fixtures (`contracts/escrow/tests/fixtures/deployment-13-real-hashes-*.snap`).
+1. **Happy path** — Contract `CBF4LWV2NHI5I64OVKAVLEF6O3D2SEFV4NZ4MS74QQTUF2R5S7F4CI3N`.
+   Walked through `initialize` (tx `d1ab5438...`), `lock` (tx `9406d21a...`, 30,000,000 deposit),
+   `release_advance_1` (tx `1a93b653...`), `claim_advance_1` (tx `e2ebe205...`, 15,000,000 to coop),
+   `mark_checkpoint` (tx `73cd806a...`, by warehouse), `release_advance_2` (tx `a4959d69...`),
+   `claim_advance_2` (tx `6743d4ec...`, 15,000,000 to coop), `ready_for_delivery` (tx `2d19c474...`),
+   `fund_remainder` (tx `abf6f582...`, 70,000,000 from buyer), `confirm_delivery` (tx `bec984fa...`, full delivery),
+   and `settle` (tx `3263103d...`, remaining 70,000,000 to coop). Final status: `Settled`.
+2. **Buyer default** — Contract `CCCLSWRWCEYI27XZCOZXCRN4DQ7RJR666WU7GWELLQ5JUEPVWRRY2RWA`.
+   Walked through `initialize` (tx `33b96efc...`), `lock` (tx `e404a8b3...`, 30,000,000 deposit),
+   `release_advance_1` (tx `871881c0...`), `claim_advance_1` (tx `ebc1b9c2...`, 15,000,000 to coop),
+   `mark_checkpoint` (tx `f8e0b97f...`), `release_advance_2` (tx `e38df061...`), `ready_for_delivery`
+   (tx `c1cdb73a...`, opening remainder window). Waited out 60s remainder window, then executed
+   `expire_remainder_window` (tx `4bd99379...`), sweeping remaining deposit (15,000,000) to coop. Final status: `Defaulted`.
+3. **Seller non-delivery** — Contract `CDUSNWRP4VTFTIRU6RK3YOXBVUIFDAIK5CMJ42TCHQS4Z4PYEERLIJG7`.
+   Walked through `initialize` (tx `f8453055...`), `lock` (tx `c1705f7e...`, 30,000,000 deposit).
+   Waited out 60s delivery window, then executed `reclaim_on_nondelivery` (tx `eea43d19...`),
+   refunding full deposit (30,000,000) to buyer. Final status: `Forfeited`.
+
+**All thirteen deployments' instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -1522,6 +1549,8 @@ is 4 Sept, not 5 Sept** (the instance it names, `CCUDE3MM…`, was created
 2026-09-04 22:16 UTC and its WASM hash matches the one above); the toolchain
 section names `soroban-sdk = "28.0.0"`, which is what `Cargo.toml` says since
 dependabot PR #5; and the test count is 134, not 129 (measured on `main`).
+
+Prior entry: 24 Nov 2026 — Scripted live e2e lifecycle runs with real transaction hashes (#286): added `scripts/e2e.sh`, `scripts/deploy.sh`, and resilient testnet transaction handling to `scripts/test-asset.sh`. Executed all three scenarios (happy path, buyer default, seller non-delivery) on testnet against issued classic SAC token HLUSD, asserting `get_status` and on-chain token balances at every step. Recorded complete JSON execution transcripts in `transcripts/e2e-testnet-latest.json` and captured real transaction hashes into snapshot replay fixtures (`deployment-13-real-hashes-*.snap`). Documented the transcript format in `docs/e2e-transcript.md`.
 
 Prior entry: 16 Oct 2026 — auth-model scrutiny of the staged multi-party
 Soroban flow (#138–#141). **#138**: proven a staged auth entry whose

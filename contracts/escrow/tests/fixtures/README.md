@@ -6,11 +6,15 @@ run on testnet. `contracts/escrow/tests/snapshot_replay.rs` parses the whole
 directory and replays each transcript against the current build.
 
 **Provenance rule, and the limit of it.** No transaction envelope XDR, auth
-entry XDR, or ledger export was ever captured for any of the ten deployments,
+entry XDR, or ledger export was captured for the early deployments (Deployments 1-10),
 and `HANDOFF.md` calls the instances "validation artifacts, not
-infrastructure". So these fixtures replay *recorded chain outcomes* — the
+infrastructure". So those fixtures replay *recorded chain outcomes* — the
 amounts and rejections HANDOFF.md states were read back off the ledger — not
-chain bytes. Each fixture must say which deployment it came from and how
+chain bytes. Starting with Deployment 13 (Issue #286), scripted end-to-end runs
+(`scripts/e2e.sh`) record full transaction hashes and return values into JSON transcripts
+(`transcripts/e2e-testnet-latest.json`), and the corresponding fixtures
+(`deployment-13-real-hashes-*.snap`) cite these verified real hashes in their
+provenance. Each fixture must say which deployment it came from and how
 faithful it is in its `provenance =` line; the loader rejects a fixture with no
 provenance, and `replay_all_recorded_snapshots` requires the string `HANDOFF.md`
 to appear in it. If real XDRs are ever captured, `Step`/`Snapshot` in
