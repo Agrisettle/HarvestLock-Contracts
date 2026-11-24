@@ -530,6 +530,8 @@ C=$(stellar contract deploy --wasm-hash "$WASM_HASH" --source-account deployer -
 
 # 3. Initialize both (identical parameters), then lock.
 #    native XLM SAC, 100,000,000 stroops, 15%/20% advance split.
+#    Note: For issued assets (e.g. HLUSD/USDC), see scripts/test-asset.sh
+#    and docs/trustline-prerequisites.md for trustline prerequisites.
 for id in "$A" "$C"; do
   stellar contract invoke --id "$id" --source-account buyer --network testnet -- \
     initialize \
@@ -726,6 +728,28 @@ per-commitment budget above (by then the code entry's TTL is already at
 max), but it is a real deployment-day cost and it is why a single
 `initialize` measured in isolation can look alarming.
 
+### TTL extension rent tradeoff
+
+The fresh-instance `initialize` row above is the available measured
+max-TTL-extension baseline: **4,092,383 stroops gross rent** (618,696 refunded
+in that simulation). To put a deadline-sized extension in context, assuming
+linear rent, a five-second ledger, and the test host's 6,312,000-ledger maximum:
+
+| Extension target | TTL ledgers | Gross rent |
+| --- | ---: | ---: |
+| Max TTL (measured `initialize`) | 6,312,000 | 4,092,383 |
+| 120 days (pro-rata estimate) | 2,073,600 | ~1,344,000 |
+| Difference | 4,238,400 | ~2,748,000 |
+
+The 120-day row is a pro-rata estimate from the measured baseline, **not** a
+second transaction measurement. It excludes any safety margin and later
+remainder, FX, or dispute windows; network rent settings, ledger interval,
+entry size, and current TTL also affect the actual fee. The contract retains
+max-TTL because `Draft` can be locked later and successfully resolved disputes
+can be reopened without consuming the lapse cap, so the current state machine
+does not provide a finite latest reachable deadline to use as a safe cap. See
+[`storage-ttl.md`](./storage-ttl.md#ttl-target-decision) for the reasoning.
+
 ### Reproduce
 
 ```bash
@@ -753,6 +777,7 @@ ID=$(stellar contract deploy --wasm-hash "$WASM_HASH" \
 # 4. Initialize — once per instance, on a FRESH deploy for each variant below
 #    (initialize is one-shot; a second call is AlreadyInitialized).
 #    The native XLM SAC is used as `token`; the buyer is the source account.
+#    (For issued classic assets and trustline setup, see scripts/test-asset.sh & docs/trustline-prerequisites.md).
 TOKEN=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
 BT="--buyer $(stellar keys address deployer) --cooperative $(stellar keys address coop)"
 BT="$BT --warehouse-operator $(stellar keys address wh) --token $TOKEN"
@@ -800,6 +825,26 @@ reporting add-on.
 ## Reproducibility
 
 WASM builds are verified reproducible in CI (`.github/workflows/test.yml`, job "Verify WASM build reproducibility"). The SHA-256 hash of `target/wasm32v1-none/release/harvestlock_escrow.wasm` must match between two consecutive clean builds. Current hash: see latest CI run.
+
+## Offline WASM size budget
+
+The committed release artifact is **82,567 bytes** (the build measured on
+23 Nov 2026 above). To catch material size regressions without adding a live
+network or another tool dependency, run this after `stellar contract build
+--locked`:
+
+```bash
+bash .github/scripts/check_wasm_size.sh
+```
+
+The script compares
+`target/wasm32v1-none/release/harvestlock_escrow.wasm` with
+[`contracts/escrow/wasm_size.baseline`](../contracts/escrow/wasm_size.baseline),
+prints the baseline, current size, and delta, and fails when growth exceeds
+5 KiB (5,120 bytes). If a larger artifact is intentional, update the baseline
+in the same PR and explain the increase; the check does not alter workflows.
+Per the [PR template](../.github/PULL_REQUEST_TEMPLATE.md), a maintainer can
+wire this command into `.github/workflows/test.yml`.
 
 ## Supply-Chain Health
 

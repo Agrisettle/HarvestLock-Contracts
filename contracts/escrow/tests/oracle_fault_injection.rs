@@ -4,57 +4,74 @@
 //! contract calls *out* to a contract it does not control. Everything here
 //! drives that call through deliberately broken oracles and asserts the
 //! documented degradation — `OracleNotConfigured` / `OraclePriceUnavailable`
-//! / `OracleStale` — plus the non-positive-price guard
-//! (`OraclePriceInvalid`) — rather than a panic escaping or a wrong number
-//! coming back.
+//! / `OracleStale` / `OracleTimestampInFuture` / `OracleConversionOutOfRange`
+//! / `OracleUnavailable` — plus the non-positive-price guard (`OraclePriceInvalid`)
+//! — rather than a panic escaping or a wrong number coming back.
 //!
 //! Fault modes covered: no config, no quote on record, stale quote, quote at
-//! exactly the bound, a crashed (`panic!`ing) callee, an unreachable callee
-//! (address with no contract deployed), a future-dated quote, a non-positive
+//! exactly the bound, a crashed (`panic!`ing) callee, a callee whose
+//! `decimals()` alone crashes, a callee that exhausts the budget, an
+//! unreachable callee (address with no contract deployed), a future-dated quote, a non-positive
 //! price, a price large enough to overflow the conversion multiply, an
 //! absurd `decimals()`, and (#63) a *plausible* change to `decimals()`, which
-//! is silently accepted rather than trapping — see
+//! is silently accepted — see
 //! `docs/reflector-decimals-assumption.md` for why the contract assumes the
 //! scale never changes and what happens if it does.
 //!
-//! ## Findings this harness produced (all real, all reproducible)
+//! ## Remaining findings and fixed regressions
 //!
-//! The three documented errors and the non-positive-price guard work exactly
-//! as advertised. Three things do **not**, and are pinned here as current
-//! behavior with `FINDING` markers rather than silently fixed, because each
-//! fix changes settlement math or the public error surface and needs a product
-//! decision:
+//! The documented errors and non-positive-price guard work as advertised.
 //!
-//! 1. **F1 — an unreachable oracle is not a graceful error.** Pointing
-//!    `oracle_config.oracle_contract` at an address with no contract (a
-//!    re-deployed oracle, a wrong address typed at `initialize`) aborts the
-//!    whole invocation at the host level. There is no
-//!    `OracleUnreachable`-shaped contract error to catch, and the contract
-//!    has no way to be repaired afterwards: `oracle_config` is set once at
-//!    `initialize` and has no setter. Callers (the API's staged-transaction
-//!    layer) must treat a host abort here as "this commitment is unreadable."
-//! 2. **F2 — a future-dated quote passes the staleness bound.** `read_oracle_rate`
-//!    computes `now.saturating_sub(quote.timestamp)`, so a quote stamped
-//!    *ahead* of the ledger gets age `0` and is accepted as maximally fresh.
-//!    A buggy or manipulated feed can pin the bound open indefinitely.
-//! The former **F3 — no sanity bound on the price itself** finding is now
-//! closed: both negative and zero prices are rejected as
-//! `OraclePriceInvalid` by `oracle_rate()`, `resolve_fx_shortfall()`, and
-//! `refresh_fx_quote_status()` before any settlement state can be written.
-//! The regression test below keeps that decision pinned.
+//! 1. **F1 — an unreachable oracle was not a graceful error. Fixed by #245.**
+//!    Pointing `oracle_config.oracle_contract` at an address with no contract
+//!    (a re-deployed oracle, a wrong address typed at `initialize`) used to
+//!    abort the whole invocation at the host level. `read_oracle_rate` and
+//!    `resolve_fx_shortfall` now call the generated `try_lastprice` /
+//!    `try_decimals` and map a failed call to `Error::OracleUnavailable`, so
+//!    `oracle_rate`, `resolve_fx_shortfall` and `refresh_fx_quote_status` all
+//!    return that contract error and write nothing. What remains: the
+//!    contract still can't be repaired afterwards, because `oracle_config` is
+//!    set once at `initialize` and has no setter, so `settle` on such a
+//!    commitment stays unreachable. Callers now get a specific error code to
+//!    record instead of an abort.
+//! 2. **F2 — future-dated quotes are now rejected by `read_oracle_rate` with the
+//!    distinct `OracleTimestampInFuture` error**, before calculating quote age.
+//! 3. **F3 — no sanity bound on the price itself** is now closed: both negative
+//!    and zero prices are rejected as `OraclePriceInvalid` by `oracle_rate()`,
+//!    `resolve_fx_shortfall()`, and `refresh_fx_quote_status()` before any
+//!    settlement state can be written. The regression test below keeps that
+//!    decision pinned.
+//! 4. **F4/F5 — `resolve_fx_shortfall` reports unrepresentable oracle
+//!    conversion arithmetic as `OracleConversionOutOfRange`.** A huge price
+//!    or garbage `decimals()` no longer traps or records partial state.
 //!
-//! 3. **F4/F5 — `resolve_fx_shortfall` has two unguarded arithmetic traps.**
-//!    `ngn_owed * rate.price` and `10i128.pow(decimals)` are unchecked: a
-//!    huge price or a garbage `decimals()` (Reflector's real fiat oracle uses
-//!    14) aborts the call. Soroban's atomicity means no partial state is
-//!    written, so the damage is bounded to "this commitment can never be
-//!    resolved" — same repair story as F1.
+//! ## Which oracle failures the host lets the escrow contract recover from (#245)
 //!
-//! A crashing or unreachable oracle is reported by the host, and depending on
-//! the SDK's version the failure surfaces either as the `try_*` call's outer
-//! error or as a panic that unwinds the simulated invocation. `attempt()`
-//! tolerates both shapes; the property being asserted is the one that matters
-//! either way — *a fault never yields a successful, wrong value*.
+//! Checked against `soroban-env-host` 29.0.1 by the tests named here:
+//!
+//! | Failure shape | Recoverable? | What callers see | Test |
+//! | --- | --- | --- | --- |
+//! | No contract at `oracle_contract` | yes | `OracleUnavailable` | `an_unreachable_oracle_degrades_to_oracle_unavailable` |
+//! | Callee panics in `lastprice` | yes | `OracleUnavailable` | `a_crashing_oracle_degrades_to_oracle_unavailable_and_writes_no_state` |
+//! | Callee panics in `decimals` | yes | `OracleUnavailable` | `a_crashing_decimals_call_degrades_to_oracle_unavailable` |
+//! | Callee reply doesn't decode as the expected type | yes | `OracleUnavailable` | mapped from the `try_*` inner `Err`; not separately injected |
+//! | Callee exhausts the CPU/memory budget | **no** | host abort (`Budget, ExceededLimit`) | `an_oracle_that_exhausts_the_budget_still_aborts_the_invocation` |
+//!
+//! Why budget exhaustion still aborts: the budget belongs to the whole
+//! transaction, not to the callee's frame. `try_call` catches a failure
+//! *inside* the callee, but once the budget is used up there is none left for
+//! the escrow contract to run its error path with, so the host ends the whole
+//! invocation. No contract-level change can fix this. Callers should treat a
+//! host `Budget` error from these calls as "the oracle is misbehaving", which
+//! is the same conclusion `OracleUnavailable` gives. Soroban's atomicity still
+//! means nothing is written. The arithmetic traps F4/F5 below are the escrow
+//! contract's *own* code trapping, not a cross-contract failure, so they also
+//! abort; they are out of scope for #245.
+//!
+//! `attempt()` is kept for the faults that still abort: it treats both an
+//! outer error and an unwinding panic as "no value", because the property
+//! that matters either way is *a fault never yields a successful, wrong
+//! value*.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -113,6 +130,23 @@ mod faulty_oracle {
             env.storage().instance().set(&symbol_short!("dead"), &true);
         }
 
+        /// Simulates an oracle whose `lastprice` answers fine but whose
+        /// `decimals` crashes, which tests the second cross-contract call
+        /// `resolve_fx_shortfall` makes (#245).
+        pub fn break_decimals(env: Env) {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("deaddec"), &true);
+        }
+
+        /// Simulates an oracle that burns through the invocation's shared
+        /// CPU budget instead of answering (#245). Only the host's own
+        /// metered work counts toward the budget, so the loop keeps calling
+        /// storage until the budget runs out.
+        pub fn exhaust_budget(env: Env) {
+            env.storage().instance().set(&symbol_short!("burn"), &true);
+        }
+
         /// Simulates an oracle reporting a nonsense scale factor.
         pub fn set_decimals(env: Env, decimals: u32) {
             env.storage()
@@ -129,6 +163,16 @@ mod faulty_oracle {
             {
                 panic!("simulated oracle crash");
             }
+            if env
+                .storage()
+                .instance()
+                .get::<_, bool>(&symbol_short!("burn"))
+                .unwrap_or(false)
+            {
+                loop {
+                    let _ = env.storage().instance().has(&symbol_short!("burn"));
+                }
+            }
             env.storage()
                 .instance()
                 .get::<_, (i128, u64)>(&symbol_short!("quote"))
@@ -136,6 +180,14 @@ mod faulty_oracle {
         }
 
         pub fn decimals(env: Env) -> u32 {
+            if env
+                .storage()
+                .instance()
+                .get::<_, bool>(&symbol_short!("deaddec"))
+                .unwrap_or(false)
+            {
+                panic!("simulated decimals() crash");
+            }
             env.storage()
                 .instance()
                 .get(&symbol_short!("dec"))
@@ -357,47 +409,118 @@ fn quote_exactly_at_the_staleness_bound_is_accepted_not_rejected() {
 
 // ---------- the faults that are NOT covered by a documented error ----------
 
+/// #245 — a callee that panics mid-call is recoverable: every read path
+/// returns `OracleUnavailable` as a contract error, and nothing is written.
 #[test]
-fn a_crashing_oracle_never_yields_a_wrong_rate_and_writes_no_state() {
+fn a_crashing_oracle_degrades_to_oracle_unavailable_and_writes_no_state() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     s.oracle().blackout();
 
     s.w.drive_to_delivered();
-    let outcome = attempt(|| s.w.contract.try_oracle_rate().is_ok());
-    assert!(
-        !matches!(outcome, Attempt::Succeeded),
-        "a crashing oracle must not produce a returned rate, got {outcome:?}"
+    assert_eq!(
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleUnavailable)),
+        "a crashing oracle must surface as a contract error, not a host abort"
     );
-
-    let resolved = attempt(|| s.w.contract.try_resolve_fx_shortfall().is_ok());
-    assert!(
-        !matches!(resolved, Attempt::Succeeded),
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleUnavailable)),
         "a crashing oracle must not let `resolve_fx_shortfall` record a number"
     );
-    let c = s.w.contract.get_commitment();
-    assert!(!c.fx_resolved);
-    assert_eq!(c.status, Status::Delivered);
-}
-
-/// F1 — an oracle address with nothing deployed behind it.
-#[test]
-fn an_unreachable_oracle_aborts_rather_than_degrading_to_a_documented_error() {
-    let s = oracle_world_unreachable(MAX_AGE, DENOMINATED);
-
-    let outcome = attempt(|| s.w.contract.try_oracle_rate().is_ok());
-    assert!(
-        matches!(outcome, Attempt::Failed | Attempt::Aborted),
-        "expected an unreachable oracle to fail the read, got {outcome:?}"
+    // The status probe can now report the failure instead of aborting; it
+    // propagates the error and records nothing (see its doc comment).
+    assert_eq!(
+        s.w.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::OracleUnavailable))
     );
 
-    // Actionable finding, stated plainly: the failure is *not* one of
-    // OracleNotConfigured / OraclePriceUnavailable / OracleStale. Whatever
-    // off-chain caller drove this gets a host abort, and because
-    // `oracle_config` has no setter the commitment keeps that dead address
-    // forever. `settle` on an oracle-configured commitment is then permanently
-    // unreachable (`FxNotResolved`), so this is a liveness gap, not just a
-    // cosmetic one — worth an `update_oracle_config` (re-initialize-gated) or
-    // an `OracleUnreachable` contract error in a follow-up.
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved);
+    assert!(!c.fx_quote_stale);
+    assert_eq!(c.fx_adjusted_total, 0);
+    assert_eq!(c.status, Status::Delivered);
+    assert_eq!(s.w.contract.try_settle(), Err(Ok(Error::FxNotResolved)));
+}
+
+/// #245 — `lastprice` answers but the second call, `decimals`, crashes.
+/// `resolve_fx_shortfall` must refuse with `OracleUnavailable` rather than
+/// abort, and must leave no partial state from the half-finished read.
+#[test]
+fn a_crashing_decimals_call_degrades_to_oracle_unavailable() {
+    let s = oracle_world(MAX_AGE, DENOMINATED);
+    s.oracle().break_decimals();
+
+    s.w.drive_to_delivered();
+    // `oracle_rate` never calls `decimals()`, so it is unaffected.
+    assert_eq!(s.w.contract.oracle_rate().price, FRESH_PRICE);
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleUnavailable))
+    );
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved && c.fx_adjusted_total == 0 && c.fx_shortfall_amount == 0);
+}
+
+/// #245 — the one fault shape the host does **not** let the caller recover
+/// from. Running out of budget is not a per-frame failure that `try_call`
+/// can catch: the CPU/memory budget is shared by the whole transaction, so
+/// once the callee uses it up there is none left for the escrow contract to
+/// return an error with. The invocation aborts. This test pins that, so a
+/// future SDK or host that changed it would show up here.
+#[test]
+fn an_oracle_that_exhausts_the_budget_still_aborts_the_invocation() {
+    let s = oracle_world(MAX_AGE, DENOMINATED);
+    s.w.drive_to_delivered();
+    s.oracle().exhaust_budget();
+
+    let outcome = attempt(|| {
+        matches!(
+            s.w.contract.try_oracle_rate(),
+            Err(Ok(Error::OracleUnavailable))
+        )
+    });
+    assert!(
+        !matches!(outcome, Attempt::Succeeded),
+        "budget exhaustion is not expected to be recoverable as \
+         OracleUnavailable; if this now passes, update the harness header \
+         and `Error::OracleUnavailable`'s doc — got {outcome:?}"
+    );
+    // Whatever shape the abort took, no rate came back and nothing was
+    // recorded.
+    s.w.env.cost_estimate().budget().reset_unlimited();
+    assert!(!s.w.contract.get_commitment().fx_resolved);
+}
+
+/// F1, resolved by #245 — an oracle address with nothing deployed behind it
+/// is recoverable: the host reports the missing contract to `try_call` as an
+/// error, and the escrow contract maps that to `OracleUnavailable`.
+#[test]
+fn an_unreachable_oracle_degrades_to_oracle_unavailable() {
+    let s = oracle_world_unreachable(MAX_AGE, DENOMINATED);
+
+    assert_eq!(
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleUnavailable)),
+        "a missing oracle contract must surface as a contract error"
+    );
+
+    s.w.drive_to_delivered();
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleUnavailable))
+    );
+    assert_eq!(
+        s.w.contract.try_refresh_fx_quote_status(),
+        Err(Ok(Error::OracleUnavailable))
+    );
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved && !c.fx_quote_stale);
+
+    // What #245 does *not* fix: `oracle_config` still has no setter, so the
+    // commitment keeps that dead address forever and `settle` on it stays
+    // unreachable (`FxNotResolved`). The difference is that callers now get
+    // a specific, documented error code to record instead of an abort.
+    assert_eq!(s.w.contract.try_settle(), Err(Ok(Error::FxNotResolved)));
     assert_eq!(
         s.w.contract.get_oracle_config().unwrap().oracle_contract,
         s.oracle_addr,
@@ -406,34 +529,48 @@ fn an_unreachable_oracle_aborts_rather_than_degrading_to_a_documented_error() {
     );
 }
 
-/// F2 — a quote stamped in the future.
+/// F2 regression — a quote stamped in the future is rejected on both paths.
 #[test]
-fn a_future_dated_quote_bypasses_the_staleness_bound_for_as_long_as_it_stays_ahead() {
+fn future_dated_quotes_are_rejected_on_both_read_paths() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     // "Now" is 0; stamp the quote 10_000 seconds *ahead* of the ledger.
     s.oracle().set_quote(&FRESH_PRICE, &(s.w.now() + 10_000));
 
-    let rate = s.w.contract.oracle_rate();
     assert_eq!(
-        rate.timestamp, 10_000,
-        "FINDING F2: `now.saturating_sub(quote.timestamp)` clamps a future \
-         quote's age to 0, so it reads as maximally fresh"
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleTimestampInFuture))
     );
 
-    // The bypass lasts exactly as long as the ledger stays behind the stamp —
-    // once real time passes it, normal staleness applies again.
+    s.w.drive_to_delivered();
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleTimestampInFuture))
+    );
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved && c.fx_adjusted_total == 0 && c.fx_shortfall_deadline == 0);
+
+    // Once ledger time passes the stamp, normal staleness applies.
     s.w.advance(10_000 + MAX_AGE + 1);
     assert_eq!(s.w.contract.try_oracle_rate(), Err(Ok(Error::OracleStale)));
 
-    // The sharp version of the finding: nothing bounds how far ahead a quote
-    // may be stamped, so a feed (or a compromised one) that always reports a
-    // far-future timestamp is never rejected as stale at all.
+    // Even an extreme future timestamp is rejected, rather than accepted as
+    // fresh due to subtraction saturation.
     s.oracle().set_quote(&FRESH_PRICE, &u64::MAX);
     s.w.advance(MAX_AGE * 1_000);
-    assert!(
-        s.w.contract.try_oracle_rate().is_ok(),
-        "a maximally future-dated quote is accepted indefinitely"
+    assert_eq!(
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleTimestampInFuture))
     );
+}
+
+#[test]
+fn quote_timestamp_equal_to_now_is_accepted() {
+    let s = oracle_world(MAX_AGE, DENOMINATED);
+    s.oracle().set_quote(&FRESH_PRICE, &s.w.now());
+
+    let rate = s.w.contract.oracle_rate();
+    assert_eq!(rate.price, FRESH_PRICE);
+    assert_eq!(rate.timestamp, s.w.now());
 }
 
 /// F3 — non-positive prices are rejected on every oracle read path.
@@ -470,18 +607,17 @@ fn non_positive_prices_are_rejected_on_all_oracle_read_paths() {
     }
 }
 
-/// F4 — a price big enough to overflow the conversion multiply.
+/// F4 — a price big enough to overflow the conversion multiply returns a
+/// contract error rather than trapping.
 #[test]
-fn an_overflowing_price_traps_resolve_fx_shortfall_without_recording_anything() {
+fn an_overflowing_price_returns_error_without_recording_anything() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     s.oracle().set_quote(&(i128::MAX / 2), &s.w.now());
 
     s.w.drive_to_delivered();
-    let outcome = attempt(|| s.w.contract.try_resolve_fx_shortfall().is_ok());
-    assert!(
-        !matches!(outcome, Attempt::Succeeded),
-        "FINDING F4: `ngn_owed * rate.price` is unchecked, so an extreme \
-         price traps instead of being rejected — got {outcome:?}"
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleConversionOutOfRange))
     );
 
     let c = s.w.contract.get_commitment();
@@ -493,23 +629,24 @@ fn an_overflowing_price_traps_resolve_fx_shortfall_without_recording_anything() 
     assert_eq!(s.w.status(), Status::Delivered);
 }
 
-/// F5 — a nonsense `decimals()` answer, which `resolve_fx_shortfall` divides
-/// by as `10i128.pow(decimals)`.
+/// F5 — a nonsense `decimals()` answer returns a contract error.
 #[test]
-fn an_absurd_decimals_count_traps_resolve_fx_shortfall() {
+fn an_absurd_decimals_count_returns_error_without_recording_anything() {
     let s = oracle_world(MAX_AGE, DENOMINATED);
     s.oracle().set_decimals(&200); // 10^200 does not fit in i128
 
     s.w.drive_to_delivered();
-    let outcome = attempt(|| s.w.contract.try_resolve_fx_shortfall().is_ok());
-    assert!(
-        !matches!(outcome, Attempt::Succeeded),
-        "FINDING F5: `10i128.pow(decimals)` is unbounded, so a bad \
-         decimals() value traps — got {outcome:?}"
+    assert_eq!(
+        s.w.contract.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OracleConversionOutOfRange))
     );
     // `oracle_rate` itself is unaffected: it never calls `decimals()`.
     assert_eq!(s.w.contract.oracle_rate().price, FRESH_PRICE);
-    assert!(!s.w.contract.get_commitment().fx_resolved);
+    let c = s.w.contract.get_commitment();
+    assert!(!c.fx_resolved);
+    assert_eq!(c.fx_adjusted_total, 0);
+    assert_eq!(c.fx_shortfall_amount, 0);
+    assert_eq!(s.w.status(), Status::Delivered);
 }
 
 /// #63 — the decimals-change question, and the assumption the conversion leans
@@ -518,7 +655,7 @@ fn an_absurd_decimals_count_traps_resolve_fx_shortfall() {
 /// `oracle_rate()` does **no** conversion math: it returns the raw `price`
 /// exactly as `lastprice` gave it and never calls `decimals()`, so a
 /// `decimals()` change cannot alter it. The scale is applied in exactly one
-/// place — `resolve_fx_shortfall` (`lib.rs`), via `10i128.pow(decimals)`.
+/// place — `resolve_fx_shortfall` (`lib.rs`), via checked decimal conversion.
 ///
 /// Reflector's real contract makes `decimals` immutable: `settings.rs` writes
 /// it once in `init` (which aborts with `AlreadyInitialized` on a second call)
@@ -526,7 +663,8 @@ fn an_absurd_decimals_count_traps_resolve_fx_shortfall() {
 /// change." This test pins what happens if that invariant is ever violated
 /// anyway: a *plausible* new value (15 instead of 14) is accepted silently and
 /// rescales the conversion by a power of ten, with no error and no mismatch
-/// detection — unlike the absurd value in the F5 test above, which traps.
+/// detection — unlike an absurd value that cannot be represented, which
+/// returns `OracleConversionOutOfRange`.
 #[test]
 fn a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall() {
     let s = oracle_world(MAX_AGE, 1_000_000);
@@ -571,13 +709,14 @@ fn a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall() {
 fn a_healthy_quote_still_resolves_normally_after_the_fault_modes() {
     let s = oracle_world(MAX_AGE, 1_000_000);
     s.oracle().blackout();
-    assert!(!matches!(
-        attempt(|| s.w.contract.try_oracle_rate().is_ok()),
-        Attempt::Succeeded
-    ));
+    assert_eq!(
+        s.w.contract.try_oracle_rate(),
+        Err(Ok(Error::OracleUnavailable))
+    );
 
     // Recovery is purely the oracle's own behavior — the escrow contract has
-    // no repair path (F1). Clear the fault and the same instance reads fine.
+    // no repair path (F1: `oracle_config` has no setter). A healthy oracle
+    // at a fresh address reads fine.
     let env = s.env().clone();
     let fresh_id = env.register(faulty_oracle::FaultyOracle, ());
     let fresh = faulty_oracle::FaultyOracleClient::new(&env, &fresh_id);

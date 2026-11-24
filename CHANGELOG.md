@@ -99,6 +99,39 @@ list in `deny.toml` (#59), whose first run surfaced and triaged
 `wasmparser`'s `Apache-2.0 WITH LLVM-exception`. Docs-only otherwise — no
 contract code changed.
 
+Oracle hardening, build metadata, and an interface guard (#244–#247). Not
+uploaded yet. Under docs/versioning.md §2 the next build is a **MINOR**:
+there is a new error code, and `initialize` now refuses inputs it used to
+accept.
+
+- **`initialize` validates `OracleConfig::denominated_amount` (#247).** A
+  value `<= 0` or `> MAX_DENOMINATED_AMOUNT` (`i128::MAX / 10_000`, the
+  largest value for which `bps_amount(_, 10_000)` can't overflow) is now
+  refused with the existing `InvalidOracleConfig`. Before this, a zero or
+  negative value was accepted, and after a full delivery `settle` would pay
+  the cooperative nothing and refund the buyer in full. An oversized value
+  would have trapped at settlement.
+- **New `Error::OracleUnavailable` (= 46, appended) (#245).**
+  `read_oracle_rate` and `resolve_fx_shortfall` now use the generated
+  `try_lastprice` / `try_decimals`. An oracle address with no contract
+  behind it, a callee that panics, or a reply that doesn't decode now
+  returns a contract error from `oracle_rate`, `resolve_fx_shortfall` and
+  `refresh_fx_quote_status` instead of aborting the invocation. This fixes
+  fault-injection finding F1. Budget exhaustion inside the oracle still
+  aborts, because the host gives the caller nothing to recover with; the
+  harness header in `tests/oracle_fault_injection.rs` documents this.
+- **Contract metadata embedded in the WASM (#246).** `contractmeta!` writes
+  `version` (`escrow-v` + the Cargo package version) and `repository` (the
+  workspace repository URL) into the `contractmetav0` section. Read them
+  with `stellar contract info meta --wasm …`. Neither value depends on the
+  build environment, so two clean builds still give the same hash.
+- **Exported-interface snapshot (#244).** New committed
+  `contracts/escrow/interface.snapshot`, plus
+  `.github/scripts/check_interface_snapshot.sh`. The script fails on any
+  change to the exported functions, events or types and prints a PATCH /
+  MINOR / MINOR **BREAKING** hint. Not yet wired into CI; that is a
+  maintainer step per the PR template.
+
 Four small Wave backlog items landed together — one test suite, two
 property/edge tests, and one script-and-vendor-tree chore. The
 non-standard SEP-41 token suite (#264,

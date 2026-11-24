@@ -307,6 +307,7 @@
     ],
     [],
     [],
+    [],
     []
   ],
   "ledger": {
@@ -377,10 +378,10 @@
                   "storage": [
                     {
                       "key": {
-                        "symbol": "dead"
+                        "symbol": "dec"
                       },
                       "val": {
-                        "bool": true
+                        "u32": 200
                       }
                     },
                     {
