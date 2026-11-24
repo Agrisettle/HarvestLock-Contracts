@@ -43,6 +43,7 @@ error Error::InvalidOracleConfig = 24
 error Error::InvalidQuantity = 18
 error Error::InvalidState = 3
 error Error::InvalidWindow = 6
+error Error::LockAfterDeliveryDeadline = 47
 error Error::NoFxShortfall = 31
 error Error::NotAParty = 35
 error Error::NotInitialized = 2

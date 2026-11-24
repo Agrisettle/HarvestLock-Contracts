@@ -1,0 +1,46 @@
+[package]
+name = "escrow-reader"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/agrisettle/HarvestLock-Contracts"
+publish = false
+description = "Example downstream Soroban contract that reads HarvestLock escrow state through soroban_sdk::contractimport!"
+
+[lib]
+# `cdylib` is what `stellar contract build` compiles; `rlib` is what the
+# integration test in `tests/` links against (same pairing the escrow crate
+# uses). Nothing downstream should depend on this rlib — see the README.
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = "29.0.1"
+
+[dev-dependencies]
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
+
+# Deliberately its own workspace, not a member of the root one.
+#
+# The crate compiles `soroban_sdk::contractimport!` against the escrow's built
+# `harvestlock_escrow.wasm`, which only exists after
+# `stellar contract build --package harvestlock-escrow`. Making this a member
+# of the root workspace would put that artifact requirement inside
+# `cargo build`/`cargo test`/`cargo llvm-cov --workspace` for the *whole*
+# workspace, so a clean checkout would fail those before the escrow was ever
+# built. Keeping it standalone means the contract's own build and test stay
+# exactly as they were, and this example's prerequisite (build the escrow
+# first) is stated where it belongs — in this directory's README.
+[workspace]
+
+# Same release profile shape as the root workspace, so the example's own WASM
+# is built the way a real contract deployment expects.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

@@ -12,9 +12,12 @@ doctest = false
 
 [features]
 # Compiles `Commitment::check_invariants` (and the `save` hook that calls
-# it) into builds that aren't `cfg(test)` — i.e. the integration suites in
-# `tests/`, which link this crate as a normal dependency. Absent from the
-# release WASM; never enable it there. See issue #225.
+# it) plus the shared test harness (`crate::testutils`, #274) into builds
+# that aren't `cfg(test)` — i.e. the integration suites in `tests/`, which
+# link this crate as a normal dependency. Absent from the release WASM;
+# never enable it there. See issue #225. The self dev-dependency below is
+# what turns it on for test builds; nothing else needs to pass
+# `--features testutils`.
 testutils = []
 
 [dependencies]
@@ -23,3 +26,13 @@ soroban-sdk = "29.0.1"
 [dev-dependencies]
 proptest = "1.12.0"
 soroban-sdk = { version = "29.0.1", features = ["testutils"] }
+# Cargo does not turn a crate's own features on for its test targets, and the
+# integration suites in `tests/` link this crate as a normal dependency —
+# where `cfg(test)` is not set — so they would otherwise never see
+# `harvestlock_escrow::testutils` (#274). Depending on ourselves, dev-only,
+# is how the `testutils` feature gets enabled for exactly those builds: plain
+# `cargo test` then works with no extra flags, and neither the release WASM
+# nor a normal `cargo build` picks the feature (or this dev-dependency) up.
+# The same dev-only unification is what makes `soroban-sdk`'s own `testutils`
+# feature available in the library build those suites link against.
+harvestlock-escrow = { path = ".", features = ["testutils"] }

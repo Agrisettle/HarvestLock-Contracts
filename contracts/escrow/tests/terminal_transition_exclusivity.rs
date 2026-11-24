@@ -206,11 +206,18 @@ proptest! {
         start in arb_start(),
         elapsed in arb_prefix_elapsed(),
         offset in arb_offset(),
-        prefix_claims in any::<bool>(),
     ) {
         let delivery_window = 200_000;
+        // This pair's pre-state always claims both advances. `resolve_fx_shortfall`
+        // shares `settle`'s `tranches_resolved` guard -- it needs final,
+        // settled figures, pinned by
+        // `cannot_resolve_fx_shortfall_before_tranches_are_resolved` -- so with
+        // `prefix_claims = false` the prefix leaves a tranche open and the call
+        // is legitimately `TrancheUnresolved`: the pair would never become
+        // comparable. `prefix_claims` still varies in the pairs whose pre-state
+        // does not depend on it.
         let funded = scene(claim_window, remainder_window, delivery_window, start, true);
-        ready_and_funded(&funded, prefix_claims, elapsed);
+        ready_and_funded(&funded, true, elapsed);
         funded.contract.confirm_delivery(&CONTRACTED_QUANTITY, &0);
         funded.contract.resolve_fx_shortfall();
         let deadline = funded.contract.get_commitment().fx_shortfall_deadline;
@@ -219,7 +226,7 @@ proptest! {
         let funding_succeeds = funded.contract.try_fund_fx_shortfall().is_ok();
 
         let expired = scene(claim_window, remainder_window, delivery_window, start, true);
-        ready_and_funded(&expired, prefix_claims, elapsed);
+        ready_and_funded(&expired, true, elapsed);
         expired.contract.confirm_delivery(&CONTRACTED_QUANTITY, &0);
         expired.contract.resolve_fx_shortfall();
         expired.env.ledger().set_timestamp(around(deadline, offset));

@@ -986,7 +986,90 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
+*Last updated: 24 Nov 2026 — four-issue bundle (#274, #275, #276, #277).
+**No workflow files touched** (maintainer policy). New terminal `Error`
+variant `LockAfterDeliveryDeadline = 47`, so `error_discriminants.snapshot`
+and `interface.snapshot` grew by one line each and the WASM needs a rebuild
+before the interface guard is re-run.*
+
+- **#277 — `lock` refuses once the delivery window has passed.** The window
+  is `created_at + delivery_window_secs`, anchored at `initialize`, and
+  `delivery_deadline`'s field doc now says so (and why it is not anchored at
+  `lock`: re-anchoring would let a buyer extend the cooperative's deadline
+  unilaterally). `can_lock` gained a `now` argument and the
+  `now > delivery_deadline` guard, `available_actions` advertises `lock`
+  with `ActionDeadline::Inclusive(delivery_deadline)` instead of `None`, and
+  the deadline second itself is still in time. Closes the
+  late-lock-then-`reclaim_on_nondelivery` sequence. Tests: the exact
+  boundary from both sides, and the sequence itself (three tests).
+- **#275 — a zero remainder is funded by `ready_for_delivery`.** With
+  `advance1_bps + advance2_bps == 10_000` the deposit is `total_amount`, so
+  the remainder is 0 and requiring `fund_remainder`
+  let a fully-prepaid buyer be `Defaulted` — and lose the deposit — for not
+  sending zero tokens. New private helper `remainder_amount`, used by
+  `ready_for_delivery` (auto-fund), `fund_remainder` (transfers it) and the
+  new test-build invariant "a zero remainder is never left unfunded while
+  its window is open". `expire_remainder_window` is now unreachable for that
+  shape (`RemainderAlreadyFunded`). Tests: the full lifecycle for the 10 000
+  bps case, the default path refusing after the window lapses, and the
+  9 999 bps near-miss that must still be funded by the buyer (three tests).
+- **#274 — one test harness.** `crate::testutils` (new
+  `contracts/escrow/src/testutils.rs`, declared
+  `#[cfg(any(test, feature = "testutils"))]`) now holds the windows, the
+  grade schedule, token minting, the clock helpers, `World`/`Setup` and the
+  drive helpers, with a `Terms` builder. `src/test.rs` does
+  `use crate::testutils::*` and `tests/common/mod.rs` is a re-export shim;
+  no test body changed. Integration suites link this crate without
+  `cfg(test)`, so `Cargo.toml` gained a *dev-only self-dependency*
+  (`harvestlock-escrow = { path = ".", features = ["testutils"] }`) — plain
+  `cargo test` needs no `--features` flag, and the release WASM is
+  unaffected. `Cargo.lock` gained exactly one line (the crate's own package
+  listing itself as a dependency) and `--locked` builds stay valid.
+- **#276 — downstream integration example.** `examples/escrow-reader/` is a
+  minimal contract that imports the escrow's built WASM with
+  `soroban_sdk::contractimport!` and reads `get_status`/`get_commitment`
+  across the boundary, plus a test that registers the escrow *from that
+  WASM*. Deliberately **not** a member of the root workspace: the import
+  needs the escrow artifact at compile time, which would otherwise break
+  `cargo llvm-cov --workspace` and `stellar contract build` on a clean
+  checkout. Its README and the root README's "Building and testing" section
+  document the supported pattern (WASM import, not the rlib) and the build
+  order: `stellar contract build --package harvestlock-escrow`, then
+  `cargo test --manifest-path examples/escrow-reader/Cargo.toml`. Measured
+  locally: the example's own WASM is 8,156 bytes and exports exactly the two
+  read functions — it does not embed the escrow.
+
+Verified in this session: `cargo check --tests --locked` and `cargo build
+--tests --locked` (every test target compiles and links against the new
+harness), `stellar contract build --locked` for the escrow and for the
+example, the example's test target type-checks, `check_error_discriminants.sh`,
+`check_auth_docs.sh`, `check_wasm_size.sh` (87,640 bytes, +5,073 against the
+stale 82,567 baseline, inside the 5,120 budget) and
+`check_interface_snapshot.sh`. Once the PR's CI ran, `cargo test --locked`
+was also run locally in full: **230 unit tests (229 passing, 1 ignored) and
+96 across `tests/` (94 passing, 2 ignored)**, all green — the warnings it
+prints (unused `Ledger`/`TrancheClaimed`/`TrancheReclaimed`/`TOTAL_AMOUNT`/
+`Error` imports in `event_sourcing`, `nonstandard_token` and
+`state_machine_model`) are pre-existing and CI does not run Clippy or
+`-D warnings`.
+
+**Also fixed here, inherited from `main`:** `main` at `25dffee` was red.
+`terminal_transition_exclusivity::fx_funding_and_expiry_are_exclusive` built
+its pre-state with `prefix_claims = false`, leaving a tranche open, and then
+called `resolve_fx_shortfall`, which shares `settle`'s `tranches_resolved`
+guard (`cannot_resolve_fx_shortfall_before_tranches_are_resolved` pins that
+guard deliberately — it needs final, settled figures). The call was
+correctly refused with `TrancheUnresolved`, so the pair was never
+comparable; `cargo test`, `code coverage`, the 28.0.0 SDK differential and
+the mutation job all failed on that one test. The pair's pre-state now
+always claims both advances (the `prefix_claims` axis still varies in the
+other pairs, where it is meaningful), and a third `#[should_panic]`
+invariant test (`save_rejects_a_zero_remainder_left_unfunded_with_its_window_open`)
+keeps #275's new invariant from being weakenable to a no-op — without it,
+mutating the guard to `remainder_deadline == 0` would let every lifecycle
+test pass and the mutation job would report a survivor.
+
+Prior entry: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
 `reclaimed_by_buyer` calculations into private helpers on `EscrowContract`
 with unit test coverage for all four claimed/reclaimed combinations. Zero
 behaviour change across `settle` and `resolve_fx_shortfall`.

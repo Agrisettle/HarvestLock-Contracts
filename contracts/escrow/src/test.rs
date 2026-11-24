@@ -1,24 +1,16 @@
 #![cfg(test)]
 
 use super::*;
+// The one harness (#274): windows, grade schedule, token minting, clock
+// helpers and the `World`/`Setup` constructors all live in
+// `crate::testutils`, shared with the integration suites in `tests/`.
+use crate::testutils::*;
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, BytesN as _, Events as _, Ledger as _,
     MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::xdr::{Limits, ToXdr as _, WriteXdr as _};
-use soroban_sdk::{symbol_short, xdr, Env, Event as _, IntoVal, TryFromVal, Val};
-
-const WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days, arbitrary but realistic
-const REMAINDER_WINDOW: u64 = 7 * 24 * 60 * 60; // 7 days — matches the app-level default
-const DELIVERY_WINDOW: u64 = 120 * 24 * 60 * 60; // 120 days — matches the app-level default
-const CONTRACTED_QUANTITY: u32 = 1_000; // arbitrary "kg" units, same framing as total_amount's stroops-equivalent
-/// Full price at grade 0, then two discounted tiers — a plausible
-/// pre-agreed grade schedule for tests that don't care about the exact
-/// numbers, just that a schedule exists.
-const GRADE_PRICE_BPS: [u32; 3] = [10_000, 9_000, 7_500];
-/// The grade index tests default to unless they're specifically exercising
-/// grade adjustment — index 0 is `GRADE_PRICE_BPS`'s full-price tier.
-const FULL_PRICE_GRADE: u32 = 0;
+use soroban_sdk::{symbol_short, xdr, Env, Event as _, IntoVal, TryFromVal};
 
 // This is the pinned SDK/test-host value for
 // `max_contract_data_entry_size_bytes`. Keep the measured worst-case instance
@@ -29,215 +21,6 @@ const MAX_INSTANCE_ENTRY_FRACTION_PERCENT: usize = 50;
 const MAX_COMMITMENT_XDR_BYTES: usize = 4_096;
 const MAX_ORACLE_CONFIG_XDR_BYTES: usize = 512;
 const MAX_ALLOCATION_XDR_BYTES: usize = 24_000;
-
-fn create_token<'a>(
-    env: &Env,
-    admin: &Address,
-) -> (Address, token::Client<'a>, token::StellarAssetClient<'a>) {
-    let sac = env.register_stellar_asset_contract_v2(admin.clone());
-    let address = sac.address();
-    (
-        address.clone(),
-        token::Client::new(env, &address),
-        token::StellarAssetClient::new(env, &address),
-    )
-}
-
-struct Setup<'a> {
-    env: Env,
-    contract: EscrowContractClient<'a>,
-    token: token::Client<'a>,
-    buyer: Address,
-    cooperative: Address,
-    warehouse: Address,
-    total_amount: i128,
-}
-
-fn setup(advance1_bps: u32, advance2_bps: u32) -> Setup<'static> {
-    setup_with_window(advance1_bps, advance2_bps, WINDOW)
-}
-
-fn setup_with_window(advance1_bps: u32, advance2_bps: u32, window: u64) -> Setup<'static> {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let buyer = Address::generate(&env);
-    let cooperative = Address::generate(&env);
-    let warehouse = Address::generate(&env);
-    setup_in(
-        &env,
-        buyer,
-        cooperative,
-        warehouse,
-        advance1_bps,
-        advance2_bps,
-        window,
-    )
-}
-
-/// The identity-agnostic half of `setup_with_window` — generates nothing, so
-/// tests that need a specific (including degenerate) set of named parties can
-/// pass their own addresses in. See `setup_shaped` and the auth-model tests.
-fn setup_in(
-    env: &Env,
-    buyer: Address,
-    cooperative: Address,
-    warehouse: Address,
-    advance1_bps: u32,
-    advance2_bps: u32,
-    window: u64,
-) -> Setup<'static> {
-    let token_admin = Address::generate(env);
-
-    let (token_address, token, token_admin_client) = create_token(env, &token_admin);
-
-    let total_amount: i128 = 1_000_000; // arbitrary stroops-equivalent units
-    token_admin_client.mint(&buyer, &total_amount);
-
-    let contract_id = env.register(EscrowContract, ());
-    let contract = EscrowContractClient::new(env, &contract_id);
-
-    contract.initialize(
-        &buyer,
-        &cooperative,
-        &warehouse,
-        &token_address,
-        &terms(env, total_amount, advance1_bps, advance2_bps, window),
-        &None,
-    );
-
-    Setup {
-        env: env.clone(),
-        contract,
-        token,
-        buyer,
-        cooperative,
-        warehouse,
-        total_amount,
-    }
-}
-
-/// The eight agreed terms `initialize` takes as one struct (#270), at this
-/// fixture's standard remainder/delivery windows, quantity and grade
-/// schedule. A test that cares about one term changes only that term, so
-/// every other one matches the fixture instead of being re-typed per call
-/// site.
-fn terms(
-    env: &Env,
-    total_amount: i128,
-    advance1_bps: u32,
-    advance2_bps: u32,
-    claim_window_secs: u64,
-) -> CommitmentTerms {
-    CommitmentTerms {
-        total_amount,
-        advance1_bps,
-        advance2_bps,
-        claim_window_secs,
-        remainder_window_secs: REMAINDER_WINDOW,
-        delivery_window_secs: DELIVERY_WINDOW,
-        contracted_quantity: CONTRACTED_QUANTITY,
-        grade_price_bps: Vec::from_array(env, GRADE_PRICE_BPS),
-    }
-}
-
-/// Which of the three named parties deliberately share an address, for the
-/// auth-model tests. `initialize` does not reject any of these shapes (a
-/// cooperative that also runs the warehouse is a realistic single operator;
-/// the all-identical case is covered by its own companion issue) — these
-/// exist so the auth checks' behavior under them is proven, not assumed.
-#[derive(Clone, Copy)]
-enum PartyShape {
-    /// Three genuinely distinct addresses.
-    Distinct,
-    /// One address is both buyer and warehouse operator.
-    BuyerIsWarehouse,
-    /// One address is both buyer and cooperative.
-    BuyerIsCooperative,
-    /// One address is all three named parties.
-    AllSame,
-}
-
-fn setup_shaped(shape: PartyShape) -> Setup<'static> {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let a = Address::generate(&env);
-    let b = Address::generate(&env);
-    let c = Address::generate(&env);
-    let (buyer, cooperative, warehouse) = match shape {
-        PartyShape::Distinct => (a, b, c),
-        PartyShape::BuyerIsWarehouse => (a.clone(), b, a),
-        PartyShape::BuyerIsCooperative => (a.clone(), a, c),
-        PartyShape::AllSame => (a.clone(), a.clone(), a),
-    };
-    setup_in(&env, buyer, cooperative, warehouse, 1_500, 1_500, WINDOW)
-}
-
-/// A `MockAuth`-compatible invocation descriptor: the exact contract, method,
-/// and serialized arguments that an authorization entry is scoped to. Soroban
-/// binds each auth entry to a specific invocation tree (contract + fn_name +
-/// args, plus sub-invocations), which is what makes replaying a signature
-/// against a different method or different arguments impossible (#141).
-fn mock_invoke<'a>(contract: &'a Address, fn_name: &'a str, args: Vec<Val>) -> MockAuthInvoke<'a> {
-    MockAuthInvoke {
-        contract,
-        fn_name,
-        args,
-        sub_invokes: &[],
-    }
-}
-
-/// Advances the simulated ledger clock forward by `secs`. Used to cross a
-/// claim-window deadline deterministically instead of relying on wall time.
-fn advance_time(s: &Setup, secs: u64) {
-    let now = s.env.ledger().timestamp();
-    s.env.ledger().set_timestamp(now + secs);
-}
-
-/// Sets the simulated ledger clock to an absolute timestamp. The
-/// deadline-boundary tests below read the deadline straight out of contract
-/// state and jump to exactly that value: `advance_time`'s `now + secs`
-/// expresses "clearly before" / "clearly after" fine, but re-deriving the
-/// deadline by hand to land on it exactly is the same hand-arithmetic those
-/// tests exist to avoid (and would let a wrong window-length constant hide).
-fn set_time(s: &Setup, timestamp: u64) {
-    s.env.ledger().set_timestamp(timestamp);
-}
-
-/// The deposit-only amount `lock` actually escrows, for a given bps split —
-/// mirrors `EscrowContract::deposit_amount` so tests can assert against it
-/// without reaching into contract internals.
-fn deposit_amount(total: i128, advance1_bps: u32, advance2_bps: u32) -> i128 {
-    total * i128::from(advance1_bps + advance2_bps) / 10_000
-}
-
-/// Drives a fresh, locked commitment all the way to `ReadyForDelivery` with
-/// the remainder funded — both tranches claimed normally along the way.
-/// Shared by the several tests below that only care about what happens
-/// *after* this point (confirm_delivery, settle) — the tranche mechanics
-/// themselves already have their own dedicated coverage above.
-fn advance_to_remainder_funded(s: &Setup) {
-    s.contract.release_advance_1();
-    s.contract.claim_advance_1();
-    s.contract.mark_checkpoint();
-    s.contract.release_advance_2();
-    s.contract.claim_advance_2();
-    s.contract.ready_for_delivery();
-    s.contract.fund_remainder();
-}
-
-/// The same drive, stopping at `ReadyForDelivery` with the remainder
-/// deliberately left **unfunded** — the state every `remainder_deadline`
-/// boundary assertion starts from.
-fn advance_to_ready_for_delivery(s: &Setup) {
-    s.contract.release_advance_1();
-    s.contract.claim_advance_1();
-    s.contract.mark_checkpoint();
-    s.contract.release_advance_2();
-    s.contract.claim_advance_2();
-    s.contract.ready_for_delivery();
-}
 
 // ---------- basic lifecycle ----------
 
@@ -549,6 +332,78 @@ fn lock_transfers_only_the_deposit_not_the_full_total() {
     assert_eq!(s.token.balance(&s.contract.address), deposit);
 }
 
+// ---------- #277: lock is refused once the delivery window has passed ----------
+//
+// The delivery window is the cooperative's time to perform and it starts at
+// `initialize` (`created_at + delivery_window_secs`), not at `lock`. Without a
+// guard on `lock` itself, a buyer could initialize, let the window run out,
+// then lock and call `reclaim_on_nondelivery` in the same breath — a
+// `Forfeited` strike against a cooperative that was never given any time at
+// all. `lock` now refuses strictly after the deadline; the deadline second
+// itself still belongs to the window, matching every other boundary here.
+
+#[test]
+fn lock_exactly_at_the_delivery_deadline_still_succeeds() {
+    // The Terms builder is the #274 harness's way of setting one window
+    // without hand-rolling an `initialize` call.
+    let s = world_with_terms(
+        Terms::default()
+            .advances(1_500, 1_500)
+            .delivery_window(30 * 24 * 60 * 60),
+    );
+    let deadline = s.contract.get_commitment().delivery_deadline;
+    assert_eq!(
+        deadline,
+        30 * 24 * 60 * 60,
+        "created_at is 0 in this harness"
+    );
+
+    set_time(&s, deadline);
+    s.contract.lock();
+
+    // Inclusive boundary: the deadline second is still the buyer's.
+    assert_eq!(s.contract.get_status(), Status::Locked);
+    let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
+    assert_eq!(s.token.balance(&s.contract.address), deposit);
+}
+
+#[test]
+fn lock_one_tick_past_the_delivery_deadline_is_rejected() {
+    let s = setup(1_500, 1_500);
+    let deadline = s.contract.get_commitment().delivery_deadline;
+    set_time(&s, deadline + 1);
+
+    let result = s.contract.try_lock();
+    assert_eq!(result, Err(Ok(Error::LockAfterDeliveryDeadline)));
+
+    // Rejected atomically: no status change, no funds moved.
+    assert_eq!(s.contract.get_status(), Status::Draft);
+    assert_eq!(s.token.balance(&s.buyer), s.total_amount);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn a_late_lock_can_no_longer_be_followed_by_an_immediate_forfeit() {
+    // The exact sequence #277 describes: initialize, wait out the delivery
+    // window, lock, then reclaim_on_nondelivery for a free strike.
+    let s = setup(1_500, 1_500);
+    let deadline = s.contract.get_commitment().delivery_deadline;
+    set_time(&s, deadline + 1);
+
+    // Step one of the sequence is now impossible ...
+    let result = s.contract.try_lock();
+    assert_eq!(result, Err(Ok(Error::LockAfterDeliveryDeadline)));
+
+    // ... so the forfeiture is never reachable: `Draft` has nothing escrowed,
+    // and `reclaim_on_nondelivery` refuses it on status alone.
+    let result = s.contract.try_reclaim_on_nondelivery();
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+
+    assert_eq!(s.contract.get_status(), Status::Draft);
+    assert_eq!(s.token.balance(&s.buyer), s.total_amount);
+    assert_eq!(s.token.balance(&s.cooperative), 0);
+}
+
 // ---------- allocation ledger (record-only, PRD §4.9 Rung 1) ----------
 
 fn member(env: &Env, share_bps: u32) -> AllocationMember {
@@ -573,7 +428,7 @@ fn stored_instance_entry_size(env: &Env) -> usize {
         .expect("the test environment must contain the contract instance entry")
 }
 
-fn set_oracle_config_for_size_measurement(s: &Setup<'static>, config: &OracleConfig) {
+fn set_oracle_config_for_size_measurement(s: &Setup, config: &OracleConfig) {
     s.env.as_contract(&s.contract.address, || {
         s.env
             .storage()
@@ -582,7 +437,7 @@ fn set_oracle_config_for_size_measurement(s: &Setup<'static>, config: &OracleCon
     });
 }
 
-fn set_grade_schedule_for_size_measurement(s: &Setup<'static>, schedule: Vec<u32>) {
+fn set_grade_schedule_for_size_measurement(s: &Setup, schedule: Vec<u32>) {
     s.env.as_contract(&s.contract.address, || {
         let mut commitment: Commitment = s
             .env
@@ -982,16 +837,14 @@ mod mock_sep41_token {
 /// (1_000_000), so tests using the plain `setup_with_oracle` wrapper
 /// never hit a shortfall; `setup_with_oracle_denomination` lets the FX
 /// shortfall tests below choose a `denominated_amount` that does.
-fn setup_with_oracle(
-    max_age_secs: u64,
-) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
+fn setup_with_oracle(max_age_secs: u64) -> (Setup, mock_oracle::MockOracleClient<'static>) {
     setup_with_oracle_denomination(max_age_secs, 500_000)
 }
 
 fn setup_with_oracle_denomination(
     max_age_secs: u64,
     denominated_amount: i128,
-) -> (Setup<'static>, mock_oracle::MockOracleClient<'static>) {
+) -> (Setup, mock_oracle::MockOracleClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -1334,7 +1187,7 @@ fn resolve_fx_shortfall_finds_nothing_owed_when_already_covered() {
 /// `decimals`, then runs `resolve_fx_shortfall`. The FX fixture always prices
 /// 4_000_000 (7-decimal fiat units) at 1.75, i.e. 7_000_000 7-decimal
 /// settlement units, and the deposit/remainder split is 15% + 15% / 70%.
-fn resolve_fx_with_token_decimals(token_decimals: u32, total_amount: i128) -> Setup<'static> {
+fn resolve_fx_with_token_decimals(token_decimals: u32, total_amount: i128) -> Setup {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -2263,6 +2116,100 @@ fn fund_remainder_requires_buyer_auth() {
     s.contract.fund_remainder();
     let auths = s.env.auths();
     assert!(auths.iter().any(|(addr, _)| *addr == s.buyer));
+}
+
+// ---------- #275: a zero remainder is funded automatically ----------
+//
+// `lock` escrows `advance1_bps + advance2_bps` of `total_amount`; with the two
+// advances summing to exactly 10 000 bps the deposit *is* the total and
+// `fund_remainder` would transfer nothing. Requiring that no-op call anyway
+// meant a fully-prepaid buyer who skipped it was marked `Defaulted` at
+// `remainder_deadline` and lost the whole deposit — being barred for not
+// sending zero tokens. `ready_for_delivery` now marks the remainder funded
+// when there is nothing to fund.
+
+/// Everything up to `ReadyForDelivery` for a commitment whose advance split
+/// is given by `terms` — both tranches released and claimed, exactly like
+/// `advance_to_ready_for_delivery`, but parameterised so the fully-prepaid
+/// shapes below don't need their own copies.
+fn drive_to_ready_for_delivery_with(terms: Terms) -> World {
+    let s = world_with_terms(terms);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.claim_advance_1();
+    s.contract.mark_checkpoint();
+    s.contract.release_advance_2();
+    s.contract.claim_advance_2();
+    s.contract.ready_for_delivery();
+    s
+}
+
+#[test]
+fn ready_for_delivery_funds_a_zero_remainder_on_the_buyers_behalf() {
+    // 5_000 + 5_000 bps: `lock` already escrowed the entire total.
+    let s = drive_to_ready_for_delivery_with(Terms::default().advances(5_000, 5_000));
+
+    let c = s.contract.get_commitment();
+    assert_eq!(c.remainder_deadline, REMAINDER_WINDOW);
+    assert!(
+        c.remainder_funded,
+        "a zero remainder is funded as soon as its window opens"
+    );
+    // Nothing was escrowed by the funding call, because there was nothing to
+    // escrow: both advances took the whole deposit out again.
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+    assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
+
+    // The no-op call is refused rather than reported as a real funding.
+    let result = s.contract.try_fund_remainder();
+    assert_eq!(result, Err(Ok(Error::RemainderAlreadyFunded)));
+}
+
+#[test]
+fn a_fully_prepaid_buyer_cannot_be_defaulted_for_skipping_the_zero_remainder() {
+    // #275's sequence: the buyer never calls `fund_remainder`, the window
+    // lapses, and the buyer-default path must be unreachable. The window is
+    // shortened through the Terms builder so the lapse is one hour of ledger
+    // time rather than the seven-day default.
+    let s = drive_to_ready_for_delivery_with(
+        Terms::default()
+            .advances(5_000, 5_000)
+            .remainder_window(60 * 60),
+    );
+    assert_eq!(s.contract.get_commitment().remainder_deadline, 60 * 60);
+    advance_time(&s, 60 * 60 + 1);
+
+    let result = s.contract.try_expire_remainder_window();
+    assert_eq!(result, Err(Ok(Error::RemainderAlreadyFunded)));
+    assert_eq!(s.contract.get_status(), Status::ReadyForDelivery);
+
+    // The full lifecycle still completes: delivery, then settlement with the
+    // advance tranches already carrying the whole total.
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(s.contract.get_status(), Status::Delivered);
+    s.contract.settle();
+
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
+    assert_eq!(s.token.balance(&s.buyer), 0);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn a_one_unit_remainder_is_still_the_buyers_to_fund() {
+    // 5_000 + 4_999 bps is one basis point short of fully prepaid, so the
+    // automatic path must not fire — the boundary is "remainder == 0", not
+    // "almost zero".
+    let s = drive_to_ready_for_delivery_with(Terms::default().advances(5_000, 4_999));
+
+    assert!(!s.contract.get_commitment().remainder_funded);
+
+    s.contract.fund_remainder();
+
+    assert!(s.contract.get_commitment().remainder_funded);
+    // 9 999 bps of 1 000 000 floors to a 999 900 deposit, leaving 100 units.
+    assert_eq!(s.token.balance(&s.contract.address), 100);
 }
 
 // ---------- expire_remainder_window (buyer default) ----------
@@ -4733,7 +4680,7 @@ fn auth_entry_for_one_argument_set_cannot_authorize_a_different_argument_set() {
 /// the API actually deploys, since it creates one contract per commitment.
 /// They share one `Env` (so an auth descriptor naming A's address is a real
 /// registered contract from B's point of view) but have distinct contract IDs.
-fn setup_two_instances_same_parties() -> (Setup<'static>, Setup<'static>) {
+fn setup_two_instances_same_parties() -> (Setup, Setup) {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -6542,6 +6489,26 @@ fn save_rejects_disputed_without_an_open_dispute_window() {
     });
 }
 
+/// #275's invariant, the same route: a commitment whose deposit already
+/// covers `total_amount` but whose remainder window was opened with
+/// `remainder_funded` still clear is exactly the state the auto-fund removed.
+/// Without this test the check could be weakened to a no-op and every
+/// lifecycle test would still pass.
+#[test]
+#[should_panic(expected = "invariant: zero remainder left unfunded with a window open")]
+fn save_rejects_a_zero_remainder_left_unfunded_with_its_window_open() {
+    let s = setup(5_000, 5_000);
+    s.contract.lock();
+
+    let mut corrupted = s.contract.get_commitment();
+    corrupted.remainder_deadline = 1;
+    corrupted.remainder_funded = false;
+
+    s.env.as_contract(&s.contract.address, || {
+        EscrowContract::save(&s.env, &corrupted);
+    });
+}
+
 // ---------- issue #285: claimed_by_coop and reclaimed_by_buyer helpers ----------
 
 #[test]
@@ -6732,7 +6699,7 @@ mod oracle_identity_rate_differential {
         advance1_bps: u32,
         advance2_bps: u32,
         oracle_config: Option<OracleConfig>,
-    ) -> Setup<'static> {
+    ) -> Setup {
         env.mock_all_auths();
         let token_admin = Address::generate(&env);
         let (token_address, token, token_admin_client) = create_token(&env, &token_admin);

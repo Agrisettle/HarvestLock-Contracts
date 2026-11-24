@@ -63,6 +63,7 @@ lock()
 **What happens:**
 
 - Buyer authorizes the call.
+- `now <= delivery_deadline` — the window is `created_at + delivery_window_secs` and starts at `initialize`, so a lock after it fails with `LockAfterDeliveryDeadline` (#277). Failing here is what stops a late lock from being followed by an immediate `reclaim_on_nondelivery`.
 - Deposit computed: `bps_amount(100_000_000, 30_000 + 20_000) = bps_amount(100_000_000, 50_000) = 100_000_000 * 50_000 / 10_000 = 500_000 units`
 - 500,000 units of USDC transferred from buyer to contract.
 - Status transitions `Draft` → `Locked`.
