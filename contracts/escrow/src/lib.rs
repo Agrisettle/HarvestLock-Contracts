@@ -501,6 +501,9 @@ pub enum Error {
     /// strike against a cooperative that never had a window to deliver in
     /// (#277).
     LockAfterDeliveryDeadline = 47,
+    /// `extend_delivery_deadline` was asked to move the deadline backwards
+    /// or leave it unchanged.
+    DeliveryDeadlineNotExtended = 48,
 }
 
 #[contracttype]
@@ -1391,6 +1394,7 @@ const LOCKED_THROUGH_DELIVERED: &[Status] = &[
 enum Method {
     SetAllocation,
     Lock,
+    ExtendDeliveryDeadline,
     ReleaseAdvance1,
     ClaimAdvance1,
     ReclaimAdvance1,
@@ -1428,6 +1432,7 @@ impl Method {
     const fn allowed_from(self) -> Option<&'static [Status]> {
         match self {
             Method::SetAllocation | Method::Lock => Some(&[Status::Draft]),
+            Method::ExtendDeliveryDeadline => Some(LOCKED_THROUGH_READY),
             Method::ReleaseAdvance1 => Some(&[Status::Locked]),
             Method::MarkCheckpoint => Some(&[Status::Advance1Released]),
             Method::ReleaseAdvance2 => Some(&[Status::CheckpointPassed]),
@@ -1803,7 +1808,10 @@ impl EscrowContract {
         c.cooperative.require_auth();
 
         let member_count = members.len();
-        env.storage().instance().set(&DataKey::Allocation, &members);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allocation, &members);
+        Self::bump_allocation_ttl(&env);
         AllocationRecorded {
             member_count,
             total_share_bps: total_bps,
@@ -1818,9 +1826,22 @@ impl EscrowContract {
     pub fn get_allocation(env: Env) -> Result<Vec<AllocationMember>, Error> {
         let _ = Self::load(&env)?; // NotInitialized if the commitment itself doesn't exist
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Allocation)
             .ok_or(Error::AllocationNotSet)
+    }
+
+    /// Extends the delivery window by mutual consent while the commitment is
+    /// still pre-delivery and the original deadline has not passed. The
+    /// deadline is monotonic: a consent call can only add time, never revoke
+    /// time that was already promised to the cooperative.
+    pub fn extend_delivery_deadline(env: Env, new_deadline: u64) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        Self::can_extend_delivery_deadline(&c, env.ledger().timestamp(), new_deadline)?;
+        Self::require_once_each(&[&c.buyer, &c.cooperative]);
+        c.delivery_deadline = new_deadline;
+        Self::save(&env, &c);
+        Ok(())
     }
 
     /// Draft -> Locked. Pulls the buyer's **deposit** into the contract —
@@ -2892,6 +2913,14 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
+            Self::can_extend_delivery_deadline(&c, now, c.delivery_deadline.saturating_add(1)),
+            "extend_delivery_deadline",
+            AuthParty::BuyerAndCooperative,
+            ActionDeadline::Inclusive(c.delivery_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
             Self::can_open_tranche(&c, Tranche::One),
             "release_advance_1",
             AuthParty::Anyone,
@@ -3103,18 +3132,9 @@ impl EscrowContract {
 
     // -- internal --
 
-    /// The single TTL-extension point for this contract's storage (#98).
-    ///
-    /// Every entry this contract writes lives in *instance* storage —
-    /// `DataKey::Commitment`, `DataKey::Allocation`, and
-    /// `DataKey::OracleConfig` are all fields of one `ContractData`
-    /// ledger entry (the contract instance itself), so extending that
-    /// one entry keeps all of them (and the contract's own WASM code
-    /// entry, which `Instance::extend_ttl` bumps together with the
-    /// instance) alive at once. Nothing here uses `env.storage()
-    /// .persistent()` or `temporary()`, so there are no per-key TTLs to
-    /// manage — see docs/storage-ttl.md for the full audit and why this
-    /// shape (one entry, one TTL, one extension point) is the finding.
+    /// Extends the instance/code entry and the separate persistent
+    /// allocation entry (#98/#232). Both are topped up only when their
+    /// remaining lifetime falls below half the network maximum.
     ///
     /// Without this call the entry would keep only the TTL it got at
     /// deploy time (`min_persistent_entry_ttl` ledgers): Soroban does
@@ -3137,6 +3157,16 @@ impl EscrowContract {
     fn bump_instance_ttl(env: &Env) {
         let max_ttl = env.storage().max_ttl();
         env.storage().instance().extend_ttl(max_ttl / 2, max_ttl);
+        Self::bump_allocation_ttl(env);
+    }
+
+    fn bump_allocation_ttl(env: &Env) {
+        let max_ttl = env.storage().max_ttl();
+        if env.storage().persistent().has(&DataKey::Allocation) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::Allocation, max_ttl / 2, max_ttl);
+        }
     }
 
     fn load(env: &Env) -> Result<Commitment, Error> {
@@ -3223,7 +3253,7 @@ impl EscrowContract {
 
     fn can_set_allocation(env: &Env, c: &Commitment) -> Result<(), Error> {
         Self::require_status(c, Method::SetAllocation)?;
-        if env.storage().instance().has(&DataKey::Allocation) {
+        if env.storage().persistent().has(&DataKey::Allocation) {
             return Err(Error::AllocationAlreadySet);
         }
         Ok(())
@@ -3276,6 +3306,21 @@ impl EscrowContract {
         Self::require_status(c, Method::ReclaimOnNondelivery)?;
         if now <= c.delivery_deadline {
             return Err(Error::DeliveryDeadlineNotPassed);
+        }
+        Ok(())
+    }
+
+    fn can_extend_delivery_deadline(
+        c: &Commitment,
+        now: u64,
+        new_deadline: u64,
+    ) -> Result<(), Error> {
+        Self::require_status(c, Method::ExtendDeliveryDeadline)?;
+        if now > c.delivery_deadline {
+            return Err(Error::DeliveryDeadlinePassed);
+        }
+        if new_deadline <= c.delivery_deadline {
+            return Err(Error::DeliveryDeadlineNotExtended);
         }
         Ok(())
     }

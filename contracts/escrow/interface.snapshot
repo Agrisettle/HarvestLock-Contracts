@@ -23,6 +23,7 @@ error Error::AlreadyInitialized = 1
 error Error::AmountTooLarge = 39
 error Error::ClaimWindowNotPassed = 11
 error Error::ClaimWindowPassed = 10
+error Error::DeliveryDeadlineNotExtended = 48
 error Error::DeliveryDeadlineNotPassed = 17
 error Error::DeliveryDeadlinePassed = 43
 error Error::DeliveryGraceWindowNotPassed = 41
@@ -84,6 +85,7 @@ fn expire_delivery_window() -> Result<(), Error>
 fn expire_dispute_window() -> Result<(), Error>
 fn expire_fx_shortfall_window() -> Result<(), Error>
 fn expire_remainder_window() -> Result<(), Error>
+fn extend_delivery_deadline(new_deadline: u64) -> Result<(), Error>
 fn flag_dispute(flagger: Address) -> Result<(), Error>
 fn fund_fx_shortfall() -> Result<(), Error>
 fn fund_remainder() -> Result<(), Error>
