@@ -85,6 +85,23 @@ including the shared-address case — see
 [`examples/ts/cancel-multiparty.ts`](../examples/ts/cancel-multiparty.ts) and
 its [README](../examples/ts/README.md).
 
+**Contract-account parties are supported.** Every gate is
+`Address::require_auth()`, and the host dispatches that to the address's
+`__check_auth` when the party is a deployed contract rather than a classic
+account — there is no allow-list of account types, no signature-count
+assumption and no change needed in this contract. A cooperative shared wallet
+or a buyer treasury can therefore be a multisig/custom account, including in
+the multi-party methods where `require_once_each` builds one auth tree across
+all three parties. [`tests/custom_account.rs`](../contracts/escrow/tests/custom_account.rs)
+pins this end to end with a test-only 2-of-3 ed25519 account: the full
+lifecycle with the account as cooperative and separately as buyer, plus
+below-threshold-rejected then accepted pairs for the single-party `lock` and
+`set_allocation` and the two-party `cancel`, the three-party
+`reassign_buyer`, the `flag_dispute`/`resolve_dispute` round-trip, and
+`settle`. The account also asserts it receives the complete context list —
+`lock` is the escrow call plus the nested `token.transfer`, not just the outer
+call.
+
 ### 1.1 What the buyer's wallet actually signs
 
 The three buyer-gated funding calls — `lock`, `fund_remainder`,
