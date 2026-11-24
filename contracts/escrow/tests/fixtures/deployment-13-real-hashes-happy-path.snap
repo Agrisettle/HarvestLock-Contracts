@@ -1,0 +1,59 @@
+# #286 snapshot: HANDOFF.md Deployment 13 scenario 1 — live testnet happy path
+# run via scripts/e2e.sh with real transaction hashes.
+snapshot = deployment-13-real-hashes-happy-path
+provenance = derived from HANDOFF.md "Verified on testnet", Deployment 13 scenario 1,
+   contract CBF4LWV2NHI5I64OVKAVLEF6O3D2SEFV4NZ4MS74QQTUF2R5S7F4CI3N (WASM
+   c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca): 100,000,000 stroops,
+   15%/20% split, real on-chain transaction hashes:
+   deploy f289bb3997527501463de1e01d34e459fa18a25413008eab8ecc12505961b4d2,
+   initialize d1ab543866a86f86af6f8272351c49e110c1871b23f9593533607d65506c506e,
+   lock 9406d21a555a6c4520d0a58d291c4d04ad5aa156f3fe2c793765abde138309b0,
+   release_advance_1 1a93b653030a2385107bd1e9c90495c1766bdfb5643a877849e252f319721322,
+   claim_advance_1 e2ebe20576b6faef00285f787060b5b512af6811f8a152a518980598e4f8888f,
+   mark_checkpoint 73cd806a142bb5f1cb9f473bac90018b3641900dbb5c1b5c42a9bcd9429eb201,
+   release_advance_2 a4959d69b67d892f485da971fb459fe40ede5998190a17639b08e9bcb03eddfd,
+   claim_advance_2 6743d4ec39d38ef0c2a46077436d760547166e366b7d73a69cd3254392b5685c,
+   ready_for_delivery 2d19c47464b8d73df0aeb81fe199aad3243aab67c74bf7aa01e67e11ae75a028,
+   fund_remainder abf6f5825522d283765e612106d43727d17d45ac8f9d8321ac7f5ec12fb4e97d,
+   confirm_delivery bec984fa4c5a406cd846208b0c821d3e4bec92dc421e3b73c962895d71e58ff3,
+   settle 3263103dee02f0afd6c3d858376a0d9f2d25c0d0776849227f78f86c6349e113.
+   First fixture whose provenance cites real testnet tx hashes (#286).
+total_amount = 100000000
+advance1_bps = 1500
+advance2_bps = 2000
+claim_window_secs = 300
+remainder_window_secs = 300
+delivery_window_secs = 600
+contracted_quantity = 1000
+grade_price_bps = 10000,9000,7500
+buyer_mint = 100000000
+
+step = lock => ok
+check = contract_balance 35000000
+check = buyer_balance 65000000
+check = status Locked
+step = release_advance_1 => ok
+check = status Advance1Released
+step = claim_advance_1 => ok
+check = contract_balance 20000000
+check = coop_balance 15000000
+step = mark_checkpoint => ok
+check = status CheckpointPassed
+step = release_advance_2 => ok
+check = status Advance2Released
+step = claim_advance_2 => ok
+check = contract_balance 0
+check = coop_balance 35000000
+step = ready_for_delivery => ok
+check = status ReadyForDelivery
+step = fund_remainder => ok
+check = contract_balance 65000000
+check = buyer_balance 0
+step = confirm_delivery 1000 0 => ok
+check = settlement_bps 10000
+check = status Delivered
+step = settle => ok
+check = coop_balance 100000000
+check = buyer_balance 0
+check = contract_balance 0
+check = status Settled

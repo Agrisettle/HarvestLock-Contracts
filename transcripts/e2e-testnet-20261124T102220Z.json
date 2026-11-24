@@ -1,0 +1,393 @@
+{
+  "network": "testnet",
+  "timestamp": "20261124T102220Z",
+  "token": "CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL",
+  "identities": {
+    "buyer": "e2e-buyer (GD2LJAGC3ABWAWF3TZ3WRTYJARI6T3N2CCMWVB3NCYU34V6CRAVHIOUG)",
+    "cooperative": "e2e-coop (GD5QIL3G2LGU4SXM57LZOQ7QPSUAHNU5WMPNN2T62DQ4HRN3XT4KKCMX)",
+    "warehouse": "e2e-wh (GCREIWCPOV2MM37KVAOWFQXP2EI5HY7562EU7FG2HYAC42CXBKORBVPT)",
+    "stranger": "e2e-stranger (GDBKG4J2GTSHMR76SOVLCR3B2X6RS2YXDZKZDXHDHWE6HMMCN3VJRW4E)",
+    "deployer": "e2e-deployer (GAY5WPJDS5QA4BCKMNBIFTRQW3BP5M4PZL2CYTCEBKLXPPYXTPQCXUXW)"
+  },
+  "scenarios": [
+    {
+      "name": "happy_path",
+      "contract_id": "CBF4LWV2NHI5I64OVKAVLEF6O3D2SEFV4NZ4MS74QQTUF2R5S7F4CI3N",
+      "deploy_tx_hash": "f289bb3997527501463de1e01d34e459fa18a25413008eab8ecc12505961b4d2",
+      "wasm_hash": "c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca",
+      "parameters": {
+        "total_amount": 100000000,
+        "advance1_bps": 1500,
+        "advance2_bps": 2000,
+        "claim_window_secs": 300,
+        "remainder_window_secs": 300,
+        "delivery_window_secs": 600,
+        "contracted_quantity": 1000,
+        "grade_price_bps": [
+          10000,
+          9000,
+          7500
+        ]
+      },
+      "steps": [
+        {
+          "step": 1,
+          "action": "initialize",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "d1ab543866a86f86af6f8272351c49e110c1871b23f9593533607d65506c506e",
+          "result": "ok",
+          "status_after": "Draft",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 2125000000,
+            "cooperative": 130000000
+          }
+        },
+        {
+          "step": 2,
+          "action": "lock",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "9406d21a555a6c4520d0a58d291c4d04ad5aa156f3fe2c793765abde138309b0",
+          "result": "ok",
+          "status_after": "Locked",
+          "balances_after": {
+            "contract": 35000000,
+            "buyer": 2090000000,
+            "cooperative": 130000000
+          }
+        },
+        {
+          "step": 3,
+          "action": "release_advance_1",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "1a93b653030a2385107bd1e9c90495c1766bdfb5643a877849e252f319721322",
+          "result": "ok",
+          "status_after": "Advance1Released",
+          "balances_after": {
+            "contract": 35000000,
+            "buyer": 2090000000,
+            "cooperative": 130000000
+          }
+        },
+        {
+          "step": 4,
+          "action": "claim_advance_1",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "e2ebe20576b6faef00285f787060b5b512af6811f8a152a518980598e4f8888f",
+          "result": "ok",
+          "status_after": "Advance1Released",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 2090000000,
+            "cooperative": 145000000
+          }
+        },
+        {
+          "step": 5,
+          "action": "mark_checkpoint",
+          "caller": "e2e-wh",
+          "args": [],
+          "tx_hash": "73cd806a142bb5f1cb9f473bac90018b3641900dbb5c1b5c42a9bcd9429eb201",
+          "result": "ok",
+          "status_after": "CheckpointPassed",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 2090000000,
+            "cooperative": 145000000
+          }
+        },
+        {
+          "step": 6,
+          "action": "release_advance_2",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "a4959d69b67d892f485da971fb459fe40ede5998190a17639b08e9bcb03eddfd",
+          "result": "ok",
+          "status_after": "Advance2Released",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 2090000000,
+            "cooperative": 145000000
+          }
+        },
+        {
+          "step": 7,
+          "action": "claim_advance_2",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "6743d4ec39d38ef0c2a46077436d760547166e366b7d73a69cd3254392b5685c",
+          "result": "ok",
+          "status_after": "Advance2Released",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 2090000000,
+            "cooperative": 165000000
+          }
+        },
+        {
+          "step": 8,
+          "action": "ready_for_delivery",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "2d19c47464b8d73df0aeb81fe199aad3243aab67c74bf7aa01e67e11ae75a028",
+          "result": "ok",
+          "status_after": "ReadyForDelivery",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 2090000000,
+            "cooperative": 165000000
+          }
+        },
+        {
+          "step": 9,
+          "action": "fund_remainder",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "abf6f5825522d283765e612106d43727d17d45ac8f9d8321ac7f5ec12fb4e97d",
+          "result": "ok",
+          "status_after": "ReadyForDelivery",
+          "balances_after": {
+            "contract": 65000000,
+            "buyer": 2025000000,
+            "cooperative": 165000000
+          }
+        },
+        {
+          "step": 10,
+          "action": "confirm_delivery",
+          "caller": "e2e-wh",
+          "args": [
+            "--delivered-quantity",
+            "1000",
+            "--grade-index",
+            "0"
+          ],
+          "tx_hash": "bec984fa4c5a406cd846208b0c821d3e4bec92dc421e3b73c962895d71e58ff3",
+          "result": "ok",
+          "status_after": "Delivered",
+          "balances_after": {
+            "contract": 65000000,
+            "buyer": 2025000000,
+            "cooperative": 165000000
+          }
+        },
+        {
+          "step": 11,
+          "action": "settle",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "3263103dee02f0afd6c3d858376a0d9f2d25c0d0776849227f78f86c6349e113",
+          "result": "ok",
+          "status_after": "Settled",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 2025000000,
+            "cooperative": 230000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "buyer_default",
+      "contract_id": "CCCLSWRWCEYI27XZCOZXCRN4DQ7RJR666WU7GWELLQ5JUEPVWRRY2RWA",
+      "deploy_tx_hash": "6ad9ec62e4f7a11865e8e6274a3577cff6954978f999c05fcfce0d266bf136cd",
+      "wasm_hash": "c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca",
+      "parameters": {
+        "total_amount": 100000000,
+        "advance1_bps": 1000,
+        "advance2_bps": 2000,
+        "claim_window_secs": 300,
+        "remainder_window_secs": 15,
+        "delivery_window_secs": 600,
+        "contracted_quantity": 1000,
+        "grade_price_bps": [
+          10000,
+          9000,
+          7500
+        ]
+      },
+      "steps": [
+        {
+          "step": 1,
+          "action": "initialize",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "33b96efcf16257545b36d78189e3ca91d614961040978c28112970f1f8c8b585",
+          "result": "ok",
+          "status_after": "Draft",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 2025000000,
+            "cooperative": 230000000
+          }
+        },
+        {
+          "step": 2,
+          "action": "lock",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "e404a8b300cf403ffb49197954d5d07262b9d7b7398be48838a7af1fa8de77d3",
+          "result": "ok",
+          "status_after": "Locked",
+          "balances_after": {
+            "contract": 30000000,
+            "buyer": 1995000000,
+            "cooperative": 230000000
+          }
+        },
+        {
+          "step": 3,
+          "action": "release_advance_1",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "871881c0f4c0c6ca16284ad98fed7ce5568d7b64e46a7b8e723de6bd6613a882",
+          "result": "ok",
+          "status_after": "Advance1Released",
+          "balances_after": {
+            "contract": 30000000,
+            "buyer": 1995000000,
+            "cooperative": 230000000
+          }
+        },
+        {
+          "step": 4,
+          "action": "claim_advance_1",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "ebc1b9c21b34edd6951a190069826aadcc7d9955b1ce7905a0c3b2acc0664aa3",
+          "result": "ok",
+          "status_after": "Advance1Released",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 1995000000,
+            "cooperative": 240000000
+          }
+        },
+        {
+          "step": 5,
+          "action": "mark_checkpoint",
+          "caller": "e2e-wh",
+          "args": [],
+          "tx_hash": "f8e0b97fcd09fee8adadcdaa2f1291fc628e785186bd1dab76f4c45c09114bae",
+          "result": "ok",
+          "status_after": "CheckpointPassed",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 1995000000,
+            "cooperative": 240000000
+          }
+        },
+        {
+          "step": 6,
+          "action": "release_advance_2",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "e38df0617400b852af4e6055e47fcefad0f96f704b79ead4e25ff2eb2b094b22",
+          "result": "ok",
+          "status_after": "Advance2Released",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 1995000000,
+            "cooperative": 240000000
+          }
+        },
+        {
+          "step": 7,
+          "action": "ready_for_delivery",
+          "caller": "e2e-coop",
+          "args": [],
+          "tx_hash": "c1cdb73a2e0c161155f47ffcf19d2e44bf7416d9616198afb0661978b5c5177f",
+          "result": "ok",
+          "status_after": "ReadyForDelivery",
+          "balances_after": {
+            "contract": 20000000,
+            "buyer": 1995000000,
+            "cooperative": 240000000
+          }
+        },
+        {
+          "step": 8,
+          "action": "expire_remainder_window",
+          "caller": "e2e-stranger",
+          "args": [],
+          "tx_hash": "4bd9937908272fb64c4d34a99a7d7165d77aa151f51b9d8ccdbc69b836db4642",
+          "result": "ok",
+          "status_after": "Defaulted",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 1995000000,
+            "cooperative": 260000000
+          }
+        }
+      ]
+    },
+    {
+      "name": "seller_nondelivery",
+      "contract_id": "CDUSNWRP4VTFTIRU6RK3YOXBVUIFDAIK5CMJ42TCHQS4Z4PYEERLIJG7",
+      "deploy_tx_hash": "7e0fb1c97249b1bb96e959b6d7f93194afceb6f3c6c998e6741f2efe095ac1a5",
+      "wasm_hash": "c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca",
+      "parameters": {
+        "total_amount": 100000000,
+        "advance1_bps": 1500,
+        "advance2_bps": 1500,
+        "claim_window_secs": 300,
+        "remainder_window_secs": 300,
+        "delivery_window_secs": 15,
+        "contracted_quantity": 1000,
+        "grade_price_bps": [
+          10000,
+          9000,
+          7500
+        ]
+      },
+      "steps": [
+        {
+          "step": 1,
+          "action": "initialize",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "f8453055ed1cf95f1f515010aa71a68d7f7e446f7e1796f18577aa86e895d3ab",
+          "result": "ok",
+          "status_after": "Draft",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 1995000000,
+            "cooperative": 260000000
+          }
+        },
+        {
+          "step": 2,
+          "action": "lock",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "c1705f7eefc68e997000647fd8a87a9ab0991f4a6443ae61944673c96e3ec72a",
+          "result": "ok",
+          "status_after": "Locked",
+          "balances_after": {
+            "contract": 30000000,
+            "buyer": 1965000000,
+            "cooperative": 260000000
+          }
+        },
+        {
+          "step": 3,
+          "action": "reclaim_on_nondelivery",
+          "caller": "e2e-buyer",
+          "args": [],
+          "tx_hash": "eea43d1935c9c01d7e3204515b7b854eeba023331d4a398238bdf468026eface",
+          "result": "ok",
+          "status_after": "Forfeited",
+          "balances_after": {
+            "contract": 0,
+            "buyer": 1995000000,
+            "cooperative": 260000000
+          }
+        }
+      ]
+    }
+  ]
+}
