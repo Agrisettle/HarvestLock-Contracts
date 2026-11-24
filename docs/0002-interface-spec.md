@@ -126,13 +126,15 @@ Each method entry has the following fields:
   "name": "lock",
   "args": [],
   "returns": "Result<(), Error>",
-  "errors": ["InvalidState", "ZeroAmount", "InvalidBps"],
+  "errors": ["InvalidState", "LockAfterDeliveryDeadline"],
   "state_transition": { "from": "Draft", "to": "Locked" },
   "auth_requirement": "buyer"
 }
 ```
 
 *Draft → Locked. Pulls the buyer's deposit into the contract — `advance1_bps + advance2_bps` of `total_amount`, not the full amount. No prior SEP-41 `approve()` needed.*
+
+*Refused once `delivery_deadline` has strictly passed (#277): the delivery window counts from `initialize`, not from `lock`, so a late lock would otherwise hand the buyer an immediate `reclaim_on_nondelivery`. The deadline second itself is still in time.*
 
 ### 7. `release_advance_1`
 
@@ -252,7 +254,7 @@ Each method entry has the following fields:
 }
 ```
 
-*Advance2Released → ReadyForDelivery. The cooperative signaling "setting out for delivery" — opens the remainder-payment window. Auth-gated.*
+*Advance2Released → ReadyForDelivery. The cooperative signaling "setting out for delivery" — opens the remainder-payment window. Auth-gated. When the advance split sums to exactly 10 000 bps the deposit already covers `total_amount`, so the remainder is zero and this call marks it funded itself (#275), instead of requiring a `fund_remainder` call that would transfer nothing.*
 
 ### 15. `fund_remainder`
 
@@ -267,7 +269,7 @@ Each method entry has the following fields:
 }
 ```
 
-*Buyer escrows `total_amount - deposit` — the second half of two-phase funding. Must happen within the window `ready_for_delivery` opened.*
+*Buyer escrows `total_amount - deposit` — the second half of two-phase funding. Must happen within the window `ready_for_delivery` opened. A zero remainder (advance bps summing to 10 000) is already funded by `ready_for_delivery`, so this refuses with `RemainderAlreadyFunded` rather than transferring zero tokens (#275).*
 
 ### 16. `expire_remainder_window`
 

@@ -62,3 +62,4 @@ DeliveryDeadlinePassed = 43
 OracleConversionOutOfRange = 44
 OracleTimestampInFuture = 45
 OracleUnavailable = 46
+LockAfterDeliveryDeadline = 47
