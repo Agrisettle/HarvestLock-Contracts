@@ -5848,6 +5848,34 @@ fn get_commitment_view_reports_no_oracle_configuration() {
     assert_eq!(v.fx.adjusted_total, 0);
 }
 
+/// #270 — the view reports the *agreed* delivery window, not the derived
+/// deadline. `created_at` here is deliberately non-zero: at timestamp 0 the
+/// two are the same number, so only an origin away from zero distinguishes
+/// `deadline - created_at` from `deadline + created_at` (or from reporting
+/// the deadline itself).
+#[test]
+fn get_commitment_view_reports_the_agreed_delivery_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+    let s = world_in(
+        &env,
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        1_500,
+        1_500,
+        WINDOW,
+    );
+
+    let c = s.contract.get_commitment();
+    let v = s.contract.get_commitment_view();
+
+    assert_eq!(c.created_at, 1_700_000_000);
+    assert_eq!(c.delivery_deadline, 1_700_000_000 + DELIVERY_WINDOW);
+    assert_eq!(v.terms.delivery_window_secs, DELIVERY_WINDOW);
+}
+
 #[test]
 fn get_commitment_view_is_not_found_before_initialize() {
     let env = Env::default();

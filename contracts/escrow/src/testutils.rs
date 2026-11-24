@@ -149,14 +149,6 @@ impl Terms {
         self.delivery_window_secs = delivery_window_secs;
         self
     }
-
-    /// The settlement-token amount. The default (1 000 000) funds a default
-    /// deal exactly — deposit plus remainder; a test that needs an FX top-up
-    /// or a partial-funding shape raises it here.
-    pub fn with_total(mut self, total_amount: i128) -> Self {
-        self.total_amount = total_amount;
-        self
-    }
 }
 
 /// [`Terms`] as the single agreed-terms struct `initialize` takes (#270) —
@@ -173,26 +165,6 @@ pub fn commitment_terms(env: &Env, terms: &Terms) -> CommitmentTerms {
         contracted_quantity: terms.contracted_quantity,
         grade_price_bps: Vec::from_array(env, terms.grade_price_bps),
     }
-}
-
-/// [`CommitmentTerms`] at this harness's default remainder/delivery windows,
-/// quantity and grade schedule, with the four terms a suite usually varies
-/// passed in explicitly — the compact form for suites whose subject is one
-/// specific term rather than the terms struct itself.
-pub fn terms(
-    env: &Env,
-    total_amount: i128,
-    advance1_bps: u32,
-    advance2_bps: u32,
-    claim_window_secs: u64,
-) -> CommitmentTerms {
-    commitment_terms(
-        env,
-        &Terms::default()
-            .advances(advance1_bps, advance2_bps)
-            .claim_window(claim_window_secs)
-            .with_total(total_amount),
-    )
 }
 
 /// A minimal Reflector-shaped oracle for suites that need a *working* read.

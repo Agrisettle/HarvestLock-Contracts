@@ -554,7 +554,13 @@ proptest! {
                 prop_assert!(st.fx_resolved);
                 // The fixture is chosen so resolution always finds a real
                 // shortfall, which is the branch that writes the deadline.
-                prop_assert!(st.fx_shortfall_amount > 0);
+                // Pinning the amount rather than just `> 0` is what makes the
+                // oracle's `decimals` part of this property: 1_000_000
+                // denominated at 175_000_000_000_000 / 10^14 converts to
+                // 1_750_000, minus the 300_000 already claimed and the
+                // 700_000 still escrowed leaves 750_000. A mock oracle that
+                // quoted another scale (0 or 1 decimals) moves this number.
+                prop_assert_eq!(st.fx_shortfall_amount, 750_000);
                 prop_assert_eq!(st.fx_shortfall_deadline, t + w);
                 prop_assert!(st.fx_shortfall_deadline >= t);
                 prop_assert_eq!(st.status, Status::Delivered);
