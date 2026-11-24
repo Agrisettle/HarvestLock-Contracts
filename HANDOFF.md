@@ -1023,7 +1023,8 @@ before the interface guard is re-run.*
   `cfg(test)`, so `Cargo.toml` gained a *dev-only self-dependency*
   (`harvestlock-escrow = { path = ".", features = ["testutils"] }`) — plain
   `cargo test` needs no `--features` flag, and the release WASM is
-  unaffected. Cargo.lock needed no change.
+  unaffected. `Cargo.lock` gained exactly one line (the crate's own package
+  listing itself as a dependency) and `--locked` builds stay valid.
 - **#276 — downstream integration example.** `examples/escrow-reader/` is a
   minimal contract that imports the escrow's built WASM with
   `soroban_sdk::contractimport!` and reads `get_status`/`get_commitment`
@@ -1040,14 +1041,33 @@ before the interface guard is re-run.*
 
 Verified in this session: `cargo check --tests --locked` and `cargo build
 --tests --locked` (every test target compiles and links against the new
-harness, warnings unchanged from `main`), `stellar contract build --locked`
-for the escrow and for the example, the example's test target type-checks,
-`check_error_discriminants.sh`, `check_auth_docs.sh`, `check_wasm_size.sh`
-(87,640 bytes, +5,073 against the stale 82,567 baseline, inside the 5,120
-budget) and `check_interface_snapshot.sh`. **The test suite itself was not
-executed in this session** — by request — so the counts in "Toolchain
-state" were not re-measured; the six new tests above put it at 231 (175 in
-`src/test.rs`, 56 across `tests/`) if nothing else moved.
+harness), `stellar contract build --locked` for the escrow and for the
+example, the example's test target type-checks, `check_error_discriminants.sh`,
+`check_auth_docs.sh`, `check_wasm_size.sh` (87,640 bytes, +5,073 against the
+stale 82,567 baseline, inside the 5,120 budget) and
+`check_interface_snapshot.sh`. Once the PR's CI ran, `cargo test --locked`
+was also run locally in full: **230 unit tests (229 passing, 1 ignored) and
+96 across `tests/` (94 passing, 2 ignored)**, all green — the warnings it
+prints (unused `Ledger`/`TrancheClaimed`/`TrancheReclaimed`/`TOTAL_AMOUNT`/
+`Error` imports in `event_sourcing`, `nonstandard_token` and
+`state_machine_model`) are pre-existing and CI does not run Clippy or
+`-D warnings`.
+
+**Also fixed here, inherited from `main`:** `main` at `25dffee` was red.
+`terminal_transition_exclusivity::fx_funding_and_expiry_are_exclusive` built
+its pre-state with `prefix_claims = false`, leaving a tranche open, and then
+called `resolve_fx_shortfall`, which shares `settle`'s `tranches_resolved`
+guard (`cannot_resolve_fx_shortfall_before_tranches_are_resolved` pins that
+guard deliberately — it needs final, settled figures). The call was
+correctly refused with `TrancheUnresolved`, so the pair was never
+comparable; `cargo test`, `code coverage`, the 28.0.0 SDK differential and
+the mutation job all failed on that one test. The pair's pre-state now
+always claims both advances (the `prefix_claims` axis still varies in the
+other pairs, where it is meaningful), and a third `#[should_panic]`
+invariant test (`save_rejects_a_zero_remainder_left_unfunded_with_its_window_open`)
+keeps #275's new invariant from being weakenable to a no-op — without it,
+mutating the guard to `remainder_deadline == 0` would let every lifecycle
+test pass and the mutation job would report a survivor.
 
 Prior entry: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
 `reclaimed_by_buyer` calculations into private helpers on `EscrowContract`

@@ -6480,6 +6480,26 @@ fn save_rejects_disputed_without_an_open_dispute_window() {
     });
 }
 
+/// #275's invariant, the same route: a commitment whose deposit already
+/// covers `total_amount` but whose remainder window was opened with
+/// `remainder_funded` still clear is exactly the state the auto-fund removed.
+/// Without this test the check could be weakened to a no-op and every
+/// lifecycle test would still pass.
+#[test]
+#[should_panic(expected = "invariant: zero remainder left unfunded with a window open")]
+fn save_rejects_a_zero_remainder_left_unfunded_with_its_window_open() {
+    let s = setup(5_000, 5_000);
+    s.contract.lock();
+
+    let mut corrupted = s.contract.get_commitment();
+    corrupted.remainder_deadline = 1;
+    corrupted.remainder_funded = false;
+
+    s.env.as_contract(&s.contract.address, || {
+        EscrowContract::save(&s.env, &corrupted);
+    });
+}
+
 // ---------- issue #285: claimed_by_coop and reclaimed_by_buyer helpers ----------
 
 #[test]
