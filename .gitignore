@@ -4,6 +4,9 @@ scripts/node_modules/
 # The standalone tool crate has its own target dir (it is not a workspace
 # member, so the root rule above does not cover it).
 /tools/wasm-imports/target/
+# Same for the downstream-contract example: its own workspace, its own target
+# dir (see examples/escrow-reader/Cargo.toml for why it is not a member).
+/examples/escrow-reader/target/
 **/*.rs.bk
 # cargo-mutants output (issue #62): per-run patches, logs and result files.
 # Regenerated on every run, so never committed.

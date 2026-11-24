@@ -105,6 +105,15 @@ snapshots).
    intended. The script is not wired into CI because workflow changes are
    maintainer-managed. Neither external tool nor CLI `--cost` can match the
    snapshots' hermeticity because both require live RPC.
+   `contracts/escrow/test_snapshots/**` already capture each call's ledger
+   read/write footprint deterministically against the in-process test ledger,
+   with no network, no funded account and no deployed instance. That is the
+   right place for cheap, reproducible footprint regression; neither external
+   tool nor CLI `--cost` can match its hermeticity because both require live RPC.
+   **Implemented in #222:** `contracts/escrow/tests/budget.rs` now meters every
+   exported method with `env.cost_estimate()` and compares it against
+   `contracts/escrow/budget.snapshot`, failing on growth beyond a 1% tolerance;
+   see [`gas-costs.md`'s bless workflow](./gas-costs.md#re-blessing-the-baseline).
 3. **Adopt the estimator opportunistically, not as a dependency.** Reach for it
    when you specifically want (a) an XLM/stroops fee figure to hand the `api/`
    team for pre-transaction `resourceConfig`/fee bidding, or (b) `config snapshot`

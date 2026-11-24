@@ -74,4 +74,7 @@ file explains what the code means, not what it does.
 | 41 | `DeliveryGraceWindowNotPassed` | `expire_delivery_window` was called before the grace period (`delivery_deadline + remainder_window_secs`) has strictly passed. |
 | 42 | `DisputeCapReached` | The commitment has already accumulated `MAX_DISPUTE_FLAGS` (3) lapsed dispute windows; `flag_dispute` will not start another. |
 | 43 | `DeliveryDeadlinePassed` | `confirm_delivery` was called after the delivery deadline; `reclaim_on_nondelivery` is the only legal path from here. |
-| 44 | `OracleTimestampInFuture` | The configured Reflector oracle returned a quote timestamp later than the current ledger timestamp; wait for a valid quote. |
+| 44 | `OracleConversionOutOfRange` | The oracle conversion's numerator or decimal divisor cannot be represented as an `i128`; settlement refuses rather than trapping on an unusable oracle value. |
+| 45 | `OracleTimestampInFuture` | The configured Reflector oracle returned a quote timestamp later than the current ledger timestamp; wait for a valid quote. |
+| 46 | `OracleUnavailable` | The configured oracle contract could not answer at all — no contract at that address, a callee that panicked or trapped, or a reply that would not decode. Distinct from `OraclePriceUnavailable`, which means it answered and quotes no such asset. |
+| 47 | `LockAfterDeliveryDeadline` | `lock` was called after `delivery_deadline` had strictly passed. The delivery window starts at `initialize`, so a late lock would hand the buyer an immediate `reclaim_on_nondelivery` against a cooperative that never had time to deliver. |

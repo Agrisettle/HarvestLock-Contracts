@@ -38,14 +38,7 @@ Each method entry has the following fields:
     { "name": "cooperative", "type": "Address" },
     { "name": "warehouse_operator", "type": "Address" },
     { "name": "token", "type": "Address" },
-    { "name": "total_amount", "type": "i128" },
-    { "name": "advance1_bps", "type": "u32" },
-    { "name": "advance2_bps", "type": "u32" },
-    { "name": "claim_window_secs", "type": "u64" },
-    { "name": "remainder_window_secs", "type": "u64" },
-    { "name": "delivery_window_secs", "type": "u64" },
-    { "name": "contracted_quantity", "type": "u32" },
-    { "name": "grade_price_bps", "type": "Vec<u32>" },
+    { "name": "terms", "type": "CommitmentTerms" },
     { "name": "oracle_config", "type": "Option<OracleConfig>" }
   ],
   "returns": "Result<(), Error>",
@@ -56,6 +49,28 @@ Each method entry has the following fields:
 ```
 
 *Creates the commitment in `Draft`. No funds move yet. Requires the buyer's auth.*
+
+`CommitmentTerms` is the one agreed-terms struct (#270), shared with
+`get_commitment_view`'s `terms` field so generated clients, indexers and this
+document all use the same field names:
+
+| field | type | meaning |
+|---|---|---|
+| `total_amount` | `i128` | the deal's total value; `> 0` and `<= MAX_TOTAL_AMOUNT` |
+| `advance1_bps` | `u32` | basis points of `total_amount` released at lock-in |
+| `advance2_bps` | `u32` | basis points released at the mid-season checkpoint; `advance1_bps + advance2_bps <= 10_000` |
+| `claim_window_secs` | `u64` | how long the cooperative has to claim an opened advance; `> 0` |
+| `remainder_window_secs` | `u64` | how long the buyer has to fund the remainder (also the FX cure window and the dispute-freeze bound); `> 0` |
+| `delivery_window_secs` | `u64` | how long after creation the cooperative has to reach `Delivered`; `> 0` |
+| `contracted_quantity` | `u32` | contracted quantity in caller-defined units; `> 0` |
+| `grade_price_bps` | `Vec<u32>` | grade -> price multiplier schedule; non-empty, at most `MAX_GRADE_ENTRIES` entries, every entry `<= 10_000` |
+
+Before #270 these eight terms were positional arguments. Three adjacent
+`u64` windows and two adjacent `u32` bps values meant a swap type-checked and
+silently produced a different deal; named fields make that impossible, and
+the generated bindings carry the names through. `initialize`'s `terms` is the
+same type `get_commitment_view` returns, so a client can round-trip the
+values it reads without renaming a single field.
 
 ### 2. `get_oracle_config`
 
@@ -126,13 +141,15 @@ Each method entry has the following fields:
   "name": "lock",
   "args": [],
   "returns": "Result<(), Error>",
-  "errors": ["InvalidState", "ZeroAmount", "InvalidBps"],
+  "errors": ["InvalidState", "LockAfterDeliveryDeadline"],
   "state_transition": { "from": "Draft", "to": "Locked" },
   "auth_requirement": "buyer"
 }
 ```
 
 *Draft → Locked. Pulls the buyer's deposit into the contract — `advance1_bps + advance2_bps` of `total_amount`, not the full amount. No prior SEP-41 `approve()` needed.*
+
+*Refused once `delivery_deadline` has strictly passed (#277): the delivery window counts from `initialize`, not from `lock`, so a late lock would otherwise hand the buyer an immediate `reclaim_on_nondelivery`. The deadline second itself is still in time.*
 
 ### 7. `release_advance_1`
 
@@ -252,7 +269,7 @@ Each method entry has the following fields:
 }
 ```
 
-*Advance2Released → ReadyForDelivery. The cooperative signaling "setting out for delivery" — opens the remainder-payment window. Auth-gated.*
+*Advance2Released → ReadyForDelivery. The cooperative signaling "setting out for delivery" — opens the remainder-payment window. Auth-gated. When the advance split sums to exactly 10 000 bps the deposit already covers `total_amount`, so the remainder is zero and this call marks it funded itself (#275), instead of requiring a `fund_remainder` call that would transfer nothing.*
 
 ### 15. `fund_remainder`
 
@@ -267,7 +284,7 @@ Each method entry has the following fields:
 }
 ```
 
-*Buyer escrows `total_amount - deposit` — the second half of two-phase funding. Must happen within the window `ready_for_delivery` opened.*
+*Buyer escrows `total_amount - deposit` — the second half of two-phase funding. Must happen within the window `ready_for_delivery` opened. A zero remainder (advance bps summing to 10 000) is already funded by `ready_for_delivery`, so this refuses with `RemainderAlreadyFunded` rather than transferring zero tokens (#275).*
 
 ### 16. `expire_remainder_window`
 
@@ -505,13 +522,32 @@ Each method entry has the following fields:
 
 ---
 
+### 31. `available_actions`
+
+```json
+{
+  "name": "available_actions",
+  "args": [],
+  "returns": "Vec<Action>",
+  "errors": [],
+  "state_transition": null,
+  "auth_requirement": "permissionless"
+}
+```
+
+*No auth required — read-only view, callable by anyone. Returns every state-changing call the current commitment currently permits, each as an `Action { function, auth, deadline }` where `function` is the Soroban symbol to invoke, `auth` is the party whose `require_auth()` the call needs (or `Anyone` for permissionless calls), and `deadline` bounds the call by timestamp (`None` when no timing gate applies, `Inclusive(T)` when legal up to and including `T`, `Exclusive(T)` when legal only strictly after `T`).*
+
+*Every entry is produced by the same private guard predicate (`can_lock`, `can_claim_tranche`, `can_settle`, …) the real method calls, so the view cannot drift from the checks that actually authorize the call. `initialize` is deliberately excluded (there is no commitment to derive actions from before it runs — an empty list is returned), and the read-only getters/`oracle_rate` are excluded (they do not change state and are always callable). Oracle-backed actions are advertised purely from local state (a configured oracle and an unresolved FX step); quote freshness is an external read, so an advertised `resolve_fx_shortfall` can still return `Error::OracleStale` until the oracle publishes a fresh quote — the `fx_quote_stale` flag on `get_commitment` is the companion "waiting on a fresh quote" signal.*
+
+---
+
 ## Summary
 
-| Total Methods | 30 public methods |
+| Total Methods | 31 public methods |
 |---|---|
 | Auth-gated | 11 methods require explicit auth (buyer/cooperative/warehouse_operator) |
-| Permissionless | 19 methods are permissionless reads or state transitions that don't require auth |
-| State transitions | 12 methods change contract status, 8 are pure reads |
+| Permissionless | 20 methods are permissionless reads or state transitions that don't require auth |
+| State transitions | 12 methods change contract status, 9 are pure reads |
 | Error variants | 38 distinct `Error` variants across all methods |
 
 *This specification is deliberately JSON-structured so that SDK generators, test-harness automata, or a second independent client implementation can programmatically discover and validate every call site against the contract's actual interface, without needing to parse Rust doc comments or guess at argument ordering.*

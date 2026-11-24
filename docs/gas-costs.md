@@ -61,6 +61,142 @@ compared without guessing at the SDK-version delta — see
 
 ---
 
+## Event emission by `data_format` (#220)
+
+`#[contractevent]` supports three wire encodings for an event's `data`
+payload. Event bytes are a billed resource (the network's
+`contract_events_size_bytes` limit is 16,384 bytes per transaction, and rent
+is charged per KB by `env.cost_estimate().fee()`'s `fee_per_contract_event_1kb:
+5000`), and the format is fixed at the type declaration, so every future
+emission of that event pays it. This section measures all three on the two
+shapes this contract actually has.
+
+These numbers are **in-process**, from `env.cost_estimate()` against the
+test host — not a submitted transaction. They are deterministic and useful
+for ranking and for catching a format regression; they are *not* comparable
+to the testnet tables above (no WASM instantiation, no rent, no envelope).
+Reproduce with:
+
+```bash
+cd contracts/escrow
+cargo test --test event_cost -- --nocapture
+```
+
+### Zero-data-field event (the `StatusChanged` shape)
+
+Two topics, no `data` fields. The only thing `data_format` changes is the
+empty container it carries.
+
+| `data_format` | Event bytes | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `map` (macro default) | 132 | 17,798 | 6,399 |
+| `vec` | 132 | 17,295 | 6,383 |
+| **`single-value`** | **128** | **16,733** | **6,306** |
+
+The two topics are `Status` values and are identical in all three rows; so
+is the event name. Only the payload tag differs. `single-value` is 4 bytes
+and ~1,065 CPU instructions cheaper than the default here.
+
+### Three-data-field event (the `DeliveryConfirmed` shape)
+
+One topic, three data fields.
+
+| `data_format` | Event bytes | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `map` (macro default) | 192 | 19,946 | 6,589 |
+| **`vec`** | **120** | **15,710** | **6,210** |
+| `single-value` | — | — | not legal: the macro requires at most one data field |
+
+`vec` is 72 bytes (37.5%) and ~4,236 CPU instructions smaller. The gap is
+the map's per-field name keys (`delivered_quantity`, `settlement_bps`, …),
+which `vec` replaces with position.
+
+### The rule this contract follows, and why
+
+- **`single-value` for events with 0 or 1 data field.** It is strictly the
+  smallest encoding, loses no information a consumer uses (there is no field
+  name to preserve), and is applied to the shipped `StatusChanged` and
+  `FxQuoteStaleChanged`. `StatusChanged` shipping at `single-value` measures
+  **120 bytes / 4,682 CPU / 503 memory bytes** when published by itself.
+- **`map` for events with two or more data fields.** `vec` is measurably
+  smaller, but at this scale the saving is not worth surrendering the field
+  names: 72 bytes is ~352 stroops per event at the SDK's 5,000-stroop/KB
+  snapshot rate, against a 16,384-byte transaction budget — while a
+  positional encoding makes every indexer depend on field order, and a
+  future field insertion silently reinterprets existing data. Named fields
+  keep the event stream self-describing, which is the property
+  `tests/event_sourcing.rs` relies on to rebuild state from events alone.
+  The default is therefore kept **deliberately**, not by inertia.
+- **`single-value` is not available for multi-field events at all** — the
+  macro rejects it at compile time, so it was never a candidate for
+  `DeliveryConfirmed`, `Payout`, `FxResolved`, or the other multi-field
+  events.
+
+The comment above each affected event in `contracts/escrow/src/lib.rs`
+points back to this section, so the next event author sees the measurement
+before choosing a format.
+
+## Offline regression baseline — `contracts/escrow/tests/budget.rs` (#222)
+
+Everything recorded in this document needs a live RPC and a deployed
+instance, so none of it runs in CI. The hermetic half is
+[`contracts/escrow/tests/budget.rs`](../contracts/escrow/tests/budget.rs),
+which runs inside the ordinary `cargo test` job with no network, no funded
+account and no deploy.
+
+It drives **all 34 exported methods** to a state where the call genuinely
+succeeds (a rejected call is a cheaper, different code path), then meters
+exactly one call per method, with `env.cost_estimate().budget()` reset
+immediately before it so scenario setup cannot leak into the figure:
+
+- `budget()` — CPU instructions and peak memory bytes;
+- `resources()` — read/write entry counts and byte counts.
+
+The oracle paths (`oracle_rate`, `resolve_fx_shortfall`,
+`refresh_fx_quote_status`, `fund_fx_shortfall`,
+`expire_fx_shortfall_window`, plus `replace_oracle_config`) run against an
+in-process fixed-quote oracle; the multi-party paths (`reassign_buyer`,
+`resolve_dispute`, `cancel`) are included too.
+
+The baseline is committed at
+[`contracts/escrow/budget.snapshot`](../contracts/escrow/budget.snapshot).
+A metric growing by more than **1%** fails the test with a per-method diff:
+
+```text
+per-method budget regressed beyond 1% against contracts/escrow/budget.snapshot:
+  cancel cpu: 574297 -> 584725 (+1.8%) exceeds 1%
+```
+
+The bound is tighter than the 5% the issue suggested on purpose: native host
+metering is deterministic (two bless runs are byte-identical), and the
+smallest meaningful behavioral regression — one extra read of the stored
+`Commitment` — is ~11k instructions, i.e. ~1.9% of the heaviest method. A 5%
+bound would let that through on `cancel`, `settle`, `claim_*` and friends.
+
+These are host-model figures for **native Rust** execution under the test
+env, not the testnet fees elsewhere in this document. The SDK notes they
+understate the WASM-equivalent cost (no VM instantiation, no Wasm reads/rent),
+which is fine for a relative guard: every run compares the same harness.
+
+### Re-blessing the baseline
+
+When a change intentionally moves a number, regenerate the snapshot with the
+change in hand and review the diff before committing it:
+
+```bash
+cd contracts/escrow
+BLESS_BUDGET=1 cargo test -p harvestlock-escrow --test budget
+```
+
+Then `git diff contracts/escrow/budget.snapshot` — the point is not that the
+number is frozen, but that it can no longer move unnoticed. Adding an exported
+method also fails the suite until it is added to `PUBLIC_METHODS` and measured;
+removing or renaming one leaves a snapshot entry that has no measurement, which
+fails too. The suite disables Soroban's `test_snapshots/*.json` capture for its
+envs, so this baseline does not add 34 footprint artifacts per run.
+
+---
+
 ## Results — delivery group (`mark_checkpoint`, `confirm_delivery`)
 
 Session 2, measured against instance
@@ -787,6 +923,26 @@ reporting add-on.
 ## Reproducibility
 
 WASM builds are verified reproducible in CI (`.github/workflows/test.yml`, job "Verify WASM build reproducibility"). The SHA-256 hash of `target/wasm32v1-none/release/harvestlock_escrow.wasm` must match between two consecutive clean builds. Current hash: see latest CI run.
+
+## Offline WASM size budget
+
+The committed release artifact is **82,567 bytes** (the build measured on
+23 Nov 2026 above). To catch material size regressions without adding a live
+network or another tool dependency, run this after `stellar contract build
+--locked`:
+
+```bash
+bash .github/scripts/check_wasm_size.sh
+```
+
+The script compares
+`target/wasm32v1-none/release/harvestlock_escrow.wasm` with
+[`contracts/escrow/wasm_size.baseline`](../contracts/escrow/wasm_size.baseline),
+prints the baseline, current size, and delta, and fails when growth exceeds
+5 KiB (5,120 bytes). If a larger artifact is intentional, update the baseline
+in the same PR and explain the increase; the check does not alter workflows.
+Per the [PR template](../.github/PULL_REQUEST_TEMPLATE.md), a maintainer can
+wire this command into `.github/workflows/test.yml`.
 
 ## Supply-Chain Health
 

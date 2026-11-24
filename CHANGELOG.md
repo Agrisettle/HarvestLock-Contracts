@@ -99,6 +99,39 @@ list in `deny.toml` (#59), whose first run surfaced and triaged
 `wasmparser`'s `Apache-2.0 WITH LLVM-exception`. Docs-only otherwise — no
 contract code changed.
 
+Oracle hardening, build metadata, and an interface guard (#244–#247). Not
+uploaded yet. Under docs/versioning.md §2 the next build is a **MINOR**:
+there is a new error code, and `initialize` now refuses inputs it used to
+accept.
+
+- **`initialize` validates `OracleConfig::denominated_amount` (#247).** A
+  value `<= 0` or `> MAX_DENOMINATED_AMOUNT` (`i128::MAX / 10_000`, the
+  largest value for which `bps_amount(_, 10_000)` can't overflow) is now
+  refused with the existing `InvalidOracleConfig`. Before this, a zero or
+  negative value was accepted, and after a full delivery `settle` would pay
+  the cooperative nothing and refund the buyer in full. An oversized value
+  would have trapped at settlement.
+- **New `Error::OracleUnavailable` (= 46, appended) (#245).**
+  `read_oracle_rate` and `resolve_fx_shortfall` now use the generated
+  `try_lastprice` / `try_decimals`. An oracle address with no contract
+  behind it, a callee that panics, or a reply that doesn't decode now
+  returns a contract error from `oracle_rate`, `resolve_fx_shortfall` and
+  `refresh_fx_quote_status` instead of aborting the invocation. This fixes
+  fault-injection finding F1. Budget exhaustion inside the oracle still
+  aborts, because the host gives the caller nothing to recover with; the
+  harness header in `tests/oracle_fault_injection.rs` documents this.
+- **Contract metadata embedded in the WASM (#246).** `contractmeta!` writes
+  `version` (`escrow-v` + the Cargo package version) and `repository` (the
+  workspace repository URL) into the `contractmetav0` section. Read them
+  with `stellar contract info meta --wasm …`. Neither value depends on the
+  build environment, so two clean builds still give the same hash.
+- **Exported-interface snapshot (#244).** New committed
+  `contracts/escrow/interface.snapshot`, plus
+  `.github/scripts/check_interface_snapshot.sh`. The script fails on any
+  change to the exported functions, events or types and prints a PATCH /
+  MINOR / MINOR **BREAKING** hint. Not yet wired into CI; that is a
+  maintainer step per the PR template.
+
 Four small Wave backlog items landed together — one test suite, two
 property/edge tests, and one script-and-vendor-tree chore. The
 non-standard SEP-41 token suite (#264,
@@ -122,6 +155,43 @@ WASM by [`scripts/gen-bindings.sh`](./scripts/gen-bindings.sh), with a
 `--check` drift mode a maintainer wires into CI separately per the PR
 template's "CI is maintainer-managed" note (#266). No contract code
 changed; no deployment entry until the next build goes to testnet.
+
+`initialize` now takes its eight agreed terms as one named
+`CommitmentTerms` struct (#270) — a **MINOR `**BREAKING**`** change per
+docs/versioning.md §2, because a caller written against the positional form
+must reshape one call. The parties and the optional `oracle_config` stay
+standalone arguments: an `Address` cannot be confused by position the way
+the numeric terms could. Eight positional parameters had become a real
+hazard — `advance1_bps`/`advance2_bps` are adjacent `u32`s and
+`claim_window_secs`/`remainder_window_secs`/`delivery_window_secs` are
+adjacent `u64`s, so a swap type-checked and silently produced a different
+deal. No validation, stored field or state transition changed: every
+existing rejection test still returns the same `Error` for the same input,
+only its call shape moved. `get_commitment_view`'s `terms` is now the same
+type, with `delivery_deadline` replaced by the agreed
+`delivery_window_secs`, so the view's `schema_version` moves to `2`
+(docs/versioning.md §2.1). Migration: reshape the call site, and where a
+view consumer read `terms.delivery_deadline`, compute
+`created_at + terms.delivery_window_secs`. Generated TypeScript bindings
+must be refreshed with `scripts/gen-bindings.sh`; the committed
+`examples/ts` snapshot predates the change and is not checked by CI.
+
+Three coverage issues landed with it. A differential proptest (#269) runs
+the same plan — random bps splits, claim windows, open times and attempt
+times — against tranche 1 (from `Locked`) and tranche 2 (from
+`CheckpointPassed`) and asserts identical rule-level observations: the
+deadline the open wrote, whether the attempt was accepted or which exact
+`Error` refused it, the claimed/expired flags, and that each transfer
+matches that tranche's own bps amount and pays the party the action names.
+`tests/window_overflow.rs` gains `resolve_fx_shortfall`'s
+`fx_shortfall_deadline = now + remainder_window_secs` as its fifth
+property, plus pinned `u64::MAX` boundary cases (#271), using the shared
+minimal mock Reflector now in `tests/common/mod.rs`; the paragraph that
+left that site out as out of scope is gone. And a `Draft`-stage
+reassignment test (#273) proves that swapping the buyer before `lock`
+charges the **new** buyer's wallet, leaves the outgoing buyer's balance
+untouched, refuses the outgoing buyer's signature for `lock`, and pays
+both refund paths (`cancel`, `reclaim_on_nondelivery`) to the new buyer.
 
 ## [Deployment 11] — 2026-10-20
 
