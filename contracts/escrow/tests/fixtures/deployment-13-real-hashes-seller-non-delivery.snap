@@ -26,6 +26,7 @@ check = buyer_balance 70000000
 check = status Locked
 step = advance 16
 step = reclaim_on_nondelivery => ok
+step = withdraw_payout buyer => ok
 check = buyer_balance 100000000
 check = coop_balance 0
 check = contract_balance 0

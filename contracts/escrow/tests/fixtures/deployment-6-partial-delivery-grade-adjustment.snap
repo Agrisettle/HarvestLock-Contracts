@@ -36,6 +36,8 @@ step = settle => ok
 # recorded on-chain transfer events: 10,000,000 to the cooperative, 55,000,000
 # back to the buyer — exactly adjusted_total (45,000,000) minus already_claimed
 # (35,000,000), with the rest of the remainder refunded.
+step = withdraw_payout buyer => ok
+step = withdraw_payout cooperative => ok
 check = coop_balance 45000000
 check = buyer_balance 55000000
 check = contract_balance 0

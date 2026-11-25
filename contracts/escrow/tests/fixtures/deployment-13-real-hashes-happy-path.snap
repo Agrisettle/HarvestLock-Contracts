@@ -53,6 +53,7 @@ step = confirm_delivery 1000 0 => ok
 check = settlement_bps 10000
 check = status Delivered
 step = settle => ok
+step = withdraw_payout cooperative => ok
 check = coop_balance 100000000
 check = buyer_balance 0
 check = contract_balance 0

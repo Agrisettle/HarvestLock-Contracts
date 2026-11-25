@@ -7,11 +7,11 @@ use super::*;
 use crate::testutils::*;
 use proptest::prelude::*;
 use soroban_sdk::testutils::{
-    Address as _, AuthorizedFunction, AuthorizedInvocation, BytesN as _, Events as _, Ledger as _,
-    MockAuth, MockAuthInvoke,
+    Address as _, AuthorizedFunction, AuthorizedInvocation, BytesN as _, Events as _, IssuerFlags,
+    Ledger as _, MockAuth, MockAuthInvoke,
 };
 use soroban_sdk::xdr::{Limits, ToXdr as _, WriteXdr as _};
-use soroban_sdk::{symbol_short, xdr, Env, Event as _, IntoVal, TryFromVal};
+use soroban_sdk::{symbol_short, token, xdr, Env, Event as _, IntoVal, TryFromVal};
 
 // This is the pinned SDK/test-host value for
 // `max_contract_data_entry_size_bytes`. Keep the measured worst-case instance
@@ -22,6 +22,42 @@ const MAX_INSTANCE_ENTRY_FRACTION_PERCENT: usize = 50;
 const MAX_COMMITMENT_XDR_BYTES: usize = 4_096;
 const MAX_ORACLE_CONFIG_XDR_BYTES: usize = 512;
 const MAX_ALLOCATION_XDR_BYTES: usize = 24_000;
+
+fn revocable_setup() -> Setup {
+    let env = Env::default();
+    env.mock_all_auths();
+    let buyer = Address::generate(&env);
+    let cooperative = Address::generate(&env);
+    let warehouse = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    sac.issuer().set_flag(IssuerFlags::RevocableFlag);
+    let token_address = sac.address();
+    let token = token::Client::new(&env, &token_address);
+    token::StellarAssetClient::new(&env, &token_address).mint(&buyer, &TOTAL_AMOUNT);
+
+    let terms = Terms::default().advances(1_500, 2_000);
+    let contract_id = env.register(EscrowContract, ());
+    let contract = EscrowContractClient::new(&env, &contract_id);
+    contract.initialize(
+        &buyer,
+        &cooperative,
+        &warehouse,
+        &token_address,
+        &commitment_terms(&env, &terms),
+        &None,
+    );
+
+    Setup {
+        env,
+        contract,
+        token,
+        buyer,
+        cooperative,
+        warehouse,
+        total_amount: terms.total_amount,
+    }
+}
 
 // ---------- basic lifecycle ----------
 
@@ -1290,6 +1326,8 @@ fn oracle_rate_is_callable_after_settlement() {
     // so this specific fixture never actually has a shortfall to fund.
     s.contract.resolve_fx_shortfall();
     s.contract.settle();
+    withdraw_all_payouts(&s);
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     let rate = s.contract.oracle_rate();
@@ -1434,6 +1472,7 @@ fn resolve_fx_shortfall_scales_to_the_settlement_tokens_own_decimals() {
     assert_eq!(c.fx_shortfall_amount, 0);
 
     s.contract.settle();
+    withdraw_all_payouts(&s);
     // 300_000 already claimed as advances + 400_000 from the remainder =
     // the whole 700_000 FX-adjusted obligation; the other 300_000 of the
     // remainder returns to the buyer.
@@ -1456,6 +1495,7 @@ fn resolve_fx_shortfall_scales_for_a_five_decimal_token() {
         "7_000_000 7-decimal units is 70_000 at 5 decimals"
     );
     s.contract.settle();
+    withdraw_all_payouts(&s);
     assert_eq!(s.token.balance(&s.cooperative), 70_000);
     assert_eq!(s.token.balance(&s.buyer), 230_000);
 }
@@ -1472,6 +1512,7 @@ fn resolve_fx_shortfall_scales_for_an_eighteen_decimal_token() {
         "7_000_000 7-decimal units is 0.7 tokens at 18 decimals"
     );
     s.contract.settle();
+    withdraw_all_payouts(&s);
     assert_eq!(s.token.balance(&s.cooperative), 700_000_000_000_000_000);
     assert_eq!(s.token.balance(&s.buyer), 2_300_000_000_000_000_000);
 }
@@ -1569,6 +1610,7 @@ fn fund_fx_shortfall_pays_in_the_shortfall_and_unblocks_settle() {
 
     // No longer blocked.
     s.contract.settle();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Settled);
     // fx_adjusted_total (1_750_000), fully covered now: claimed_by_coop
     // (300_000, already paid) + this settle's payout should sum to
@@ -1648,6 +1690,7 @@ fn expire_fx_shortfall_window_sweeps_escrow_to_cooperative_and_defaults_the_buye
     advance_time(&s, REMAINDER_WINDOW + 1);
 
     s.contract.expire_fx_shortfall_window();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Defaulted);
     assert_eq!(
@@ -1703,6 +1746,7 @@ fn fx_shortfall_deadline_boundary_is_inclusive_for_funding_and_exclusive_for_exp
         Err(Ok(Error::FxShortfallWindowPassed))
     );
     s2.contract.expire_fx_shortfall_window();
+    withdraw_all_payouts(&s2);
     assert_eq!(s2.contract.get_status(), Status::Defaulted);
 }
 
@@ -1787,6 +1831,7 @@ fn refresh_fx_quote_status_is_informational_and_gates_nothing() {
     );
     s.contract.fund_fx_shortfall();
     s.contract.settle();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Settled);
 }
 
@@ -1925,6 +1970,7 @@ fn oracle_severe_shortfall_does_not_claw_back_advances_already_claimed() {
     assert_eq!(coop_before_resolve, advance1_amount + advance2_amount);
 
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     // The entire remainder refunds to the buyer, the cooperative's
     // already-claimed advances stay with them in full, and the escrow
@@ -2361,6 +2407,7 @@ fn a_fully_prepaid_buyer_cannot_be_defaulted_for_skipping_the_zero_remainder() {
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     assert_eq!(s.contract.get_status(), Status::Delivered);
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
@@ -2403,6 +2450,7 @@ fn expire_remainder_window_defaults_buyer_and_sweeps_escrow_to_cooperative() {
     let cooperative_balance_before = s.token.balance(&s.cooperative);
 
     s.contract.expire_remainder_window();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Defaulted);
     assert_eq!(s.token.balance(&s.contract.address), 0);
@@ -2506,6 +2554,7 @@ fn expire_remainder_window_is_permissionless() {
     advance_time(&s, REMAINDER_WINDOW + 1);
 
     s.contract.expire_remainder_window();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Defaulted);
 }
 
@@ -2546,6 +2595,8 @@ fn expire_remainder_window_works_when_only_a_third_party_signs() {
     assert!(contract_balance_before > 0); // the unclaimed deposit
 
     s.contract.expire_remainder_window();
+    s.env.mock_all_auths();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Defaulted);
     assert_eq!(s.token.balance(&s.contract.address), 0);
@@ -2570,6 +2621,7 @@ fn reclaim_on_nondelivery_after_delivery_deadline_returns_balance_to_buyer() {
     let buyer_balance_before = s.token.balance(&s.buyer);
 
     s.contract.reclaim_on_nondelivery();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Forfeited);
     assert_eq!(s.token.balance(&s.contract.address), 0);
@@ -2589,6 +2641,7 @@ fn reclaim_on_nondelivery_works_from_ready_for_delivery_too() {
     advance_time(&s, DELIVERY_WINDOW + 1);
 
     s.contract.reclaim_on_nondelivery();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     let advance2_amount = s.total_amount * 2_000 / 10_000;
@@ -2723,6 +2776,8 @@ fn reclaim_on_nondelivery_attempted_by_a_non_buyer_fails() {
         invoke: &invoke,
     }]);
     s.contract.reclaim_on_nondelivery();
+    s.env.mock_all_auths();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Forfeited);
     assert_eq!(s.token.balance(&s.contract.address), 0);
     assert_eq!(s.token.balance(&s.buyer), s.total_amount);
@@ -2828,6 +2883,60 @@ fn settle_blocked_if_advance_2_never_resolved() {
     assert_eq!(result, Err(Ok(Error::TrancheUnresolved)));
 }
 
+#[test]
+fn deauthorized_buyer_cannot_block_cooperative_settlement_withdrawal() {
+    let s = revocable_setup();
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&900, &FULL_PRICE_GRADE);
+
+    let sac = token::StellarAssetClient::new(&s.env, &s.token.address);
+    sac.set_authorized(&s.buyer, &false);
+    s.contract.settle();
+
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    assert_eq!(s.contract.get_commitment().buyer_payout, 100_000);
+    assert_eq!(s.contract.get_commitment().cooperative_payout, 550_000);
+    assert_eq!(s.token.balance(&s.contract.address), 650_000);
+
+    assert!(s.contract.try_withdraw_payout(&s.buyer).is_err());
+    assert_eq!(s.contract.get_commitment().buyer_payout, 100_000);
+
+    s.contract.withdraw_payout(&s.cooperative);
+    assert_eq!(s.token.balance(&s.cooperative), 900_000);
+    assert_eq!(s.token.balance(&s.contract.address), 100_000);
+
+    sac.set_authorized(&s.buyer, &true);
+    s.contract.withdraw_payout(&s.buyer);
+    assert_eq!(s.token.balance(&s.buyer), 100_000);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
+#[test]
+fn deauthorized_cooperative_cannot_block_buyer_settlement_withdrawal() {
+    let s = revocable_setup();
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract.confirm_delivery(&900, &FULL_PRICE_GRADE);
+
+    let sac = token::StellarAssetClient::new(&s.env, &s.token.address);
+    sac.set_authorized(&s.cooperative, &false);
+    s.contract.settle();
+
+    assert_eq!(s.contract.get_status(), Status::Settled);
+    assert!(s.contract.try_withdraw_payout(&s.cooperative).is_err());
+    assert_eq!(s.contract.get_commitment().cooperative_payout, 550_000);
+
+    s.contract.withdraw_payout(&s.buyer);
+    assert_eq!(s.token.balance(&s.buyer), 100_000);
+    assert_eq!(s.token.balance(&s.contract.address), 550_000);
+
+    sac.set_authorized(&s.cooperative, &true);
+    s.contract.withdraw_payout(&s.cooperative);
+    assert_eq!(s.token.balance(&s.cooperative), 900_000);
+    assert_eq!(s.token.balance(&s.contract.address), 0);
+}
+
 /// `ready_for_delivery` only checks `Advance2Released` and `claim_tranche`
 /// doesn't look at status at all, so tranche 2's claim window can still be
 /// open once the commitment reaches `Delivered`. Delivery first, then the
@@ -2866,6 +2975,7 @@ fn tranche_2_claimed_after_delivery_then_settles_once() {
     );
 
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     // `claimed_by_coop` counted the late claim exactly once: the cooperative
     // ends with the full contract value, with nothing double-paid or left
@@ -2904,6 +3014,7 @@ fn tranche_2_reclaimed_after_delivery_then_settles() {
     assert_eq!(s.token.balance(&s.buyer), advance2);
 
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     // The reclaim already settled that tranche's fate, so the cooperative is
     // paid the adjusted total minus advance 1 only; everything still escrowed
@@ -2945,6 +3056,7 @@ fn full_happy_path_both_tranches_claimed_pays_out_exactly_total_amount() {
     s.contract
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
@@ -2969,6 +3081,7 @@ fn full_happy_path_advance_1_reclaimed_advance_2_claimed_still_sums_correctly() 
     s.contract
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     let advance2_amount = s.total_amount * 2_000 / 10_000;
@@ -3008,6 +3121,7 @@ fn zero_advance_bps_still_requires_explicit_resolution_before_settle() {
     s.contract.claim_advance_1();
     s.contract.claim_advance_2();
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
@@ -3276,6 +3390,7 @@ fn partial_delivery_pays_cooperative_proportionally_and_refunds_the_shortfall_to
     s.contract
         .confirm_delivery(&half_quantity, &FULL_PRICE_GRADE);
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     let advance2_amount = s.total_amount * 2_000 / 10_000;
@@ -3306,6 +3421,7 @@ fn grade_adjustment_alone_reduces_the_cooperative_payout() {
 
     s.contract.confirm_delivery(&CONTRACTED_QUANTITY, &1); // full quantity, grade 1 = 9_000 bps
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     let advance2_amount = s.total_amount * 2_000 / 10_000;
@@ -3334,6 +3450,7 @@ fn over_delivery_does_not_pay_more_than_the_full_contract_value() {
     s.contract
         .confirm_delivery(&double_quantity, &FULL_PRICE_GRADE);
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_commitment().settlement_bps, 10_000);
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
@@ -3354,6 +3471,7 @@ fn severe_shortfall_does_not_claw_back_advances_already_claimed() {
 
     s.contract.confirm_delivery(&0, &FULL_PRICE_GRADE); // zero delivered
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     let advance2_amount = s.total_amount * 2_000 / 10_000;
@@ -3396,6 +3514,7 @@ fn cancel_from_draft_marks_cancelled_with_nothing_to_return() {
     let s = setup(1_500, 1_500);
     // Never locked — contract never held any of the buyer's deposit.
     s.contract.cancel();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Cancelled);
     assert_eq!(s.token.balance(&s.buyer), s.total_amount);
     assert_eq!(s.token.balance(&s.contract.address), 0);
@@ -3409,6 +3528,7 @@ fn cancel_after_lock_returns_deposit_to_buyer() {
     assert_eq!(s.token.balance(&s.buyer), s.total_amount - deposit);
 
     s.contract.cancel();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Cancelled);
     assert_eq!(s.token.balance(&s.buyer), s.total_amount);
@@ -3424,6 +3544,7 @@ fn cancel_after_partial_claim_leaves_claimed_advance_with_cooperative() {
     s.contract.claim_advance_1(); // cooperative already has 15% — no penalty means this stays theirs
 
     s.contract.cancel();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     assert_eq!(s.contract.get_status(), Status::Cancelled);
@@ -3445,6 +3566,7 @@ fn cancel_still_works_from_ready_for_delivery_including_the_already_funded_remai
     advance_to_remainder_funded(&s); // claims both tranches (35%), then funds the 65% remainder
 
     s.contract.cancel();
+    withdraw_all_payouts(&s);
 
     let advance1_amount = s.total_amount * 1_500 / 10_000;
     let advance2_amount = s.total_amount * 2_000 / 10_000;
@@ -3589,6 +3711,7 @@ fn reassign_buyer_in_draft_charges_and_refunds_the_new_buyer() {
 
     // Cancelling from `Locked` refunds the escrow to that buyer.
     s.contract.cancel();
+    s.contract.withdraw_payout(&new_buyer);
     assert_eq!(s.contract.get_status(), Status::Cancelled);
     assert_eq!(s.token.balance(&s.contract.address), 0);
     assert_eq!(s.token.balance(&new_buyer), deposit);
@@ -3607,6 +3730,7 @@ fn reassign_buyer_in_draft_charges_and_refunds_the_new_buyer() {
     s2.contract.lock();
     advance_time(&s2, DELIVERY_WINDOW + 1);
     s2.contract.reclaim_on_nondelivery();
+    s2.contract.withdraw_payout(&successor2);
 
     assert_eq!(s2.contract.get_status(), Status::Forfeited);
     assert_eq!(s2.token.balance(&s2.contract.address), 0);
@@ -4148,6 +4272,7 @@ fn dispute_in_the_remainder_window_the_remainder_deadline_still_governs() {
     // ... and the expired deadline's own consequence executes immediately.
     let deposit = deposit_amount(s.total_amount, 1_500, 1_500);
     s.contract.expire_remainder_window();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Defaulted);
     assert_eq!(s.token.balance(&s.contract.address), 0);
     assert_eq!(s.token.balance(&s.cooperative), deposit);
@@ -4186,6 +4311,7 @@ fn dispute_in_the_fx_shortfall_window_the_fx_shortfall_deadline_still_governs() 
     let escrow_before = s.token.balance(&s.contract.address); // the 700_000 funded remainder
     let cooperative_before = s.token.balance(&s.cooperative); // the claimed 300_000
     s.contract.expire_fx_shortfall_window();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Defaulted);
     assert_eq!(s.token.balance(&s.contract.address), 0);
     assert_eq!(
@@ -4613,6 +4739,8 @@ fn cancel_succeeds_when_buyer_and_cooperative_share_one_address() {
     }]);
     s.contract.cancel();
     assert_eq!(s.contract.get_status(), Status::Cancelled);
+    s.env.mock_all_auths();
+    withdraw_all_payouts(&s);
     assert_eq!(s.token.balance(&s.buyer), s.total_amount);
 }
 
@@ -4938,6 +5066,8 @@ fn cancel_auth_entry_for_one_instance_cannot_cancel_another() {
     ]);
     b.contract.cancel();
     assert_eq!(b.contract.get_status(), Status::Cancelled);
+    b.env.mock_all_auths();
+    withdraw_all_payouts(&b);
     assert_eq!(b.token.balance(&b.buyer), b.total_amount);
 }
 
@@ -5121,6 +5251,7 @@ fn release_and_claim_advance_1_with_zero_bps_moves_no_funds() {
     s.contract
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(s.token.balance(&s.cooperative), s.total_amount);
@@ -5367,14 +5498,21 @@ fn every_transition_publishes_status_changed() {
         ]
     );
     s.contract.settle();
-    // settle emits StatusChanged + a coop_pay Payout (coop receives the 650k
-    // remainder; buyer_refund is 0 so no second Payout).
+    // settle records the 650k entitlement and transitions status; withdrawal
+    // later moves the tokens and emits the Payout.
     assert_eq!(
         s.env.events().all().filter_by_contract(&s.contract.address),
-        [
-            status_event(&s, Status::Delivered, Status::Settled),
-            payout_event(&s, "coop_pay", &s.cooperative.clone(), 650_000),
-        ]
+        [status_event(&s, Status::Delivered, Status::Settled)]
+    );
+    s.contract.withdraw_payout(&s.cooperative);
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [payout_event(
+            &s,
+            "coop_pay",
+            &s.cooperative.clone(),
+            650_000
+        )]
     );
 }
 
@@ -5408,29 +5546,36 @@ fn unwind_and_default_paths_publish_status_changed() {
     let s = setup(1_500, 1_500);
     s.contract.lock();
     s.contract.cancel();
-    // cancel emits StatusChanged AND Payout for the returned deposit.
+    // cancel records the credit; withdrawal publishes the Payout.
     assert_eq!(
         s.env.events().all().filter_by_contract(&s.contract.address),
-        [
-            status_event(&s, Status::Locked, Status::Cancelled),
-            payout_event(&s, "cancel", &s.buyer.clone(), 300_000),
-        ]
+        [status_event(&s, Status::Locked, Status::Cancelled)]
+    );
+    s.contract.withdraw_payout(&s.buyer);
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [payout_event(&s, "cancel", &s.buyer.clone(), 300_000)]
     );
 
     let s2 = setup(1_500, 1_500);
     s2.contract.lock();
     advance_time(&s2, DELIVERY_WINDOW + 1);
     s2.contract.reclaim_on_nondelivery();
-    // reclaim_on_nondelivery emits StatusChanged AND Payout for the deposit.
+    // reclaim_on_nondelivery records a credit; withdrawal publishes Payout.
     assert_eq!(
         s2.env
             .events()
             .all()
             .filter_by_contract(&s2.contract.address),
-        [
-            status_event(&s2, Status::Locked, Status::Forfeited),
-            payout_event(&s2, "forfeit", &s2.buyer.clone(), 300_000),
-        ]
+        [status_event(&s2, Status::Locked, Status::Forfeited)]
+    );
+    s2.contract.withdraw_payout(&s2.buyer);
+    assert_eq!(
+        s2.env
+            .events()
+            .all()
+            .filter_by_contract(&s2.contract.address),
+        [payout_event(&s2, "forfeit", &s2.buyer.clone(), 300_000)]
     );
 
     // The remainder window lapses without fund_remainder — buyer default.
@@ -5444,16 +5589,30 @@ fn unwind_and_default_paths_publish_status_changed() {
     s3.contract.ready_for_delivery();
     advance_time(&s3, REMAINDER_WINDOW + 1);
     s3.contract.expire_remainder_window();
-    // expire_remainder_window emits StatusChanged AND Payout to cooperative.
+    // expire_remainder_window records a credit; withdrawal publishes Payout.
     assert_eq!(
         s3.env
             .events()
             .all()
             .filter_by_contract(&s3.contract.address),
-        [
-            status_event(&s3, Status::ReadyForDelivery, Status::Defaulted),
-            payout_event(&s3, "exp_rem", &s3.cooperative.clone(), 350_000),
-        ]
+        [status_event(
+            &s3,
+            Status::ReadyForDelivery,
+            Status::Defaulted
+        )]
+    );
+    s3.contract.withdraw_payout(&s3.cooperative);
+    assert_eq!(
+        s3.env
+            .events()
+            .all()
+            .filter_by_contract(&s3.contract.address),
+        [payout_event(
+            &s3,
+            "exp_rem",
+            &s3.cooperative.clone(),
+            350_000
+        )]
     );
 }
 
@@ -5570,6 +5729,7 @@ fn flag_dispute_during_an_open_fx_shortfall_window_freezes_settle_without_distur
     // And the consequence that deadline was always gating is reachable: the
     // escrow sweeps to the cooperative and the buyer defaults.
     s.contract.expire_fx_shortfall_window();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Defaulted);
     assert_eq!(s.token.balance(&s.contract.address), 0);
     // Deposit + remainder escrowed (1_000_000) less the 300_000 the
@@ -5594,6 +5754,7 @@ fn cancel_after_an_allocation_is_recorded_leaves_the_ledger_orphaned_not_an_erro
 
     // Cancel with an escrowed deposit and an allocation already on record.
     s.contract.cancel();
+    withdraw_all_payouts(&s);
 
     // The unwind succeeded as if no allocation existed at all — it was never
     // consulted, so it could not block or alter the cancellation.
@@ -5686,6 +5847,7 @@ fn resolve_dispute_restores_a_ready_for_delivery_commitment_still_inside_its_fun
     s.contract
         .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
     s.contract.settle();
+    withdraw_all_payouts(&s);
     assert_eq!(s.contract.get_status(), Status::Settled);
 
     // Both tranches (300_000) plus the remainder (700_000) all land with the
@@ -6255,6 +6417,7 @@ fn expire_delivery_window_after_grace_transfers_balance_to_buyer() {
     let buyer_balance_before = s.token.balance(&s.buyer);
 
     s.contract.expire_delivery_window();
+    withdraw_all_payouts(&s);
 
     assert_eq!(s.contract.get_status(), Status::Forfeited);
     assert_eq!(s.token.balance(&s.contract.address), 0);
@@ -6310,11 +6473,12 @@ fn expire_delivery_window_publishes_payout_event() {
 
     let balance_before = s.token.balance(&s.contract.address);
     s.contract.expire_delivery_window();
+    s.contract.withdraw_payout(&s.buyer);
 
     let all_events = s.env.events().all();
     let filtered = all_events.filter_by_contract(&s.contract.address);
     let events = filtered.events();
-    // One StatusChanged + one Payout — the Payout must carry the balance.
+    // The payout transfer is a separate, beneficiary-authenticated call.
     let payout_event = Payout {
         reason: symbol_short!("exp_del"),
         to: s.buyer.clone(),
@@ -6334,15 +6498,27 @@ fn settle_publishes_payout_events_for_coop_and_buyer() {
     let s = setup(1_500, 2_000);
     s.contract.lock();
     advance_to_remainder_funded(&s);
-    s.contract
-        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    s.contract.confirm_delivery(&900, &FULL_PRICE_GRADE);
 
-    let coop_owed: i128 = s.total_amount * (10_000 - 1_500 - 2_000) / 10_000; // remainder net — no refund
+    let coop_owed: i128 = 550_000;
     s.contract.settle();
 
-    let all_events = s.env.events().all();
-    let filtered = all_events.filter_by_contract(&s.contract.address);
-    let events = filtered.events();
+    assert_eq!(
+        s.env.events().all().filter_by_contract(&s.contract.address),
+        [status_event(&s, Status::Delivered, Status::Settled)]
+    );
+    s.contract.withdraw_payout(&s.buyer);
+    let events = s.env.events().all().filter_by_contract(&s.contract.address);
+    let refund = Payout {
+        reason: symbol_short!("refund"),
+        to: s.buyer.clone(),
+        amount: 100_000,
+    }
+    .to_xdr(&s.env, &s.contract.address);
+    assert!(events.events().iter().any(|e| *e == refund));
+
+    s.contract.withdraw_payout(&s.cooperative);
+    let events = s.env.events().all().filter_by_contract(&s.contract.address);
     let coop_payout = Payout {
         reason: symbol_short!("coop_pay"),
         to: s.cooperative.clone(),
@@ -6350,8 +6526,8 @@ fn settle_publishes_payout_events_for_coop_and_buyer() {
     }
     .to_xdr(&s.env, &s.contract.address);
     assert!(
-        events.iter().any(|e| *e == coop_payout),
-        "settle must publish a coop_pay Payout"
+        events.events().iter().any(|e| *e == coop_payout),
+        "withdraw_payout must publish a coop_pay Payout"
     );
 }
 
@@ -6362,6 +6538,7 @@ fn cancel_publishes_payout_event() {
 
     let balance_before = s.token.balance(&s.contract.address);
     s.contract.cancel();
+    s.contract.withdraw_payout(&s.buyer);
 
     let all_events = s.env.events().all();
     let filtered = all_events.filter_by_contract(&s.contract.address);
@@ -6386,6 +6563,7 @@ fn reclaim_on_nondelivery_publishes_payout_event() {
 
     let balance_before = s.token.balance(&s.contract.address);
     s.contract.reclaim_on_nondelivery();
+    s.contract.withdraw_payout(&s.buyer);
 
     let all_events = s.env.events().all();
     let filtered = all_events.filter_by_contract(&s.contract.address);
@@ -6414,6 +6592,7 @@ fn expire_remainder_window_publishes_payout_event() {
 
     let balance_before = s.token.balance(&s.contract.address);
     s.contract.expire_remainder_window();
+    s.contract.withdraw_payout(&s.cooperative);
 
     let all_events = s.env.events().all();
     let filtered = all_events.filter_by_contract(&s.contract.address);
@@ -6526,6 +6705,7 @@ mod proptest_fund_conservation {
         let coop_before_settle = s.token.balance(&s.cooperative);
         let buyer_before_settle = s.token.balance(&s.buyer);
         s.contract.settle();
+        withdraw_all_payouts(&s);
 
         prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
         let buyer_bal = s.token.balance(&s.buyer);
@@ -6558,6 +6738,7 @@ mod proptest_fund_conservation {
         let total = s.total_amount;
         s.contract.lock();
         s.contract.cancel();
+        withdraw_all_payouts(&s);
 
         prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
         let buyer_bal = s.token.balance(&s.buyer);
@@ -6579,6 +6760,7 @@ mod proptest_fund_conservation {
         let deadline = s.contract.get_commitment().remainder_deadline;
         s.env.ledger().set_timestamp(deadline + 1);
         s.contract.expire_remainder_window();
+        withdraw_all_payouts(&s);
 
         prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
         let buyer_bal = s.token.balance(&s.buyer);
@@ -6599,6 +6781,7 @@ mod proptest_fund_conservation {
         let deadline = s.contract.get_commitment().delivery_deadline;
         s.env.ledger().set_timestamp(deadline + 1);
         s.contract.reclaim_on_nondelivery();
+        withdraw_all_payouts(&s);
 
         prop_assert_eq!(s.token.balance(&s.contract.address), 0i128, "Law 1");
         let buyer_bal = s.token.balance(&s.buyer);

@@ -38,6 +38,7 @@ check = status Delivered
 step = settle => ok
 # recorded final tally: cooperative 150M + 200M + 650M = 1,000,000,000, buyer and
 # contract both at 0, status Settled.
+step = withdraw_payout cooperative => ok
 check = coop_balance 1000000000
 check = buyer_balance 0
 check = contract_balance 0

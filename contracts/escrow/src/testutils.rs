@@ -447,6 +447,19 @@ pub fn advance_to_ready_for_delivery(s: &World) {
     s.contract.ready_for_delivery();
 }
 
+/// Completes any recorded terminal payout credits for unit and integration
+/// tests that exercise the existing push-style economic outcome assertions.
+pub fn withdraw_all_payouts(world: &World) {
+    let c = world.contract.get_commitment();
+    if c.buyer_payout > 0 {
+        world.contract.withdraw_payout(&world.buyer);
+    }
+    let c = world.contract.get_commitment();
+    if c.cooperative_payout > 0 {
+        world.contract.withdraw_payout(&world.cooperative);
+    }
+}
+
 // The pre-#274 in-crate names, kept as thin aliases so `src/test.rs` reads
 // exactly as it did. New code should use `world*`.
 pub fn setup(advance1_bps: u32, advance2_bps: u32) -> World {

@@ -120,19 +120,17 @@
 //! nothing — `resolve_fx_shortfall` still enforces staleness itself — so
 //! its worst-case failure is a misleading display, never a wrong payout.
 //!
-//! **Storage lifetime (#98)**: every persistent fact this contract keeps —
-//! the `Commitment` struct, the allocation ledger, the oracle config, and
-//! the dispute fields (which live *inside* `Commitment`, not under
-//! separate keys) — is instance storage, i.e. one `ContractData` ledger
-//! entry with one TTL, and nothing here uses `env.storage().persistent()`
-//! or `temporary()`. Soroban does **not** extend a contract instance's
-//! TTL merely because the contract was called, and a commitment can
-//! legitimately sit in `Draft` or `Locked` with no deadline forcing
-//! anyone to act; so every read path funnels through `load`, which
-//! re-rents the entry when its remaining lifetime has decayed below half
-//! the network maximum (see `bump_instance_ttl`'s doc comment). The full
-//! key-by-key audit, the residual expiry risk, and the operational
-//! mitigations live in `docs/storage-ttl.md`.
+//! **Storage lifetime (#98)**: `Commitment` and `OracleConfig` live in
+//! instance storage; the allocation ledger is a separate persistent entry.
+//! Neither entry's TTL is extended just because the contract was called,
+//! and a commitment can legitimately sit in `Draft` or `Locked` with no
+//! deadline forcing anyone to act. `load` requests a re-rent below half the
+//! network maximum, but only a **submitted, successful transaction**
+//! persists that TTL change. An API `simulateRead` such as `get_status` /
+//! `get_commitment` is never submitted and therefore extends nothing. The
+//! independent TTL keeper submits `stellar contract extend` transactions.
+//! The key-by-key audit, testnet probe, residual expiry risk, and operational
+//! mitigation live in `docs/storage-ttl.md`.
 //!
 //! **The state machine is declared once, not once per function (#227)**:
 //! every status guard on a state-changing call is a single
@@ -288,6 +286,8 @@ pub enum AuthParty {
     WarehouseOperator,
     /// Both the buyer and the cooperative (deduplicated by address).
     BuyerAndCooperative,
+    /// Either the buyer or cooperative, withdrawing only their own payout.
+    BuyerOrCooperative,
     /// All three named parties (buyer, cooperative, warehouse operator),
     /// deduplicated by address.
     AllParties,
@@ -504,6 +504,9 @@ pub enum Error {
     /// `extend_delivery_deadline` was asked to move the deadline backwards
     /// or leave it unchanged.
     DeliveryDeadlineNotExtended = 48,
+    /// `withdraw_payout` called by a named party with no outstanding
+    /// entitlement to withdraw.
+    NoPayout = 49,
 }
 
 #[contracttype]
@@ -817,6 +820,13 @@ pub struct Commitment {
     /// (unanimous consent) does not — good-faith resolution should not
     /// shorten the window for future disputes.
     pub dispute_count: u32,
+
+    /// Terminal payouts are credits until each beneficiary successfully
+    /// withdraws them. The reason is retained for the eventual `Payout` event.
+    pub buyer_payout: i128,
+    pub buyer_payout_reason: Symbol,
+    pub cooperative_payout: i128,
+    pub cooperative_payout_reason: Symbol,
 }
 
 /// The invariants the state machine is allowed to rely on (#225), every one
@@ -912,6 +922,10 @@ impl Commitment {
         assert!(
             self.delivery_deadline >= self.created_at,
             "invariant: delivery_deadline < created_at"
+        );
+        assert!(
+            self.buyer_payout >= 0 && self.cooperative_payout >= 0,
+            "invariant: negative payout credit"
         );
     }
 }
@@ -1180,11 +1194,8 @@ pub struct StatusChanged {
     pub to: Status,
 }
 
-/// Emitted after every fund transfer in a terminal or payout path —
-/// `settle` (once per non-zero leg), `cancel`, `expire_remainder_window`,
-/// `reclaim_on_nondelivery`, and `expire_fx_shortfall_window`.
-/// `reason` is a short symbol naming the call so an indexer can reconstruct
-/// each party's final balance from escrow events alone (#204).
+/// Emitted after each successful `withdraw_payout` transfer. `reason` names
+/// the terminal path that created the entitlement (#204).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Payout {
@@ -1365,6 +1376,19 @@ const LOCKED_THROUGH_DELIVERED: &[Status] = &[
     Status::Delivered,
 ];
 
+/// Tranche windows remain actionable through disputes, but terminal outcomes
+/// allocate the remaining escrow and close any unresolved tranche rights.
+const NON_TERMINAL: &[Status] = &[
+    Status::Draft,
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+    Status::Delivered,
+    Status::Disputed,
+];
+
 /// One status-gated public method — the key into the declared transition
 /// table, [`Self::allowed_from`].
 ///
@@ -1378,18 +1402,10 @@ const LOCKED_THROUGH_DELIVERED: &[Status] = &[
 /// a row here, and a status that admits nothing can be read off the table
 /// directly.
 ///
-/// Two rows (`ClaimAdvance1`/`ClaimAdvance2`, `ReclaimAdvance1`/
-/// `ReclaimAdvance2`) declare **no** status gate, and that is deliberate,
-/// not an omission: an advance window, once opened, stays claimable (or
-/// reclaimable) while `advanceN_deadline` is open regardless of what the
-/// deal's status has since moved on to — crop progress doesn't wait on
-/// paperwork, and a dispute freeze deliberately does not stop a tranche
-/// window that is already ticking (pinned by
-/// `claim_advance_1_while_disputed_still_pays` and
-/// `reclaim_advance_1_while_disputed_still_refunds`). Their real guards are
-/// the deadline/flag predicates in `can_claim_tranche`/
-/// `can_reclaim_tranche`, which is why the table says `None` rather than
-/// listing every status.
+/// The tranche claim/reclaim rows allow every non-terminal status. An opened
+/// window remains actionable through later lifecycle progress and disputes,
+/// but terminal outcomes allocate the remaining escrow, so an unresolved
+/// tranche cannot transfer funds afterward.
 #[derive(Clone, Copy)]
 enum Method {
     SetAllocation,
@@ -1440,7 +1456,7 @@ impl Method {
             Method::ClaimAdvance1
             | Method::ReclaimAdvance1
             | Method::ClaimAdvance2
-            | Method::ReclaimAdvance2 => None,
+            | Method::ReclaimAdvance2 => Some(NON_TERMINAL),
             Method::FundRemainder | Method::ExpireRemainderWindow | Method::ConfirmDelivery => {
                 Some(&[Status::ReadyForDelivery])
             }
@@ -1645,6 +1661,10 @@ impl EscrowContract {
             dispute_pre_status: Status::Draft,
             dispute_deadline: 0,
             dispute_count: 0,
+            buyer_payout: 0,
+            buyer_payout_reason: symbol_short!("none"),
+            cooperative_payout: 0,
+            cooperative_payout_reason: symbol_short!("none"),
         };
         // Through `save` like every other write, so the initial state is
         // covered by the same test-build invariant checker (#225) — the
@@ -2088,13 +2108,13 @@ impl EscrowContract {
     /// (`now > remainder_deadline`) with the remainder never funded — in
     /// the deadline second itself this refuses with
     /// `RemainderWindowNotPassed`, so the buyer's own funding window is
-    /// never cut short by a second. Sweeps whatever's currently escrowed
+    /// never cut short by a second. Credits whatever's currently escrowed
     /// (the deposit, or whatever of it the cooperative hasn't already
     /// claimed) to the cooperative and sets `Defaulted` — uncontested by
     /// construction, so unlike `cancel`/`reassign_buyer` this needs no
     /// consent from anyone.
     ///
-    /// Permissionless, deliberately: the outcome (sweep to cooperative)
+    /// Permissionless, deliberately: the outcome (credit to cooperative)
     /// doesn't depend on who calls it, only on whether the deadline has
     /// passed, the same reasoning `reclaim_tranche` would use if it
     /// weren't already scoped to benefit the buyer specifically. Anyone —
@@ -2110,28 +2130,19 @@ impl EscrowContract {
         let mut c = Self::load(&env)?;
         Self::can_expire_remainder_window(&c, env.ledger().timestamp())?;
 
-        // Effects before interaction — see `lock`'s comment for why.
-        Self::set_status(&env, &mut c, Status::Defaulted);
-        Self::save(&env, &c);
-
         let token_client = token::Client::new(&env, &c.token);
         let balance = token_client.balance(&env.current_contract_address());
-        if balance > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
-            Payout {
-                reason: symbol_short!("exp_rem"),
-                to: c.cooperative.clone(),
-                amount: balance,
-            }
-            .publish(&env);
-        }
+        c.cooperative_payout = balance;
+        c.cooperative_payout_reason = symbol_short!("exp_rem");
+        Self::set_status(&env, &mut c, Status::Defaulted);
+        Self::save(&env, &c);
         Ok(())
     }
 
     /// The seller-non-delivery path: `delivery_deadline` has *strictly*
     /// passed (`now > delivery_deadline`; the deadline second itself still
     /// refuses with `DeliveryDeadlineNotPassed`) without `confirm_delivery`
-    /// ever having run. Returns whatever's currently escrowed to the buyer
+    /// ever having run. Credits whatever's currently escrowed to the buyer
     /// and sets `Forfeited`.
     ///
     /// Buyer-gated, not permissionless — unlike `expire_remainder_window`,
@@ -2149,25 +2160,15 @@ impl EscrowContract {
         Self::can_reclaim_on_nondelivery(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
-        // Effects before interaction — see `lock`'s comment for why.
+        let token_client = token::Client::new(&env, &c.token);
+        c.buyer_payout = token_client.balance(&env.current_contract_address());
+        c.buyer_payout_reason = symbol_short!("forfeit");
         Self::set_status(&env, &mut c, Status::Forfeited);
         Self::save(&env, &c);
-
-        let token_client = token::Client::new(&env, &c.token);
-        let balance = token_client.balance(&env.current_contract_address());
-        if balance > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
-            Payout {
-                reason: symbol_short!("forfeit"),
-                to: c.buyer.clone(),
-                amount: balance,
-            }
-            .publish(&env);
-        }
         Ok(())
     }
 
-    /// Permissionless fallback that forfeits the escrowed funds to the buyer
+    /// Permissionless fallback that credits the escrowed funds to the buyer
     /// when the cooperative never called `reclaim_on_nondelivery` and the
     /// buyer's key is lost or inaccessible. Callable by anyone after
     /// `delivery_deadline + remainder_window_secs` (the grace period).
@@ -2176,21 +2177,11 @@ impl EscrowContract {
         let mut c = Self::load(&env)?;
         Self::can_expire_delivery_window(&c, env.ledger().timestamp())?;
 
-        // Effects before interaction — see `lock`'s comment for why.
+        let token_client = token::Client::new(&env, &c.token);
+        c.buyer_payout = token_client.balance(&env.current_contract_address());
+        c.buyer_payout_reason = symbol_short!("exp_del");
         Self::set_status(&env, &mut c, Status::Forfeited);
         Self::save(&env, &c);
-
-        let token_client = token::Client::new(&env, &c.token);
-        let balance = token_client.balance(&env.current_contract_address());
-        if balance > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
-            Payout {
-                reason: symbol_short!("exp_del"),
-                to: c.buyer.clone(),
-                amount: balance,
-            }
-            .publish(&env);
-        }
         Ok(())
     }
 
@@ -2317,34 +2308,75 @@ impl EscrowContract {
         let claimed_by_coop = Self::claimed_by_coop(&c);
         let owed_from_remainder = (adjusted_total - claimed_by_coop).max(0);
 
-        // Effects before interaction — see `lock`'s comment for why.
-        Self::set_status(&env, &mut c, Status::Settled);
-        Self::save(&env, &c);
-
         let token_client = token::Client::new(&env, &c.token);
         let remainder_balance = token_client.balance(&env.current_contract_address());
         let coop_payment = owed_from_remainder.min(remainder_balance);
         let buyer_refund = remainder_balance - coop_payment;
+        c.cooperative_payout = coop_payment;
+        c.cooperative_payout_reason = symbol_short!("coop_pay");
+        c.buyer_payout = buyer_refund;
+        c.buyer_payout_reason = symbol_short!("refund");
+        Self::set_status(&env, &mut c, Status::Settled);
+        Self::save(&env, &c);
+        Ok(())
+    }
 
-        if coop_payment > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &c.cooperative,
-                &coop_payment,
-            );
+    /// Withdraws the caller's payout credit after a terminal transition.
+    ///
+    /// Terminal calls record each party's entitlement without transferring
+    /// tokens. Each beneficiary authenticates and withdraws independently, so
+    /// a token rejection for one recipient cannot roll back the other
+    /// recipient's entitlement or terminal status. A failed transfer rolls
+    /// back only this withdrawal, leaving the credit available to retry.
+    ///
+    /// If buyer and cooperative are the same address, one authenticated call
+    /// withdraws both credits.
+    pub fn withdraw_payout(env: Env, recipient: Address) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        if recipient != c.buyer && recipient != c.cooperative {
+            return Err(Error::NotAParty);
+        }
+
+        let buyer_amount = if recipient == c.buyer {
+            c.buyer_payout
+        } else {
+            0
+        };
+        let cooperative_amount = if recipient == c.cooperative {
+            c.cooperative_payout
+        } else {
+            0
+        };
+        if buyer_amount == 0 && cooperative_amount == 0 {
+            return Err(Error::NoPayout);
+        }
+
+        recipient.require_auth();
+        if recipient == c.buyer {
+            c.buyer_payout = 0;
+        }
+        if recipient == c.cooperative {
+            c.cooperative_payout = 0;
+        }
+        Self::save(&env, &c);
+
+        let token_client = token::Client::new(&env, &c.token);
+        let contract = env.current_contract_address();
+        if buyer_amount > 0 {
+            token_client.transfer(&contract, &recipient, &buyer_amount);
             Payout {
-                reason: symbol_short!("coop_pay"),
-                to: c.cooperative.clone(),
-                amount: coop_payment,
+                reason: c.buyer_payout_reason,
+                to: recipient.clone(),
+                amount: buyer_amount,
             }
             .publish(&env);
         }
-        if buyer_refund > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.buyer, &buyer_refund);
+        if cooperative_amount > 0 {
+            token_client.transfer(&contract, &recipient, &cooperative_amount);
             Payout {
-                reason: symbol_short!("refund"),
-                to: c.buyer.clone(),
-                amount: buyer_refund,
+                reason: c.cooperative_payout_reason,
+                to: recipient,
+                amount: cooperative_amount,
             }
             .publish(&env);
         }
@@ -2612,21 +2644,11 @@ impl EscrowContract {
         let mut c = Self::load(&env)?;
         Self::can_expire_fx_shortfall_window(&c, env.ledger().timestamp())?;
 
-        // Effects before interaction — see `lock`'s comment for why.
+        let token_client = token::Client::new(&env, &c.token);
+        c.cooperative_payout = token_client.balance(&env.current_contract_address());
+        c.cooperative_payout_reason = symbol_short!("exp_fx");
         Self::set_status(&env, &mut c, Status::Defaulted);
         Self::save(&env, &c);
-
-        let token_client = token::Client::new(&env, &c.token);
-        let balance = token_client.balance(&env.current_contract_address());
-        if balance > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.cooperative, &balance);
-            Payout {
-                reason: symbol_short!("exp_fx"),
-                to: c.cooperative.clone(),
-                amount: balance,
-            }
-            .publish(&env);
-        }
         Ok(())
     }
 
@@ -2644,34 +2666,22 @@ impl EscrowContract {
     /// "Advance settled per agreed schedule, no penalty": whatever's
     /// already been claimed stays with the cooperative — this doesn't claw
     /// anything back. "Remaining escrow returned": whatever's still in the
-    /// contract (zero, if nothing was ever locked) goes back to the buyer,
-    /// via the same balance-based transfer `settle` uses, so it's correct
+    /// contract (zero, if nothing was ever locked) is credited to the buyer,
+    /// via the same balance-based accounting `settle` uses, so it's correct
     /// regardless of claim/reclaim history or how much of the deposit vs.
-    /// remainder had been funded. "Logged": the state transition and the
-    /// transfer both land on the ledger from this call — the transition
-    /// additionally emits `status_changed` like every other transition
-    /// (`set_status`), so an indexer sees the cancellation without having
-    /// to inspect the balance change.
+    /// remainder had been funded. "Logged": the state transition emits
+    /// `status_changed`; the buyer's later successful `withdraw_payout`
+    /// emits the `Payout` event.
     pub fn cancel(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_cancel(&c)?;
         Self::require_once_each(&[&c.buyer, &c.cooperative]);
 
-        // Effects before interaction — see `lock`'s comment for why.
+        let token_client = token::Client::new(&env, &c.token);
+        c.buyer_payout = token_client.balance(&env.current_contract_address());
+        c.buyer_payout_reason = symbol_short!("cancel");
         Self::set_status(&env, &mut c, Status::Cancelled);
         Self::save(&env, &c);
-
-        let token_client = token::Client::new(&env, &c.token);
-        let balance = token_client.balance(&env.current_contract_address());
-        if balance > 0 {
-            token_client.transfer(&env.current_contract_address(), &c.buyer, &balance);
-            Payout {
-                reason: symbol_short!("cancel"),
-                to: c.buyer.clone(),
-                amount: balance,
-            }
-            .publish(&env);
-        }
         Ok(())
     }
 
@@ -3022,6 +3032,13 @@ impl EscrowContract {
             AuthParty::Anyone,
             ActionDeadline::None,
         );
+        if c.buyer_payout > 0 || c.cooperative_payout > 0 {
+            actions.push_back(Action {
+                function: Symbol::new(&env, "withdraw_payout"),
+                auth: AuthParty::BuyerOrCooperative,
+                deadline: ActionDeadline::None,
+            });
+        }
         Self::push_action(
             &env,
             &mut actions,
@@ -3132,9 +3149,9 @@ impl EscrowContract {
 
     // -- internal --
 
-    /// Extends the instance/code entry and the separate persistent
-    /// allocation entry (#98/#232). Both are topped up only when their
-    /// remaining lifetime falls below half the network maximum.
+    /// Requests an extension for the instance/code entry and the separate
+    /// persistent allocation entry (#98/#232). Both are topped up only when
+    /// their remaining lifetime falls below half the network maximum.
     ///
     /// Without this call the entry would keep only the TTL it got at
     /// deploy time (`min_persistent_entry_ttl` ledgers): Soroban does
@@ -3147,10 +3164,12 @@ impl EscrowContract {
     /// used commitments therefore pay extension rent at most once per
     /// half-max lifetime (most calls are a free no-op above the
     /// threshold), and any dormant one is rescued back to full lifetime
-    /// by the first read — including the API's routine
-    /// `get_status`/`get_commitment` polling. A commitment left
-    /// untouched for *longer* than the network max lifetime still
-    /// expires; that residual is inherent to any Soroban storage model
+    /// by the first submitted, successful call. A simulated call (including
+    /// the API's `get_status`/`get_commitment` polling) is never submitted,
+    /// so its simulated TTL extension is discarded. Operators must use the
+    /// external TTL keeper's submitted `stellar contract extend` transaction.
+    /// A commitment left untouched for *longer* than the network max
+    /// lifetime still expires; that residual is inherent to any Soroban storage model
     /// short of periodic keeper transactions, and docs/storage-ttl.md
     /// documents the mitigation (`stellar contract extend`/`restore`
     /// and the watcher pattern) rather than pretending it away.
@@ -3524,12 +3543,12 @@ impl EscrowContract {
     /// Rounding: this floors the combined basis points once, while each
     /// tranche payout floors separately, so up to one token unit per
     /// commitment can stay in the contract after both advances are claimed.
-    /// It is never lost — every terminal path sweeps `balance()`: `cancel`
-    /// and `reclaim_on_nondelivery` refund it to the buyer, `settle` refunds
-    /// it to the buyer unless the settlement obligation still exceeds the
-    /// balance (then it goes to the cooperative with the rest), and
-    /// `expire_remainder_window`/`expire_fx_shortfall_window` sweep it to the
-    /// cooperative. Pinned by `tests/rounding_dust.rs` (#259).
+    /// It is never lost — every terminal path records `balance()`: `cancel`
+    /// and `reclaim_on_nondelivery` credit it to the buyer, `settle` splits
+    /// it between buyer and cooperative, and
+    /// `expire_remainder_window`/`expire_fx_shortfall_window` credit it to
+    /// the cooperative. Each party withdraws its credit separately. Pinned
+    /// by `tests/rounding_dust.rs` (#259).
     fn deposit_amount(c: &Commitment) -> i128 {
         Self::bps_amount(
             c.total_amount,
@@ -3667,9 +3686,8 @@ impl EscrowContract {
     }
 
     fn can_claim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
-        // Asks the table for this method's status rule (which is `None`:
-        // an opened window stays claimable whatever the status has since
-        // become) so every public method's rule is consulted in one place.
+        // The table keeps open windows actionable through lifecycle progress
+        // and disputes, while preventing transfers after terminal allocation.
         Self::require_status(c, Self::claim_tranche_method(t))?;
         if Self::tranche_deadline(c, t) == 0 {
             return Err(Error::NotYetOpened);
@@ -3687,7 +3705,7 @@ impl EscrowContract {
     }
 
     fn can_reclaim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
-        // Ungated row, same reasoning as `can_claim_tranche` above.
+        // Same non-terminal status rule as `can_claim_tranche`.
         Self::require_status(c, Self::reclaim_tranche_method(t))?;
         if Self::tranche_deadline(c, t) == 0 {
             return Err(Error::NotYetOpened);

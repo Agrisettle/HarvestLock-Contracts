@@ -599,6 +599,18 @@ impl Scene {
         self.env.set_auths(&[]);
         self.contract.settle();
     }
+
+    fn withdraw_payout(&self, party: &Party) {
+        let entry = self.entry(
+            party,
+            "withdraw_payout",
+            (party.account.clone(),).into_val(&self.env),
+            &[],
+            party.threshold,
+        );
+        self.env.set_auths(&[entry]);
+        self.contract.withdraw_payout(&party.account);
+    }
 }
 
 // ---------- shared constants ----------
@@ -696,6 +708,7 @@ fn two_of_three_cooperative_completes_the_lifecycle() {
     s.fund_remainder(1);
     s.confirm_delivery();
     s.settle();
+    s.withdraw_payout(&s.cooperative);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(
@@ -778,6 +791,7 @@ fn two_of_three_cooperative_cancel_rejects_below_threshold_then_accepts() {
 
     // Same call, second cooperative signature present.
     s.cancel(1, 2);
+    s.withdraw_payout(&s.buyer);
     assert_eq!(s.contract.get_status(), Status::Cancelled);
     assert_eq!(s.token.balance(&s.buyer.account), TOTAL_AMOUNT);
     assert_eq!(s.token.balance(&s.contract_id), 0);
@@ -868,6 +882,7 @@ fn two_of_three_buyer_completes_the_lifecycle() {
     s.fund_remainder(2);
     s.confirm_delivery();
     s.settle();
+    s.withdraw_payout(&s.cooperative);
 
     assert_eq!(s.contract.get_status(), Status::Settled);
     assert_eq!(s.token.balance(&s.buyer.account), 0);
@@ -932,6 +947,7 @@ fn two_of_three_buyer_cancel_rejects_below_threshold_then_accepts() {
     assert_eq!(s.contract.get_status(), Status::Locked);
 
     s.cancel(2, 1);
+    s.withdraw_payout(&s.buyer);
     assert_eq!(s.contract.get_status(), Status::Cancelled);
     assert_eq!(s.token.balance(&s.buyer.account), TOTAL_AMOUNT);
 }

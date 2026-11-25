@@ -20,6 +20,7 @@ step = lock => ok
 check = contract_balance 300000000
 step = advance 16
 step = reclaim_on_nondelivery => ok
+step = withdraw_payout buyer => ok
 check = buyer_balance 1000000000
 check = coop_balance 0
 check = contract_balance 0

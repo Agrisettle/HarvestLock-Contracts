@@ -714,6 +714,10 @@ fn run_step(scene: &Scene, step: &Step) -> Outcome {
         "resolve_fx_shortfall" => classify!(c.try_resolve_fx_shortfall()),
         "fund_fx_shortfall" => classify!(c.try_fund_fx_shortfall()),
         "expire_fx_shortfall_window" => classify!(c.try_expire_fx_shortfall_window()),
+        "withdraw_payout" => {
+            let who = scene.addr(party_of(&a(0)));
+            classify!(c.try_withdraw_payout(&who))
+        }
         "flag_dispute" => {
             let who = scene.addr(party_of(&a(0)));
             classify!(c.try_flag_dispute(&who))

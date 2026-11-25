@@ -368,6 +368,7 @@ fn the_full_griefing_scenario_pays_only_the_entitled_parties() {
     s.contract
         .confirm_delivery(&common::CONTRACTED_QUANTITY, &0);
     s.contract.settle();
+    s.contract.withdraw_payout(&s.cooperative);
     assert_eq!(s.status(), Status::Settled);
 
     // No stroop ever touched the stranger; the full total is conserved.

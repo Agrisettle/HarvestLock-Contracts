@@ -70,36 +70,80 @@
                   "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
                 },
                 {
-                  "i128": "1000000"
-                },
-                {
-                  "u32": 312
-                },
-                {
-                  "u32": 475
-                },
-                {
-                  "u64": "604800"
-                },
-                {
-                  "u64": "604800"
-                },
-                {
-                  "u64": "10368000"
-                },
-                {
-                  "u32": 1000
-                },
-                {
-                  "vec": [
+                  "map": [
                     {
-                      "u32": 10000
+                      "key": {
+                        "symbol": "advance1_bps"
+                      },
+                      "val": {
+                        "u32": 2330
+                      }
                     },
                     {
-                      "u32": 9000
+                      "key": {
+                        "symbol": "advance2_bps"
+                      },
+                      "val": {
+                        "u32": 2655
+                      }
                     },
                     {
-                      "u32": 7500
+                      "key": {
+                        "symbol": "claim_window_secs"
+                      },
+                      "val": {
+                        "u64": "604800"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "contracted_quantity"
+                      },
+                      "val": {
+                        "u32": 1000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "delivery_window_secs"
+                      },
+                      "val": {
+                        "u64": "10368000"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "grade_price_bps"
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "u32": 10000
+                          },
+                          {
+                            "u32": 9000
+                          },
+                          {
+                            "u32": 7500
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "remainder_window_secs"
+                      },
+                      "val": {
+                        "u64": "604800"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "total_amount"
+                      },
+                      "val": {
+                        "i128": "1000000"
+                      }
                     }
                   ]
                 },
@@ -136,7 +180,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                     },
                     {
-                      "i128": "78700"
+                      "i128": "498500"
                     }
                   ]
                 }
@@ -163,6 +207,27 @@
         }
       ]
     ],
+    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+              "function_name": "withdraw_payout",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [],
     [],
     [],
     []
@@ -267,6 +332,26 @@
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
               "key": {
                 "ledger_key_nonce": {
+                  "nonce": "4270020994084947596"
+                }
+              },
+              "durability": "temporary",
+              "val": "void"
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6311999
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "ledger_key_nonce": {
                   "nonce": "4837995959683129791"
                 }
               },
@@ -328,7 +413,7 @@
                               "symbol": "advance1_bps"
                             },
                             "val": {
-                              "u32": 312
+                              "u32": 2330
                             }
                           },
                           {
@@ -360,7 +445,7 @@
                               "symbol": "advance2_bps"
                             },
                             "val": {
-                              "u32": 475
+                              "u32": 2655
                             }
                           },
                           {
@@ -397,6 +482,22 @@
                           },
                           {
                             "key": {
+                              "symbol": "buyer_payout"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "buyer_payout_reason"
+                            },
+                            "val": {
+                              "symbol": "forfeit"
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "claim_window_secs"
                             },
                             "val": {
@@ -417,6 +518,22 @@
                             },
                             "val": {
                               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "cooperative_payout"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "cooperative_payout_reason"
+                            },
+                            "val": {
+                              "symbol": "none"
                             }
                           },
                           {

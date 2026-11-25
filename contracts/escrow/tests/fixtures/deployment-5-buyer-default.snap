@@ -34,6 +34,7 @@ step = fund_remainder => err(RemainderWindowPassed)
 step = expire_remainder_window => ok
 # recorded: the sweep is the contract's *current* balance (200,000,000), not a
 # naive full-total figure, and the status is Defaulted.
+step = withdraw_payout cooperative => ok
 check = coop_balance 300000000
 check = contract_balance 0
 check = buyer_balance 700000000

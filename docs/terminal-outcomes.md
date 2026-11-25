@@ -14,6 +14,12 @@ is not vendored here). Where the two disagree, the contract decides who
 gets paid and the API decides what is recorded about it — they cannot
 disagree about an amount, only about whether anyone remembers it.
 
+**Pull payout semantics:** terminal calls record each party's entitlement;
+they do not transfer the remaining balance inline. The amounts described
+below are what each party can withdraw with `withdraw_payout`. A failed
+recipient transfer leaves that party's credit retryable and does not block
+the other beneficiary.
+
 Companion docs from the same review pass:
 [`griefing-and-inaction.md`](./griefing-and-inaction.md) (what each party
 can do by doing nothing), [`dispute-stalling.md`](./dispute-stalling.md)
@@ -34,12 +40,12 @@ late-delivery exception in §5.4).
 - **`Settled` is the only status where the cooperative can receive more
   than it already claimed**, and the only one where the buyer can get a
   refund larger than an unclaimed deposit.
-- **`Defaulted` always sweeps 100% of the contract balance to the
+- **`Defaulted` always credits 100% of the contract balance to the
   cooperative**, including any advance tranche whose claim window has
   lapsed but which the buyer has not yet reclaimed. That is the buyer's
   most valuable right to lose, and it is lost by inaction, not by a
   judgment of fault.
-- **`Forfeited` always sweeps 100% of the contract balance back to the
+- **`Forfeited` always credits 100% of the contract balance to the
   buyer**, and never claws back an advance the cooperative already
   claimed. The cooperative's forfeiture cost is therefore capped at
   "unpaid remainder plus the strike", not "everything".
@@ -83,6 +89,10 @@ Two conventions matter when reading the tables:
   than recovering an over-advance, and `cancel`/`Forfeited` never touch
   paid advances. The contract's downside protection for the buyer is the
   *unpaid* remainder, never the paid advances.
+- Open tranche windows remain claimable or reclaimable through disputes, but
+  terminal transitions close any unresolved windows when assigning the
+  remaining escrow. This prevents a later tranche transfer from spending
+  funds already credited to a terminal beneficiary.
 
 ## 2. The four terminal statuses at a glance
 
@@ -222,7 +232,7 @@ buyer never reclaimed (200,000), remainder never funded.
 | Cooperative | 200,000 swept + 150,000 already claimed | **350,000 total** |
 | Operator | 0 | unchanged |
 
-The 200,000 sweep is the sharp edge. `expire_remainder_window` transfers
+The 200,000 credit is the sharp edge. `expire_remainder_window` assigns
 the *whole contract balance*, not "the deposit minus what the cooperative
 is owed", and it does not require the tranches to be resolved the way
 `settle` does. If tranche 2's window had lapsed, the buyer already held
@@ -232,7 +242,8 @@ the sweep keeps it; one who waits loses it. The race is documented in
 [`dispute-frontrunning.md`](./dispute-frontrunning.md).
 
 If the buyer had reclaimed the lapsed tranche first, the contract
-balance at default would be 0 and the cooperative would keep only the
+balance at default would be 0 and the cooperative would receive no new
+credit, keeping only the
 150,000 it had claimed. **The default penalty is therefore not a fixed
 amount — it is whatever happens to be sitting in the contract when
 someone calls `expire_remainder_window`.**

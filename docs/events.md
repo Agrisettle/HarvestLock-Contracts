@@ -116,7 +116,7 @@ indexed topic you want to narrow.
 | Event | Emitted by | When |
 | --- | --- | --- |
 | `status_changed` | every status transition via `set_status` | `lock`, `release_advance_1/2`, `mark_checkpoint`, `ready_for_delivery`, `confirm_delivery`, `settle`, `cancel`, `expire_remainder_window`, `expire_fx_shortfall_window`, `reclaim_on_nondelivery`, `expire_delivery_window`, `flag_dispute`, `resolve_dispute`, `expire_dispute_window` |
-| `payout` | `settle`, `cancel`, `expire_remainder_window`, `expire_fx_shortfall_window`, `reclaim_on_nondelivery`, `expire_delivery_window` | after each non-zero transfer to a party |
+| `payout` | `withdraw_payout` | after each non-zero transfer to a beneficiary; reason identifies the terminal call that recorded the credit |
 | `tranche_claimed` | `claim_advance_1`, `claim_advance_2` | after the tranche transfer |
 | `tranche_reclaimed` | `reclaim_advance_1`, `reclaim_advance_2` | after the refund transfer |
 | `remainder_funded` | `fund_remainder` | after the second deposit |
@@ -154,15 +154,16 @@ on a resume: `resolve_dispute`/`expire_dispute_window` transition
 
 ### `payout`
 
-A balance-moving transfer to a party in a terminal or payout path. One event per
-non-zero leg; `settle` can emit two in one call (cooperative payment and buyer
-shortfall refund).
+A balance-moving transfer to a beneficiary. Terminal calls only record payout
+credits; each beneficiary withdraws independently with `withdraw_payout`. One
+event is emitted per non-zero leg, with the original terminal-path reason
+preserved in the credit.
 
 - Topics: `[symbol("payout"), reason: Symbol @topic]`
 - Data: `{ to: Address, amount: i128 }`
 - `reason` values:
 
-  | `reason` | Emitted by | Recipient |
+  | `reason` | Recorded by | Recipient |
   | --- | --- | --- |
   | `coop_pay` | `settle` | cooperative |
   | `refund` | `settle` | buyer |
