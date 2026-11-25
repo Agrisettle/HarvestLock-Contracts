@@ -74,8 +74,10 @@ running code in this repo's own test suite:
 
 ## Entry-by-entry table (post-fix state)
 
-One instance entry holds everything; rows are the *logical* keys so the
-table still answers the issue's "every key" framing.
+The commitment and oracle configuration share the instance entry; the
+allocation ledger is deliberately isolated in its own persistent entry. Rows
+still identify the logical keys so the table answers the issue's "every key"
+framing.
 
 | Ledger entry / key | Durability | Written at (all sites) | Read at | TTL before #98 | TTL now |
 |---|---|---|---|---|---|
