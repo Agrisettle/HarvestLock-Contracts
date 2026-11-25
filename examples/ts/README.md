@@ -74,9 +74,8 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account buyer --network tes
   initialize \
   --buyer "$BUYER" --cooperative "$COOP" --warehouse_operator "$WAREHOUSE" \
   --token CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
-  --total_amount 100000000 --advance1_bps 1500 --advance2_bps 2000 \
-  --claim_window_secs 3600 --remainder_window_secs 3600 --delivery_window_secs 86400 \
-  --contracted_quantity 1000 --grade_price_bps '[10000,9000,7500]' --oracle_config null
+  --terms '{"total_amount":100000000,"advance1_bps":1500,"advance2_bps":2000,"claim_window_secs":3600,"remainder_window_secs":3600,"delivery_window_secs":86400,"contracted_quantity":1000,"grade_price_bps":[10000,9000,7500]}' \
+  --oracle_config null
 ```
 
 `lock` pulls the buyer's deposit in the native-XLM SAC token
@@ -123,9 +122,8 @@ stellar contract invoke --id "$SHARED_CONTRACT_ID" --source-account buyer --netw
   initialize \
   --buyer "$BUYER" --cooperative "$BUYER" --warehouse_operator "$WAREHOUSE" \
   --token CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
-  --total_amount 100000000 --advance1_bps 1500 --advance2_bps 2000 \
-  --claim_window_secs 3600 --remainder_window_secs 3600 --delivery_window_secs 86400 \
-  --contracted_quantity 1000 --grade_price_bps '[10000,9000,7500]' --oracle_config null
+  --terms '{"total_amount":100000000,"advance1_bps":1500,"advance2_bps":2000,"claim_window_secs":3600,"remainder_window_secs":3600,"delivery_window_secs":86400,"contracted_quantity":1000,"grade_price_bps":[10000,9000,7500]}' \
+  --oracle_config null
 
 cd examples/ts
 COOPERATIVE_SECRET="$BUYER_SECRET" CONTRACT_ID="$SHARED_CONTRACT_ID" npm start

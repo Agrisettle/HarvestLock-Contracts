@@ -66,7 +66,7 @@
 
 #![cfg(test)]
 
-use harvestlock_escrow::{EscrowContract, EscrowContractClient, Status};
+use harvestlock_escrow::{CommitmentTerms, EscrowContract, EscrowContractClient, Status};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{symbol_short, token, Address, Env, Vec};
 
@@ -267,14 +267,16 @@ fn fee_on_transfer_fixture() -> Fixture {
         &cooperative,
         &warehouse,
         &token_id,
-        &TOTAL_AMOUNT,
-        &ADVANCE1_BPS,
-        &ADVANCE2_BPS,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL_AMOUNT,
+            advance1_bps: ADVANCE1_BPS,
+            advance2_bps: ADVANCE2_BPS,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &None,
     );
 
@@ -306,14 +308,16 @@ fn misreporting_fixture() -> Fixture {
         &cooperative,
         &warehouse,
         &token_id,
-        &TOTAL_AMOUNT,
-        &ADVANCE1_BPS,
-        &ADVANCE2_BPS,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL_AMOUNT,
+            advance1_bps: ADVANCE1_BPS,
+            advance2_bps: ADVANCE2_BPS,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &None,
     );
 

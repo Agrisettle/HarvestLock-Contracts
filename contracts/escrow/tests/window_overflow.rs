@@ -2,7 +2,7 @@
 //! length to a ledger timestamp: the resulting deadline must never
 //! overflow `u64`.
 //!
-//! The four in-scope addition sites, confirmed against `src/lib.rs`:
+//! The five in-scope addition sites, confirmed against `src/lib.rs`:
 //!
 //! - `initialize`: `delivery_deadline = created_at + delivery_window_secs`
 //!   (the only addition computed from `initialize`'s own arguments; the
@@ -16,13 +16,15 @@
 //! - `flag_dispute`: `dispute_deadline = now + remainder_window_secs`
 //!   (the documented reuse of the remainder window as the dispute
 //!   freeze's bound).
-//!
-//! Out of scope, deliberately: `resolve_fx_shortfall`'s
-//! `fx_shortfall_deadline = now + remainder_window_secs` is the
-//! identical expression but only reachable on an oracle-configured
-//! commitment — the oracle plumbing belongs to
-//! `oracle_fault_injection.rs`, and the arithmetic shape itself is what
-//! gets pinned here.
+//! - `resolve_fx_shortfall`: `fx_shortfall_deadline = now +
+//!   remainder_window_secs`, the same documented reuse once more. This was
+//!   the fifth site the file used to leave out as "the identical
+//!   expression" because it only runs on an oracle-configured commitment;
+//!   the same was true of the other four, and each still got its own
+//!   exact-sum-or-atomic-abort property. It gets one here too, using the
+//!   minimal mock Reflector in `common/mod.rs`, because an
+//!   `fx_shortfall_deadline` that wrapped would make the buyer's cure window
+//!   look instantly expired — which is a default.
 //!
 //! **The property.** For arbitrary ledger timestamps and arbitrary
 //! window lengths — including deliberately adversarial values at and
@@ -57,7 +59,7 @@
 //! error — is treated as a refusal rather than crashing the property
 //! run.
 //!
-//! **Finding — nothing caught; overflow safety confirmed at all four
+//! **Finding — nothing caught; overflow safety confirmed at all five
 //! sites.** The generated properties (plus the pinned `u64::MAX` edge
 //! cases at the bottom, which cover the exact-boundary inputs random
 //! generation only hits by luck) confirm: every in-scope addition
@@ -76,11 +78,23 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{DELIVERY_WINDOW, GRADE_PRICE_BPS, TOTAL_AMOUNT, WINDOW};
-use harvestlock_escrow::{Error, EscrowContract, EscrowContractClient, Status};
+use common::{mock_oracle, DELIVERY_WINDOW, GRADE_PRICE_BPS, TOTAL_AMOUNT, WINDOW};
+use harvestlock_escrow::{
+    CommitmentTerms, Error, EscrowContract, EscrowContractClient, OracleConfig, Status,
+};
 use proptest::prelude::*;
 use soroban_sdk::testutils::{Address as _, EnvTestConfig, Ledger as _};
-use soroban_sdk::{token, Address, ConversionError, Env, InvokeError, Vec};
+use soroban_sdk::{token, Address, ConversionError, Env, InvokeError, Symbol, Vec};
+
+/// 1.75 at the oracle's 14 decimals — the price `oracle_fault_injection.rs`
+/// quotes, reused so the conversion leaves a real shortfall.
+const ORACLE_PRICE: i128 = 175_000_000_000_000;
+const ORACLE_MAX_AGE: u64 = 3_600;
+/// 1_000_000 fiat units at 1.75 convert to 1_750_000 settlement units,
+/// against 700_000 escrowed at `Delivered` (the 300_000 deposit having been
+/// claimed): a 750_000 shortfall. That is what makes this site take the
+/// `shortfall > 0` branch that writes `fx_shortfall_deadline` at all.
+const ORACLE_DENOMINATED: i128 = 1_000_000;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 // ---------- strategies ----------
@@ -242,16 +256,69 @@ impl Case {
             &self.cooperative,
             &self.warehouse,
             &self.token_address,
-            &TOTAL_AMOUNT,
-            &1_500,
-            &2_000,
-            &claim,
-            &remainder,
-            &delivery,
-            &1_000,
-            &Vec::from_array(&self.env, GRADE_PRICE_BPS),
+            &CommitmentTerms {
+                total_amount: TOTAL_AMOUNT,
+                advance1_bps: 1_500,
+                advance2_bps: 2_000,
+                claim_window_secs: claim,
+                remainder_window_secs: remainder,
+                delivery_window_secs: delivery,
+                contracted_quantity: 1_000,
+                grade_price_bps: Vec::from_array(&self.env, GRADE_PRICE_BPS),
+            },
             &None,
         );
+    }
+
+    /// The same standard terms with an `oracle_config` pointing at a fresh
+    /// `mock_oracle::MockOracle`, returned so the caller can stamp a quote at
+    /// whatever timestamp it is about to use. `claim_window_secs` stays the
+    /// fixed `WINDOW` — only the remainder window is generated here, since
+    /// that is the value this site adds to a timestamp.
+    fn initialize_with_oracle_at(&self, remainder: u64) -> mock_oracle::MockOracleClient<'static> {
+        self.env.ledger().set_timestamp(0);
+        let oracle_id = self.env.register(mock_oracle::MockOracle, ());
+        let oracle = mock_oracle::MockOracleClient::new(&self.env, &oracle_id);
+        oracle.set_price(&ORACLE_PRICE, &0);
+        self.contract.initialize(
+            &self.buyer,
+            &self.cooperative,
+            &self.warehouse,
+            &self.token_address,
+            &CommitmentTerms {
+                total_amount: TOTAL_AMOUNT,
+                advance1_bps: 1_500,
+                advance2_bps: 1_500,
+                claim_window_secs: WINDOW,
+                remainder_window_secs: remainder,
+                delivery_window_secs: DELIVERY_WINDOW,
+                contracted_quantity: 1_000,
+                grade_price_bps: Vec::from_array(&self.env, GRADE_PRICE_BPS),
+            },
+            &Some(OracleConfig {
+                oracle_contract: oracle_id,
+                price_asset: Symbol::new(&self.env, "NGN"),
+                max_age_secs: ORACLE_MAX_AGE,
+                denominated_amount: ORACLE_DENOMINATED,
+            }),
+        );
+        oracle
+    }
+
+    /// Straight through to `Delivered` with both tranches claimed and the
+    /// remainder funded — the first state `resolve_fx_shortfall` accepts.
+    /// Always at timestamp 0, so the windows used along the way can't
+    /// overflow.
+    fn drive_to_delivered(&self) {
+        self.contract.lock();
+        self.contract.release_advance_1();
+        self.contract.claim_advance_1();
+        self.contract.mark_checkpoint();
+        self.contract.release_advance_2();
+        self.contract.claim_advance_2();
+        self.contract.ready_for_delivery();
+        self.contract.fund_remainder();
+        self.contract.confirm_delivery(&1_000, &0);
     }
 
     /// Locked, tranche 1 opened and claimed, checkpoint marked — the
@@ -291,14 +358,16 @@ proptest! {
                 &c.cooperative,
                 &c.warehouse,
                 &c.token_address,
-                &TOTAL_AMOUNT,
-                &1_500,
-                &2_000,
-                &WINDOW,
-                &WINDOW,
-                &w,
-                &1_000,
-                &Vec::from_array(&c.env, GRADE_PRICE_BPS),
+                &CommitmentTerms {
+                    total_amount: TOTAL_AMOUNT,
+                    advance1_bps: 1_500,
+                    advance2_bps: 2_000,
+                    claim_window_secs: WINDOW,
+                    remainder_window_secs: WINDOW,
+                    delivery_window_secs: w,
+                    contracted_quantity: 1_000,
+                    grade_price_bps: Vec::from_array(&c.env, GRADE_PRICE_BPS),
+                },
                 &None,
             ))
         });
@@ -451,6 +520,60 @@ proptest! {
             }
         }
     }
+
+    /// `remainder_window_secs + now` at `resolve_fx_shortfall`: the buyer's
+    /// FX cure deadline is the exact sum, or nothing is recorded at all.
+    /// This is the fifth site — the one this file previously documented as
+    /// out of scope for want of the oracle plumbing.
+    #[test]
+    fn fx_shortfall_deadline_is_the_exact_sum_or_nothing_changes(
+        t in arb_timestamp(),
+        w in arb_window(),
+    ) {
+        let c = case();
+        let oracle = c.initialize_with_oracle_at(w);
+        c.drive_to_delivered();
+        c.env.ledger().set_timestamp(t);
+        // A quote stamped "now" is fresh at whatever `t` this case drew;
+        // setting it is a separate invocation, so the timestamp survives
+        // into `resolve_fx_shortfall` below.
+        oracle.set_price(&ORACLE_PRICE, &t);
+
+        let outcome = attempt(|| classify(c.contract.try_resolve_fx_shortfall()));
+        verify_outcome(
+            outcome,
+            exact_deadline(t, w),
+            t,
+            w,
+            "resolve_fx_shortfall/remainder_window",
+        )?;
+
+        let st = c.contract.get_commitment();
+        match outcome {
+            Outcome::Accepted => {
+                prop_assert!(st.fx_resolved);
+                // The fixture is chosen so resolution always finds a real
+                // shortfall, which is the branch that writes the deadline.
+                // Pinning the amount rather than just `> 0` is what makes the
+                // oracle's `decimals` part of this property: 1_000_000
+                // denominated at 175_000_000_000_000 / 10^14 converts to
+                // 1_750_000, minus the 300_000 already claimed and the
+                // 700_000 still escrowed leaves 750_000. A mock oracle that
+                // quoted another scale (0 or 1 decimals) moves this number.
+                prop_assert_eq!(st.fx_shortfall_amount, 750_000);
+                prop_assert_eq!(st.fx_shortfall_deadline, t + w);
+                prop_assert!(st.fx_shortfall_deadline >= t);
+                prop_assert_eq!(st.status, Status::Delivered);
+            }
+            Outcome::ContractRefusal | Outcome::Aborted => {
+                // Atomic: no deadline, and no half-resolved FX state either.
+                prop_assert!(!st.fx_resolved);
+                prop_assert_eq!(st.fx_shortfall_amount, 0);
+                prop_assert_eq!(st.fx_shortfall_deadline, 0);
+                prop_assert_eq!(st.status, Status::Delivered);
+            }
+        }
+    }
 }
 
 // ---------- pinned u64::MAX edge cases ----------
@@ -487,14 +610,16 @@ fn initialize_refuses_every_one_second_overflow() {
                 &c.cooperative,
                 &c.warehouse,
                 &c.token_address,
-                &TOTAL_AMOUNT,
-                &1_500,
-                &2_000,
-                &WINDOW,
-                &WINDOW,
-                &w,
-                &1_000,
-                &Vec::from_array(&c.env, GRADE_PRICE_BPS),
+                &CommitmentTerms {
+                    total_amount: TOTAL_AMOUNT,
+                    advance1_bps: 1_500,
+                    advance2_bps: 2_000,
+                    claim_window_secs: WINDOW,
+                    remainder_window_secs: WINDOW,
+                    delivery_window_secs: w,
+                    contracted_quantity: 1_000,
+                    grade_price_bps: Vec::from_array(&c.env, GRADE_PRICE_BPS),
+                },
                 &None,
             ))
         });
@@ -555,6 +680,38 @@ fn remainder_deadline_pinned_boundary() {
     let st = bad.contract.get_commitment();
     assert_eq!(st.remainder_deadline, 0);
     assert_eq!(st.status, Status::Advance2Released);
+}
+
+#[test]
+fn fx_shortfall_deadline_pinned_boundary() {
+    // `u64::MAX - 1` plus a one-second remainder window lands exactly on
+    // `u64::MAX`, which is a legal deadline and must be stored as-is.
+    let ok = case();
+    let oracle = ok.initialize_with_oracle_at(1);
+    ok.drive_to_delivered();
+    ok.env.ledger().set_timestamp(u64::MAX - 1);
+    oracle.set_price(&ORACLE_PRICE, &(u64::MAX - 1));
+    ok.contract.resolve_fx_shortfall();
+    let st = ok.contract.get_commitment();
+    assert!(st.fx_resolved, "the fixture must produce a real shortfall");
+    assert_eq!(st.fx_shortfall_deadline, u64::MAX);
+
+    // One second later the same addition overflows: the call must abort
+    // atomically, leaving no deadline and no resolved FX state behind.
+    let bad = case();
+    let oracle = bad.initialize_with_oracle_at(1);
+    bad.drive_to_delivered();
+    bad.env.ledger().set_timestamp(u64::MAX);
+    oracle.set_price(&ORACLE_PRICE, &u64::MAX);
+    assert!(matches!(
+        attempt(|| classify(bad.contract.try_resolve_fx_shortfall())),
+        Outcome::ContractRefusal | Outcome::Aborted
+    ));
+    let st = bad.contract.get_commitment();
+    assert!(!st.fx_resolved);
+    assert_eq!(st.fx_shortfall_amount, 0);
+    assert_eq!(st.fx_shortfall_deadline, 0);
+    assert_eq!(st.status, Status::Delivered);
 }
 
 #[test]

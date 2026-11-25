@@ -16,7 +16,9 @@
 //! which party receives it on each path, rather than leaving the behavior to
 //! be inferred from the balance-based sweeps.
 
-use harvestlock_escrow::{Error, EscrowContract, EscrowContractClient, OracleConfig, Status};
+use harvestlock_escrow::{
+    CommitmentTerms, Error, EscrowContract, EscrowContractClient, OracleConfig, Status,
+};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{token, Address, Env, Symbol, Vec};
 
@@ -58,14 +60,16 @@ fn world() -> World {
         &cooperative,
         &warehouse,
         &token_address,
-        &TOTAL,
-        &ADVANCE_BPS,
-        &ADVANCE_BPS,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL,
+            advance1_bps: ADVANCE_BPS,
+            advance2_bps: ADVANCE_BPS,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &None,
     );
 
@@ -213,14 +217,16 @@ fn expire_fx_shortfall_window_sweeps_the_dust_to_the_cooperative() {
         &cooperative,
         &warehouse,
         &token_address,
-        &TOTAL,
-        &ADVANCE_BPS,
-        &ADVANCE_BPS,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL,
+            advance1_bps: ADVANCE_BPS,
+            advance2_bps: ADVANCE_BPS,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),

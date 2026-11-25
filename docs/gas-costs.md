@@ -158,6 +158,110 @@ envs, so this baseline does not add 34 footprint artifacts per run.
 
 ---
 
+## Worst-case inputs vs per-transaction limits — `tests/resource_limits.rs` (#224)
+
+`MAX_ALLOCATION_MEMBERS` (200) and `MAX_GRADE_ENTRIES` (16) were chosen from
+the PRD's product scale, not from chain limits. This section answers the
+question those caps left open: **does a legal commitment at both maxima fit
+inside one Soroban transaction, with room to spare?**
+
+### Limits and source
+
+The limits below were read live from testnet's `ConfigSetting` ledger entries
+over JSON-RPC (`getLedgerEntries`, key `LedgerKey::ConfigSetting`) on
+**2026-11-24**, at latest ledger **5,901,514**. They agree with the SDK's
+default `InvocationResourceLimits::mainnet()` snapshot (`soroban-sdk` 29.0.1,
+`src/testutils/cost_estimate.rs`, taken 2026-07-10) and with
+[Stellar Lab's network limits](https://lab.stellar.org/network-limits). The
+test declares them as named constants with this source attached, so a future
+network change has to be adopted deliberately rather than silently inherited
+from a dependency update.
+
+| Resource | `ConfigSetting` field | Testnet value |
+| --- | --- | ---: |
+| Instructions | `ConfigSettingContractComputeV0.txMaxInstructions` | 400,000,000 |
+| Memory | `ConfigSettingContractComputeV0.txMemoryLimit` | 41,943,040 B (40 MiB) |
+| Read entries | `ConfigSettingContractLedgerCostV0.txMaxDiskReadEntries` | 200 |
+| Read bytes | `ConfigSettingContractLedgerCostV0.txMaxDiskReadBytes` | 200,000 B |
+| Write entries | `ConfigSettingContractLedgerCostV0.txMaxWriteLedgerEntries` | 200 |
+| Write bytes | `ConfigSettingContractLedgerCostV0.txMaxWriteBytes` | 132,096 B |
+| Transaction size | `ConfigSettingContractBandwidthV0.txMaxBytes` | 132,096 B |
+| Ledger entry size | `ConfigSettingContractDataEntrySizeBytes` | 65,536 B |
+| Footprint entries | `ConfigSettingContractLedgerCostExtV0.txMaxFootprintEntries` | 400 |
+
+### Measured worst cases
+
+The suite meters exactly one successful top-level call at a time. `initialize`
+is measured on an uninitialized instance; `set_allocation` is measured after a
+16-grade `initialize`, so the instance entry already carries the schedule; and
+`settle` is measured after a full lifecycle on a commitment holding the
+200-member allocation **and** the 16 grades. All three are the genuine success
+path, not a cheaper rejection.
+
+| Metric | `initialize` (16 grades) | `set_allocation` (200) | `settle` (both) | Limit | Worst used |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Instructions | 182,890 | 1,504,073 | 3,515,841 | 400,000,000 | 0.9% |
+| Memory bytes | 101,879 | 1,083,790 | 1,600,333 | 41,943,040 | 3.8% |
+| Read entries (host memory reads) | 4 | 4 | 5 | 200 | 2.5% |
+| Read bytes (restore floor) | 1,624 | 21,668 | 21,668 | 200,000 | 10.8% |
+| Write entries | 2 | 2 | 3 | 200 | 1.5% |
+| Write bytes | 1,696 | 21,740 | 22,116 | 132,096 | 16.7% |
+| Ledger entry bytes | 1,624 | 21,668 | 21,668 | 65,536 | **33.1%** |
+| Transaction bytes (modelled) | 1,676 | 21,096 | 1,076 | 132,096 | 16.0% |
+| Footprint entries (read + write) | 6 | 6 | 8 | 400 | 2.0% |
+
+The tightest resource is the **ledger entry**, at 21,668 bytes — 33.1% of the
+65,536-byte cap, leaving **43,868 bytes** (67% of the cap) of headroom. That
+is the same 200-member allocation the existing
+`instance_storage_layout_stays_well_below_the_entry_size_limit` test bounds at
+50%, so the two checks agree. Instructions and memory are far below their
+limits (under 1% and 4% respectively), and `set_allocation`'s transaction is
+16% of the size limit. **No cap change is proposed**: both maxima are
+deliverable, with more than 2× headroom on every resource measured.
+
+The test asserts every row at **50% of the limit**, not at the limit itself, so
+a future field does not merely avoid aborting today — it has to fit the same
+headroom the caps were accepted with.
+
+### What these numbers are, and are not
+
+- **Instructions and memory are host-model figures for native Rust execution**
+  under the test host. The SDK notes they understate the WASM-equivalent cost
+  (no VM instantiation, no Wasm reads/rent). A 0.9%-of-limit CPU figure is not
+  a promise that a deployed WASM call costs the same; it is a demonstration
+  that the *input size* the caps allow is nowhere near the instruction budget.
+  Absolute testnet fees stay in the sessions above.
+- **Read bytes need a stated substitution.** The test host keeps live Soroban
+  state in memory, and its own `InvocationResources::disk_read_bytes` doc says
+  disk reads are "most of the time 0 or almost 0" there. The suite therefore
+  uses the serialized instance entry — the entry a real host would have to
+  restore — as the restore-size floor. That is conservative for these calls,
+  whose only large read is that entry, and it is labelled as such in the test.
+  Read **entries** are the host's in-memory count, which is an upper bound on
+  the disk-read entries the network limit applies to.
+- **Transaction size is modelled, not simulated.** The host's
+  `CostEstimate::resources()` explicitly does not model transaction size. The
+  suite measures the XDR size of the `InvokeContractArgs` the transaction must
+  carry (the 200-member list dominates at 20,072 bytes) and adds a fixed 1 KiB
+  allowance for the envelope, footprint keys and one signature. The ledger
+  entry's *contents* are not part of the transaction envelope; they are
+  measured separately in the ledger-entry row.
+
+### Reproduce
+
+```bash
+cd contracts/escrow
+cargo test --test resource_limits -- --nocapture
+```
+
+The suite prints the full used/limit/margin table for each stage and fails if
+any row exceeds the stated 50% bound. It also asserts that the `settle` fixture
+really does hold both maxima in one instance entry, so a future storage-layout
+change that moved `Allocation` to its own key would fail loudly instead of
+making the `settle` figure look better than the commitment it claims to model.
+
+---
+
 ## Results — delivery group (`mark_checkpoint`, `confirm_delivery`)
 
 Session 2, measured against instance

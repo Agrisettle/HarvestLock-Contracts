@@ -130,11 +130,15 @@ log() {
 }
 
 run_tx() {
-  if [[ "$QUIET" -eq 1 ]]; then
-    "$@" >/dev/null 2>&1
-  else
-    "$@" >/dev/null
-  fi
+  local out=""
+  for attempt in {1..3}; do
+    if out="$("$@" 2>&1)"; then
+      return 0
+    fi
+    sleep 3
+  done
+  echo "$out" >&2
+  return 1
 }
 
 if ! command -v stellar >/dev/null 2>&1; then

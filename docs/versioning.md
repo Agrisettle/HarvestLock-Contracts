@@ -114,8 +114,12 @@ storage struct `Commitment` itself, so adding a field for a storage reason is
 silently an ABI change for every indexer. `get_commitment_view` returns
 `CommitmentView` instead, with:
 
-- an explicit `schema_version` (currently `1`, mirroring
-  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`);
+- an explicit `schema_version` (currently `2`, mirroring
+  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`). Version `2` is #270:
+  `terms.delivery_deadline` became the agreed `terms.delivery_window_secs`,
+  making `terms` the very same `CommitmentTerms` type `initialize` accepts;
+  version-1 readers recompute the absolute deadline as
+  `created_at + terms.delivery_window_secs`. No other field moved;
 - semantic sub-structs — `parties`, `terms`, `tranches`, `funding`,
   `delivery`, `fx`, `dispute` — instead of storage order;
 - a documented stability promise: fields are only added, removed, renamed, or
@@ -125,6 +129,26 @@ silently an ABI change for every indexer. `get_commitment_view` returns
 `get_commitment` stays for backward compatibility and remains the canonical
 on-chain record. New clients should read the view and reject a
 `schema_version` they don't understand.
+
+### 2.2 Event shapes (#214)
+
+Events are part of the ABI even though they are not function signatures.
+Indexers decode them by topic position and data key, so renaming a field,
+reordering a `#[topic]`, moving a field between topic and data, or changing a
+field's XDR type silently changes what every consumer reads — the event still
+decodes, it just means something else.
+
+**Therefore an event-shape change is a MINOR bump marked `**BREAKING**`, even
+when the exported functions are untouched.** Adding a wholly new event is the
+additive case (MINOR, not `**BREAKING**`); changing an existing one is not
+purely additive. This is the same rule §2 already applies to return shapes,
+stated here because §2's function-centric wording did not mention events.
+
+The mechanical guard is [`docs/events.md`](./events.md) and
+`contracts/escrow/events.snapshot`: `events_snapshot.rs` fails when any event's
+serialized topics or data differ from the committed snapshot, and the re-bless
+instruction is printed with the failure. Re-bless only as part of a deliberate
+MINOR `**BREAKING**` deployment, and update `docs/events.md` in the same PR.
 
 The view is a projection of the same single instance-storage read, not a
 second source of truth. Measured on the test host, `get_commitment` costs

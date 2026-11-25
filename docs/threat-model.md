@@ -83,6 +83,10 @@ upgrade path, and no privileged entry point, so the authentication surface
 oracle arrow is the only one carrying untrusted external data**, and it is
 bounded by a caller-chosen freshness bound rather than trusted outright.
 
+[`architecture.md`](./architecture.md) draws these boundaries onto the full
+component picture (API deploy/sign/read paths, token issuer, observers), one
+linked section per arrow.
+
 ## Actors
 
 | Actor | What they control | What they can do to this contract | What they cannot do |

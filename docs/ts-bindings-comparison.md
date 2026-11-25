@@ -49,8 +49,12 @@ repo deliberately — it belongs to the app-integration effort, not the
 contract). It replicates the app's encoders verbatim, feeds the same
 inputs through both paths, and compares XDR bytes:
 
-- all **13 `initialize` arguments** (the app hand-builds the full
-  argument vector — `initializeArgs`, `api/src/stellar/deploy.ts:169`)
+- all **13 `initialize` arguments** as they stood before #270 (the app
+  hand-builds the full argument vector — `initializeArgs`,
+  `api/src/stellar/deploy.ts:169`). #270 collapsed the eight numeric/list
+  terms into one `CommitmentTerms` struct, which removes the positional-swap
+  class this bullet exists to catch; the recorded transcript below is the
+  pre-#270 shape.
 - the **`set_allocation` members vector** (`Vec<AllocationMember>`)
 - **`oracle_config = None`** (the `Option` path)
 

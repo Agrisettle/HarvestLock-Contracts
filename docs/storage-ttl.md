@@ -15,23 +15,20 @@ that order, because the headline finding was a real gap.
 
 The issue asked to enumerate "every key written via
 `env.storage().persistent()`". The honest answer after grepping every
-call site: **the contract uses `env.storage().persistent()` zero times,
-and `env.storage().temporary()` zero times.** All contract state lives
-in **instance storage** (`env.storage().instance()`), and that turns the
-audit from "N entries, N TTL strategies" into something much simpler —
+call site: the commitment and oracle configuration use instance storage,
+while the allocation ledger uses one separate persistent entry. The audit
+therefore changes from "N entries, N TTL strategies" into something much simpler —
 and much worse before this fix:
 
-1. There are exactly three keys — `DataKey::Commitment`,
-   `DataKey::Allocation`, `DataKey::OracleConfig` — and *all three* are
-   fields of a single `ContractData` ledger entry (the contract instance
-   entry itself). Instance storage isn't one ledger entry per key; the
-   whole key/value map rides inside the instance. There is also no
+1. `DataKey::Commitment` and `DataKey::OracleConfig` are fields of the
+   instance entry; `DataKey::Allocation` is a separate persistent entry.
+   Instance storage isn't one ledger entry per key; the whole key/value map
+   rides inside the instance. There is also no
    separate entry for "pending-dispute state" — `dispute_pre_status`
    and `dispute_deadline` are fields of the `Commitment` struct.
-2. Consequently there is exactly **one TTL to manage** (the instance
-   entry's), shared by all three keys, plus the contract's WASM code
-   entry — which Soroban's `Instance::extend_ttl` bumps *together with*
-   the instance entry by design.
+2. Consequently there are two TTLs to manage: the instance/code entry's
+   TTL and the allocation entry's TTL. Both are extended on the normal
+   access path.
 3. The bad part: **nothing extended that TTL anywhere before this
    change.** No call site, no read path, no deployer hook. And Soroban
    does *not* auto-extend a contract instance's TTL merely because the
@@ -77,14 +74,16 @@ running code in this repo's own test suite:
 
 ## Entry-by-entry table (post-fix state)
 
-One instance entry holds everything; rows are the *logical* keys so the
-table still answers the issue's "every key" framing.
+The commitment and oracle configuration share the instance entry; the
+allocation ledger is deliberately isolated in its own persistent entry. Rows
+still identify the logical keys so the table answers the issue's "every key"
+framing.
 
 | Ledger entry / key | Durability | Written at (all sites) | Read at | TTL before #98 | TTL now |
 |---|---|---|---|---|---|
 | Contract instance entry — holds `DataKey::Commitment` | instance (Persistent durability, entry-scoped TTL) | `initialize` (first `set`), `save()` from `lock`, `release_advance_*`, `mark_checkpoint`, `claim_*`/`reclaim_*` (via `claim_tranche`/`reclaim_tranche`/`open_tranche`), `ready_for_delivery`, `fund_remainder`, `expire_remainder_window`, `reclaim_on_nondelivery`, `confirm_delivery`, `settle`, `resolve_fx_shortfall`, `fund_fx_shortfall`, `expire_fx_shortfall_window`, `cancel`, `reassign_buyer`, `flag_dispute`, `resolve_dispute`, `expire_dispute_window` | `load()` — every public function except `initialize`; `initialize`'s duplicate-guard `has` | deploy-time `min_persistent_entry_ttl`, **never extended** — archived if not touched within that window, escrow stranded | re-rented to network `max_ttl` whenever below `max_ttl/2` by `bump_instance_ttl`, called from `load()` (every read *and* every write path) and from `initialize` |
 | instance entry — `DataKey::OracleConfig` | instance | `initialize` only (when `Some`; immutable after) | `get_oracle_config`, `oracle_rate`, `settle` (`has` guard), `resolve_fx_shortfall` | same single TTL; same gap | covered by the same bump (same entry) |
-| instance entry — `DataKey::Allocation` | instance | `set_allocation` only (one-time) | `get_allocation` | same single TTL; same gap | covered by the same bump (same entry) |
+| persistent entry — `DataKey::Allocation` | persistent | `set_allocation` only (one-time) | `get_allocation` | not applicable before migration | re-rented to `max_ttl` when below `max_ttl/2` |
 | Contract WASM code entry (`ContractCode`) | persistent | `install`/`deploy` | host loads it on every call | deploy-time minimum, never extended | `Instance::extend_ttl` rents instance **and code** together — asserted in `dormant_instance_is_rescued_by_the_first_call` |
 | Token balances (escrow's holdings) | *not this contract's entry* — lives in the token contract's own ledger state | `lock`/`fund_*` transfers | `balance()` calls in `settle`/`expire_*`/`reclaim_*`/`cancel` | unaffected by escrow archival — this is *why* archival strands funds instead of destroying them | unchanged; still the token contract's own TTL story |
 
@@ -116,7 +115,8 @@ does not cover the unbounded lifecycle cases above.
 
 - New internal `bump_instance_ttl(env)`: `let max_ttl =
   env.storage().max_ttl(); env.storage().instance().extend_ttl(max_ttl
-  / 2, max_ttl);`
+  / 2, max_ttl);` plus the same threshold strategy for the persistent
+  allocation entry.
 - Called at the top of `load()` — which every public entry point but
   `initialize` already funnels through, reads (`get_status`,
   `get_commitment`, `get_allocation`, `get_oracle_config`, `oracle_rate`)
@@ -149,17 +149,16 @@ Network configuration can change, so the 65,536-byte value is the documented
 reference for this pinned SDK and the live network should still be checked
 before a deployment.
 
-The rows are cumulative: the allocation row includes the oracle config, and
-the final row includes the oracle config, the 200-member allocation, and the
-16-entry grade schedule. “Instance entry” includes the ledger-entry framing;
-the other columns are the individual stored ScVal XDR values.
+The allocation is now its own persistent entry. “Instance entry” includes the
+ledger-entry framing; the final column is the combined footprint of the
+instance and allocation entries.
 
-| Stage | `Commitment` | `OracleConfig` | 200-member allocation | Total instance entry |
-|---|---:|---:|---:|---:|
-| Fresh `Draft` | 1,348 B | — | — | 1,488 B |
-| With oracle config | 1,348 B | 188 B | — | 1,708 B |
-| With full allocation | 1,348 B | 188 B | 20,012 B | 21,752 B |
-| With 16-entry grade schedule | 1,452 B | 188 B | 20,012 B | 21,856 B |
+| Stage | `Commitment` | `OracleConfig` | Persistent allocation | Instance entry | Total footprint |
+|---|---:|---:|---:|---:|---:|
+| Fresh `Draft` | 1,348 B | — | — | 1,488 B | 1,488 B |
+| With oracle config | 1,348 B | 188 B | — | 1,708 B | 1,708 B |
+| With full allocation | 1,348 B | 188 B | 20,012 B | 1,708 B | 21,752 B |
+| With 16-entry grade schedule | 1,452 B | 188 B | 20,012 B | 1,856 B | 21,868 B |
 
 The test keeps the worst-case instance below **50%** of the 65,536-byte
 reference limit (32,768 B), and also asserts component bounds of 4,096 B for

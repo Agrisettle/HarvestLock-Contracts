@@ -70,8 +70,25 @@ human-readable explanation of *why* each row is legal or not.
 | `resolve_dispute` | All three | The freeze continues | **Anyone** via `expire_dispute_window` after the window; status restored exactly | 0; re-flag possible | Bounded per flag, unbounded in aggregate (`dispute-stalling.md`) |
 | `settle` | **Anyone** | Funds stay in `Delivered` | Anyone; normally the cooperative (it gets paid) or the buyer (it gets the refund) | — | Self-interested caller exists |
 | `reclaim_on_nondelivery` | **Buyer only** | The escrow never returns without the buyer's key; `Forfeited` is never recorded | **Anyone** via `expire_delivery_window` after `delivery_deadline + remainder_window_secs` | 0; no record unless the buyer or the fallback acts | Formerly stuck; see §2 |
+| `extend_delivery_deadline` | **Buyer + cooperative** | A mutually agreed harvest delay keeps the deal alive without a cancellation/restart or a cooperative strike | Either party can still reclaim after the extended deadline; permissionless expiry follows its grace window | 0; the deadline only moves later and never backwards | Consent is unavailable once the original deadline has passed or while disputed |
 | `cancel` | Buyer + cooperative | No early unwind; a terminal path may still exist | Nobody unilaterally — by design | 0; no record | Mutual by definition; the rescue path for a dead operator (§4.4) |
 | `reassign_buyer` | Current buyer + cooperative + incoming buyer | Irrelevant to funds | — | — | Not a griefing surface |
+
+Two rows are narrower than they look, and both were tightened/loosened
+recently:
+
+- **`fund_remainder` does not apply to a fully-prepaid deal (#275).** When
+  `advance1_bps + advance2_bps == 10_000` the deposit `lock` escrowed *is*
+  `total_amount`, so there is no remainder: `ready_for_delivery` marks it
+  funded, `expire_remainder_window` refuses with `RemainderAlreadyFunded`,
+  and the buyer cannot be defaulted for skipping a call that would transfer
+  zero tokens.
+- **`lock` is only possible inside the delivery window (#277).** The window
+  runs from `initialize` (`created_at + delivery_window_secs`), so a buyer
+  cannot wait it out and then lock; `lock` refuses with
+  `LockAfterDeliveryDeadline`. That removes the sequence where a late lock
+  was immediately followed by `reclaim_on_nondelivery` — a `Forfeited`
+  strike against a cooperative that never had a window to perform in.
 
 Two structural notes from the table:
 

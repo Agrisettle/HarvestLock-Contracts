@@ -1,0 +1,45 @@
+# #286 snapshot: HANDOFF.md Deployment 13 scenario 2 — live testnet buyer default
+# run via scripts/e2e.sh with real transaction hashes.
+snapshot = deployment-13-real-hashes-buyer-default
+provenance = derived from HANDOFF.md "Verified on testnet", Deployment 13 scenario 2,
+   contract CCCLSWRWCEYI27XZCOZXCRN4DQ7RJR666WU7GWELLQ5JUEPVWRRY2RWA (WASM
+   c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca): 100,000,000 stroops,
+   10%/20% split, deliberately short 15-second remainder window, real tx hashes:
+   deploy 6ad9ec62e4f7a11865e8e6274a3577cff6954978f999c05fcfce0d266bf136cd,
+   initialize 33b96efcf16257545b36d78189e3ca91d614961040978c28112970f1f8c8b585,
+   lock e404a8b300cf403ffb49197954d5d07262b9d7b7398be48838a7af1fa8de77d3,
+   release_advance_1 871881c0f4c0c6ca16284ad98fed7ce5568d7b64e46a7b8e723de6bd6613a882,
+   claim_advance_1 ebc1b9c21b34edd6951a190069826aadcc7d9955b1ce7905a0c3b2acc0664aa3,
+   mark_checkpoint f8e0b97fcd09fee8adadcdaa2f1291fc628e785186bd1dab76f4c45c09114bae,
+   release_advance_2 e38df0617400b852af4e6055e47fcefad0f96f704b79ead4e25ff2eb2b094b22,
+   ready_for_delivery c1cdb73a2e0c161155f47ffcf19d2e44bf7416d9616198afb0661978b5c5177f,
+   expire_remainder_window 4bd9937908272fb64c4d34a99a7d7165d77aa151f51b9d8ccdbc69b836db4642.
+   Proves permissionless sweep of contract's remaining balance to cooperative after window lapses.
+total_amount = 100000000
+advance1_bps = 1000
+advance2_bps = 2000
+claim_window_secs = 300
+remainder_window_secs = 15
+delivery_window_secs = 600
+contracted_quantity = 1000
+grade_price_bps = 10000,9000,7500
+buyer_mint = 100000000
+
+step = lock => ok
+check = contract_balance 30000000
+check = buyer_balance 70000000
+check = status Locked
+step = release_advance_1 => ok
+step = claim_advance_1 => ok
+check = coop_balance 10000000
+check = contract_balance 20000000
+step = mark_checkpoint => ok
+step = release_advance_2 => ok
+step = ready_for_delivery => ok
+check = status ReadyForDelivery
+step = advance 16
+step = expire_remainder_window => ok
+check = coop_balance 30000000
+check = contract_balance 0
+check = buyer_balance 70000000
+check = status Defaulted

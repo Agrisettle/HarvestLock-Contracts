@@ -40,14 +40,16 @@ initialize(
     cooperative,            // any Address; signs claim_advance_* later
     warehouse_operator,     // any Address; signs mark_checkpoint/confirm_delivery
     token,                  // any SEP-41 token contract address
-    total_amount = 1_000,   // smallest readable number for the 7-decimal convention (i128 > 0)
-    advance1_bps = 6_000,   // 60% first advance — any 0..=10_000 value works; zero would trivialize the tranche steps
-    advance2_bps = 2_000,   // 20% second advance; 6_000 + 2_000 <= 10_000 (the `initialize` ceiling)
-    claim_window_secs = 1,  // minimum legal: must be > 0 (`InvalidWindow` rejects 0)
-    remainder_window_secs = 1,  // minimum legal: must be > 0
-    delivery_window_secs = 1,   // minimum legal: must be > 0
-    contracted_quantity = 1,    // minimum legal: must be > 0 (`InvalidQuantity` rejects 0)
-    grade_price_bps = vec![10_000],  // ONE entry, full price — the schedule must be non-empty, each entry <= 10_000
+    terms = CommitmentTerms {   // the eight agreed terms, as one named struct (#270)
+        total_amount: 1_000,            // smallest readable number for the 7-decimal convention (i128 > 0)
+        advance1_bps: 6_000,            // 60% first advance — any 0..=10_000 value works; zero would trivialize the tranche steps
+        advance2_bps: 2_000,            // 20% second advance; 6_000 + 2_000 <= 10_000 (the `initialize` ceiling)
+        claim_window_secs: 1,           // minimum legal: must be > 0 (`InvalidWindow` rejects 0)
+        remainder_window_secs: 1,       // minimum legal: must be > 0
+        delivery_window_secs: 1,        // minimum legal: must be > 0
+        contracted_quantity: 1,         // minimum legal: must be > 0 (`InvalidQuantity` rejects 0)
+        grade_price_bps: vec![10_000],  // ONE entry, full price — the schedule must be non-empty, each entry <= 10_000
+    },
     oracle_config = None,   // the only "fully optional" field: no FX conversion for this deal
 )
 ```
@@ -199,8 +201,10 @@ installed on the target network, deploys an instance, and calls
    contract ID, in order, substituting the testnet addresses and token from
    step 1 for the `initialize` arguments above.
 
-Every `initialize` argument maps one-to-one to the test's `initialize` call;
-`null` in the CLI positional encoding is the `None` oracle_config. This
+Each field of the `CommitmentTerms` struct maps one-to-one to the test's
+`initialize` call; `null` for `oracle_config` is the `None` case, and
+`scripts/deploy.sh` sends the same eight values as one `--terms '{…}'` JSON
+argument (#270 replaced the positional form). This
 walkthrough is verified locally by the Rust test (run `cargo test
 minimal_commitment_walkthrough_settles_end_to_end`); a testnet run adds only
 network latency, not new behavior — no funded network key was assumed here
