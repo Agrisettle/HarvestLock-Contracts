@@ -58,6 +58,7 @@ calls no `require_auth()` at all.
 | `fund_remainder` | **Buyer** | The second half of two-phase funding (Dep. 5) — buyer pays the balance of the escrow. |
 | `expire_remainder_window` | **Permissionless** | Buyer-default consequence: the deadline either passed unfunded or it didn't — who calls changes nothing. Sweeps to the cooperative per the terms fixed at lock-in. |
 | `reclaim_on_nondelivery` | **Buyer** | Seller-non-delivery: returns the current balance to the buyer once the delivery deadline passes unfulfilled. Pays the caller's own reclaim right, so gated on the caller. |
+| `extend_delivery_deadline` | **Buyer + cooperative** | Both parties may agree to move the delivery deadline later while the deal remains pre-delivery and the existing deadline has not passed. Shortening and dispute-state calls are rejected. |
 | `confirm_delivery` | **Warehouse operator** | §4.1/§4.5 — the operator is the independent delivery oracle; "release requires buyer plus warehouse-operator attestation". |
 | `settle` | **Permissionless** | §4.1 — conditional release executes pre-agreed math on already-recorded state; nobody (not even the buyer) can withhold it once conditions are met. This is what "no unilateral drain" actually buys. |
 | `resolve_fx_shortfall` | **Permissionless** | §4.2 option (b)/§16.3 — a one-time comparison of escrowed-vs-converted obligation; deterministic on the oracle read. |

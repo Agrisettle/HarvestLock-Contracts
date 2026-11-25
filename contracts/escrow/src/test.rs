@@ -5,6 +5,7 @@ use super::*;
 // helpers and the `World`/`Setup` constructors all live in
 // `crate::testutils`, shared with the integration suites in `tests/`.
 use crate::testutils::*;
+use proptest::prelude::*;
 use soroban_sdk::testutils::{
     Address as _, AuthorizedFunction, AuthorizedInvocation, BytesN as _, Events as _, Ledger as _,
     MockAuth, MockAuthInvoke,
@@ -23,6 +24,69 @@ const MAX_ORACLE_CONFIG_XDR_BYTES: usize = 512;
 const MAX_ALLOCATION_XDR_BYTES: usize = 24_000;
 
 // ---------- basic lifecycle ----------
+
+#[test]
+fn buyer_and_cooperative_can_extend_delivery_deadline_once_before_expiry() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let original = s.contract.get_commitment().delivery_deadline;
+    s.contract.extend_delivery_deadline(&(original + 100));
+    assert_eq!(
+        s.contract.get_commitment().delivery_deadline,
+        original + 100
+    );
+}
+
+#[test]
+fn extending_delivery_deadline_rejects_non_extension_and_dispute_state() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let original = s.contract.get_commitment().delivery_deadline;
+    assert_eq!(
+        s.contract.try_extend_delivery_deadline(&original),
+        Err(Ok(Error::DeliveryDeadlineNotExtended))
+    );
+
+    s.contract.flag_dispute(&s.buyer);
+    assert_eq!(
+        s.contract.try_extend_delivery_deadline(&(original + 100)),
+        Err(Ok(Error::InvalidState))
+    );
+}
+
+proptest! {
+    /// Independent settlement arithmetic reference. Every division is a
+    /// floor, matching the contract's documented token-unit rounding. The
+    /// cooperative's total entitlement is monotone in both delivery quantity
+    /// and grade while already-claimed advances are held constant.
+    #[test]
+    fn settlement_reference_is_monotone(
+        total in 1i128..1_000_000_000i128,
+        advance1_bps in 0u32..5_001u32,
+        advance2_bps in 0u32..5_001u32,
+        delivered_a in 0u32..10_000u32,
+        delivered_b in 0u32..10_000u32,
+        grade_a in 0u32..10_001u32,
+        grade_b in 0u32..10_001u32,
+    ) {
+        prop_assume!(advance1_bps.saturating_add(advance2_bps) <= 10_000);
+        let quantity = 10_000u32;
+        let claimed = total * i128::from(advance1_bps) / 10_000
+            + total * i128::from(advance2_bps) / 10_000;
+        let reference = |delivered: u32, grade: u32| {
+            let quantity_bps = (u64::from(delivered.min(quantity)) * 10_000
+                / u64::from(quantity)) as i128;
+            let adjusted = total * (quantity_bps * i128::from(grade) / 10_000) / 10_000;
+            claimed + (adjusted - claimed).max(0)
+        };
+        if delivered_a <= delivered_b {
+            prop_assert!(reference(delivered_a, grade_a) <= reference(delivered_b, grade_a));
+        }
+        if grade_a <= grade_b {
+            prop_assert!(reference(delivered_a, grade_a) <= reference(delivered_a, grade_b));
+        }
+    }
+}
 
 #[test]
 fn initialize_sets_draft_status() {
@@ -5547,9 +5611,9 @@ fn cancel_after_an_allocation_is_recorded_leaves_the_ledger_orphaned_not_an_erro
 
     // And it was not swept away as part of the unwind — there is no cleanup
     // path for it, so the orphan is permanent. Read through the contract's own
-    // storage context, since the entry is instance-scoped to it.
+    // storage context, since the entry is persistent and scoped to it.
     let still_recorded = s.env.as_contract(&s.contract.address, || {
-        s.env.storage().instance().has(&DataKey::Allocation)
+        s.env.storage().persistent().has(&DataKey::Allocation)
     });
     assert!(still_recorded);
 

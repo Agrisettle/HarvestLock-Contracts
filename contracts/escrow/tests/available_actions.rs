@@ -20,7 +20,7 @@ use harvestlock_escrow::{
     Action, ActionDeadline, AllocationMember, AuthParty, CommitmentTerms, Error, EscrowContract,
     EscrowContractClient, OracleConfig, Status,
 };
-use soroban_sdk::testutils::{Address as _, EnvTestConfig};
+use soroban_sdk::testutils::{Address as _, EnvTestConfig, Ledger as _};
 use soroban_sdk::{token, Address, BytesN, ConversionError, Env, InvokeError, Symbol, Vec};
 
 const DENOMINATED_NO_SHORTFALL: i128 = 500_000;
@@ -427,6 +427,15 @@ fn after(t: u64) -> ActionDeadline {
 /// `cancel` and `reassign_buyer` are advertised in every pre-delivery state,
 /// with the same auth and no deadline, so the table doesn't repeat them.
 fn push_pre_delivery_common(w: &World, v: &mut Vec<Action>) {
+    let c = w.contract.get_commitment();
+    if c.status != Status::Draft && w.env.ledger().timestamp() <= c.delivery_deadline {
+        v.push_back(act(
+            &w.env,
+            "extend_delivery_deadline",
+            AuthParty::BuyerAndCooperative,
+            at(c.delivery_deadline),
+        ));
+    }
     v.push_back(act(
         &w.env,
         "cancel",

@@ -403,10 +403,10 @@ fn set_allocation_at_two_hundred_members_stays_well_under_every_limit() {
     assert_within("set_allocation: 200 members", &sample, tx_model(args_bytes));
 }
 
-/// `settle` on a commitment that carries both maxima. The call itself takes no
-/// arguments, so its transaction is tiny; the resource question is the instance
-/// entry it reads and rewrites (200 members + 16 grades), which is what the
-/// read/write byte and ledger-entry rows measure.
+/// `settle` on a commitment carrying the maximum grade schedule and a separate
+/// 200-member allocation entry. The call itself takes no arguments, so its
+/// transaction is tiny; the resource question is the instance entry it reads
+/// and rewrites plus the persistent allocation entry it reads.
 #[test]
 fn settle_with_both_maxima_stays_well_under_every_limit() {
     let s = Scene::uninitialized();
@@ -440,13 +440,12 @@ fn settle_with_both_maxima_stays_well_under_every_limit() {
     );
 }
 
-/// A guard on the guard: the fractions above are only meaningful if the
-/// fixture really is at both caps and the printed ledger entry really is the
-/// combined one. This asserts the entry grows monotonically as each maximum is
-/// added, so a future storage-layout change that moved `Allocation` out of the
-/// instance entry would make the `settle` figure misleadingly small.
+/// A guard on the guard: the allocation is intentionally isolated from the
+/// instance entry so its 200-member payload cannot consume instance-entry
+/// capacity. The resource measurements still cover the allocation through the
+/// contract call's persistent read path.
 #[test]
-fn the_settle_fixture_carries_both_maxima_in_one_instance_entry() {
+fn the_settle_fixture_keeps_allocation_out_of_the_instance_entry() {
     let s = Scene::uninitialized();
     s.initialize();
     let with_grades = stored_instance_entry_size(&s.env);
@@ -454,11 +453,10 @@ fn the_settle_fixture_carries_both_maxima_in_one_instance_entry() {
     s.contract.set_allocation(&max_allocation(&s.env));
     let with_both = stored_instance_entry_size(&s.env);
 
-    assert!(
-        with_both > with_grades,
-        "the 200-member allocation must add to the same instance entry \
-         ({with_grades} -> {with_both} bytes); if it moved to its own entry, \
-         the settle measurement no longer covers both caps"
+    assert_eq!(
+        with_both, with_grades,
+        "the 200-member allocation must stay in its separate persistent entry \
+         ({with_grades} -> {with_both} instance bytes)"
     );
     assert_eq!(
         s.contract.get_allocation().len() as usize,
