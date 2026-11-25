@@ -41,6 +41,12 @@ maintained source of truth for exactly what's implemented, what's
 deliberately not, and why. This README won't be kept as precisely in sync;
 treat it as orientation, HANDOFF.md as ground truth.
 
+**Then read [`docs/architecture.md`](./docs/architecture.md)** — one diagram
+of a single commitment's world (escrow instance, WASM, settlement token and
+issuer, Reflector, the three parties' wallets, the HarvestLock API) with the
+threat model's trust boundaries marked and every arrow linked to the doc or
+code that covers it. It's the index into everything under Reference below.
+
 Short version as of this writing: the state machine (`Draft` through
 `Settled`) is implemented in `contracts/escrow`, including real
 claim/reclaim-with-expiry semantics for both advance tranches, mutual
@@ -126,6 +132,7 @@ libraries a fresh Linux runner is missing.
 
 ## Reference
 
+- **Architecture**: [`docs/architecture.md`](./docs/architecture.md) — start here after HANDOFF.md: what talks to what around one commitment, trust boundaries marked, each arrow linked to its deep-dive doc
 - **PRD**: [`docs/PRD.md`](https://github.com/Agrisettle/HarvestLock/blob/main/docs/PRD.md) in the `HarvestLock` repo — see §4.8 (contract design), §4.5 (why this can't hold custody keys), §16.3 (oracle staleness and depeg handling the contract must account for)
 - **Authorization model**: [`docs/authorization-matrix.md`](./docs/authorization-matrix.md) — every `require_auth()` site in the contract mapped to the PRD's model, including the two places the code is deliberately stricter than a plain PRD reading
 - **Sequence diagrams**: [`docs/sequences.md`](./docs/sequences.md) — who signs what and which contracts get called for `lock`, the multi-party `cancel`/`reassign_buyer`/`resolve_dispute` (including `require_once_each` dedup), `resolve_fx_shortfall` and `settle`
