@@ -51,12 +51,12 @@ running code in this repo's own test suite:
   default `LedgerInfo` that is 4,096 ledgers (`ttl at deploy ==
   min_persistent − 1`, asserted in
   `dormant_instance_is_rescued_by_the_first_call`).
-- **Invoking the contract never touches its TTL.** After 3,996 ledgers
-  of silence, `get_ttl()` is exactly the deploy value minus the
-  dormancy; a successful `get_status()` before the fix left it
-  unchanged (probe behavior; the same decay is asserted post-fix
-  *above* the bump threshold in
-  `locked_commitment_survives_long_dormancy_via_read_path_ttl_bumps`).
+- **A simulated invocation never changes the ledger TTL.** Contract
+  execution during simulation may call `extend_ttl`, but simulation does
+  not submit or commit those writes. Testnet `getLedgerEntries` readings
+  around a simulated `get_status` are recorded below. A submitted,
+  successful invocation can commit the `load()` extension; a failed
+  transaction rolls it back.
 - **TTL decays 1:1 with ledger closes** while dormant.
 - `env.storage().instance().extend_ttl(threshold, extend_to)` only acts
   when the entry's remaining TTL is *below* `threshold`, and the new
@@ -81,9 +81,9 @@ framing.
 
 | Ledger entry / key | Durability | Written at (all sites) | Read at | TTL before #98 | TTL now |
 |---|---|---|---|---|---|
-| Contract instance entry — holds `DataKey::Commitment` | instance (Persistent durability, entry-scoped TTL) | `initialize` (first `set`), `save()` from `lock`, `release_advance_*`, `mark_checkpoint`, `claim_*`/`reclaim_*` (via `claim_tranche`/`reclaim_tranche`/`open_tranche`), `ready_for_delivery`, `fund_remainder`, `expire_remainder_window`, `reclaim_on_nondelivery`, `confirm_delivery`, `settle`, `resolve_fx_shortfall`, `fund_fx_shortfall`, `expire_fx_shortfall_window`, `cancel`, `reassign_buyer`, `flag_dispute`, `resolve_dispute`, `expire_dispute_window` | `load()` — every public function except `initialize`; `initialize`'s duplicate-guard `has` | deploy-time `min_persistent_entry_ttl`, **never extended** — archived if not touched within that window, escrow stranded | re-rented to network `max_ttl` whenever below `max_ttl/2` by `bump_instance_ttl`, called from `load()` (every read *and* every write path) and from `initialize` |
-| instance entry — `DataKey::OracleConfig` | instance | `initialize` only (when `Some`; immutable after) | `get_oracle_config`, `oracle_rate`, `settle` (`has` guard), `resolve_fx_shortfall` | same single TTL; same gap | covered by the same bump (same entry) |
-| persistent entry — `DataKey::Allocation` | persistent | `set_allocation` only (one-time) | `get_allocation` | not applicable before migration | re-rented to `max_ttl` when below `max_ttl/2` |
+| Contract instance entry — holds `DataKey::Commitment` | instance (Persistent durability, entry-scoped TTL) | `initialize` (first `set`), `save()` from `lock`, `release_advance_*`, `mark_checkpoint`, `claim_*`/`reclaim_*` (via `claim_tranche`/`reclaim_tranche`/`open_tranche`), `ready_for_delivery`, `fund_remainder`, `expire_remainder_window`, `reclaim_on_nondelivery`, `confirm_delivery`, `settle`, `resolve_fx_shortfall`, `fund_fx_shortfall`, `expire_fx_shortfall_window`, `cancel`, `reassign_buyer`, `flag_dispute`, `resolve_dispute`, `expire_dispute_window` | `load()` — every public function except `initialize`; `initialize`'s duplicate-guard `has` | deploy-time `min_persistent_entry_ttl`; archived if it expires before being touched by a submitted transaction | a submitted, successful call that reaches `load()` re-rents to network `max_ttl` whenever below `max_ttl/2`; `initialize` does likewise. Simulated invocations do not persist the extension |
+| instance entry — `DataKey::OracleConfig` | instance | `initialize` only (when `Some`; immutable after) | `get_oracle_config`, `oracle_rate`, `settle` (`has` guard), `resolve_fx_shortfall` | same single TTL; same expiry risk | covered by the same bump when a submitted invocation commits |
+| persistent entry — `DataKey::Allocation` | persistent | `set_allocation` only (one-time) | `get_allocation` | not applicable before migration | a submitted, successful call reaching `load()` re-rents to `max_ttl` when below `max_ttl/2`; simulation does not persist the extension |
 | Contract WASM code entry (`ContractCode`) | persistent | `install`/`deploy` | host loads it on every call | deploy-time minimum, never extended | `Instance::extend_ttl` rents instance **and code** together — asserted in `dormant_instance_is_rescued_by_the_first_call` |
 | Token balances (escrow's holdings) | *not this contract's entry* — lives in the token contract's own ledger state | `lock`/`fund_*` transfers | `balance()` calls in `settle`/`expire_*`/`reclaim_*`/`cancel` | unaffected by escrow archival — this is *why* archival strands funds instead of destroying them | unchanged; still the token contract's own TTL story |
 
@@ -120,14 +120,15 @@ does not cover the unbounded lifecycle cases above.
 - Called at the top of `load()` — which every public entry point but
   `initialize` already funnels through, reads (`get_status`,
   `get_commitment`, `get_allocation`, `get_oracle_config`, `oracle_rate`)
-  and mutations alike — and once inside `initialize` after its writes
-  (`initialize` deliberately can't call `load`, there's nothing stored
-  yet).
+  and mutations alike — and once inside `initialize` after its writes.
+  The extension reaches the ledger only when the invocation is submitted
+  successfully; a simulated read is discarded.
 - Strategy: re-rent **only when remaining TTL < half the network
   maximum**, topping back to the maximum. The choice to retain max-TTL,
-  rather than cap at a known deadline, is explained above. Consequences: (a) a dormant
-  commitment is rescued by the *first* touch of any kind, including the
-  API's routine permissionless reads; (b) once topped, steady-state
+  rather than cap at a known deadline, is explained above. Consequences:
+  (a) a dormant commitment is rescued by the first submitted successful
+  invocation after it reaches the threshold; API `simulateRead` polling does
+  not rescue it; (b) once topped, steady-state
   calls cost no rent at all (no-op above the threshold — asserted in
   the second test); (c) rent is paid at most once per half-max lifetime
   per contract, i.e. roughly twice per network `max_entry_ttl` window
@@ -177,14 +178,15 @@ That is inherent to instance storage under Soroban's state archival —
 no in-contract call can extend an entry past the network max — so the
 remaining handling is operational:
 
-1. **Prevention**: the app/API already polls `get_status` /
-   `get_commitment` for cache display; with `load()` bumping, that
-   polling *is* the keeper job, for free up to the threshold. For a
-   separate operational keeper, use the [TTL keeper tool](../tools/ttl-keeper/README.md)
-   from a funded cron identity. It reads both the contract instance and
+1. **Prevention**: API `get_status` / `get_commitment` polling is simulated
+   and does not commit the `load()` extension; it is **not** a keeper.
+   Run the [TTL keeper tool](../tools/ttl-keeper/README.md) from a funded
+   cron identity instead. It reads both the contract instance and
    Wasm-code TTL, reports contracts below the configured threshold, and
-   runs `stellar contract extend` for those contracts. This bounds dormancy
-   below the max lifetime and prevents eviction outright.
+   submits `stellar contract extend` transactions for those contracts.
+   A successful submitted contract invocation that reaches `load()` also
+   commits its in-contract extension. This bounds dormancy below the max
+   lifetime and prevents eviction outright.
 2. **Recovery if eviction already happened**: the archived instance
    entry stays restorable for the network's archive/bucket window —
    `stellar contract restore` (a subcommand of the same CLI this repo's
@@ -212,6 +214,15 @@ old and hypothetical-new orderings.
 
 ## Tests
 
+- **Testnet simulation probe (25 Nov 2026)** — Deployment 13's live
+  commitment `CBF4LWV2NHI5I64OVKAVLEF6O3D2SEFV4NZ4MS74QQTUF2R5S7F4CI3N`
+  returned `Settled` from `stellar contract invoke ... --send=no --
+  get_status`. RPC `getLedgerEntries` reported instance
+  `liveUntilLedgerSeq = 9,008,833` at `latestLedger = 5,915,208` before
+  simulation and the same `liveUntilLedgerSeq = 9,008,833` at
+  `latestLedger = 5,915,213` after. The returned status was `Settled`;
+  the live-until value did not move while ledgers advanced. This confirms
+  the simulated polling path does not extend live TTL.
 - `dormant_instance_is_rescued_by_the_first_call` — a deployed instance
   starts at exactly `min_persistent_entry_ttl − 1` (test host: 4,095),
   decays 1:1 through 3,996 ledgers of silence to 99 with no auto-bump,

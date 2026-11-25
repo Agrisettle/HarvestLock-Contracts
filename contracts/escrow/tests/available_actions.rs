@@ -313,12 +313,20 @@ fn settled() -> World {
 
 fn cancelled() -> World {
     let w = plain_world();
+    w.contract.lock();
     w.contract.cancel();
     w
 }
 
 fn defaulted() -> World {
-    let w = ready_after_remainder_deadline();
+    let w = plain_world();
+    w.contract.lock();
+    w.contract.release_advance_1();
+    w.contract.mark_checkpoint();
+    w.contract.release_advance_2();
+    w.contract.ready_for_delivery();
+    let deadline = w.contract.get_commitment().remainder_deadline;
+    w.set_time(deadline + 1);
     w.contract.expire_remainder_window();
     w
 }
@@ -469,6 +477,7 @@ enum Call {
     ReclaimNondelivery,
     ConfirmDelivery,
     Settle,
+    WithdrawPayout,
     ResolveFx,
     RefreshFx,
     FundFx,
@@ -498,6 +507,7 @@ impl Call {
             Call::ReclaimNondelivery => "reclaim_on_nondelivery",
             Call::ConfirmDelivery => "confirm_delivery",
             Call::Settle => "settle",
+            Call::WithdrawPayout => "withdraw_payout",
             Call::ResolveFx => "resolve_fx_shortfall",
             Call::RefreshFx => "refresh_fx_quote_status",
             Call::FundFx => "fund_fx_shortfall",
@@ -552,6 +562,15 @@ fn invoke(call: Call, w: &World) -> Result<(), Error> {
         Call::ReclaimNondelivery => outcome(w.contract.try_reclaim_on_nondelivery()),
         Call::ConfirmDelivery => outcome(w.contract.try_confirm_delivery(&CONTRACTED_QUANTITY, &0)),
         Call::Settle => outcome(w.contract.try_settle()),
+        Call::WithdrawPayout => {
+            let c = w.contract.get_commitment();
+            let recipient = if c.buyer_payout > 0 {
+                &w.buyer
+            } else {
+                &w.cooperative
+            };
+            outcome(w.contract.try_withdraw_payout(recipient))
+        }
         Call::ResolveFx => outcome(w.contract.try_resolve_fx_shortfall()),
         Call::RefreshFx => outcome(w.contract.try_refresh_fx_quote_status()),
         Call::FundFx => outcome(w.contract.try_fund_fx_shortfall()),
@@ -1252,8 +1271,18 @@ fn scenarios() -> std::vec::Vec<Scenario> {
         Scenario {
             name: "Settled (terminal)",
             setup: settled,
-            expected: |w| list(w, &[]),
-            advertised: vec![],
+            expected: |w| {
+                list(
+                    w,
+                    &[act(
+                        &w.env,
+                        "withdraw_payout",
+                        AuthParty::BuyerOrCooperative,
+                        none(),
+                    )],
+                )
+            },
+            advertised: vec![Call::WithdrawPayout],
             absent: vec![
                 absent(Call::Settle, Error::InvalidState),
                 absent(Call::FlagDispute, Error::InvalidState),
@@ -1264,8 +1293,18 @@ fn scenarios() -> std::vec::Vec<Scenario> {
         Scenario {
             name: "Cancelled (terminal)",
             setup: cancelled,
-            expected: |w| list(w, &[]),
-            advertised: vec![],
+            expected: |w| {
+                list(
+                    w,
+                    &[act(
+                        &w.env,
+                        "withdraw_payout",
+                        AuthParty::BuyerOrCooperative,
+                        none(),
+                    )],
+                )
+            },
+            advertised: vec![Call::WithdrawPayout],
             absent: vec![
                 absent(Call::Lock, Error::InvalidState),
                 absent(Call::Cancel, Error::InvalidState),
@@ -1275,19 +1314,43 @@ fn scenarios() -> std::vec::Vec<Scenario> {
         Scenario {
             name: "Defaulted (terminal)",
             setup: defaulted,
-            expected: |w| list(w, &[]),
-            advertised: vec![],
+            expected: |w| {
+                list(
+                    w,
+                    &[act(
+                        &w.env,
+                        "withdraw_payout",
+                        AuthParty::BuyerOrCooperative,
+                        none(),
+                    )],
+                )
+            },
+            advertised: vec![Call::WithdrawPayout],
             absent: vec![
                 absent(Call::FundRemainder, Error::InvalidState),
                 absent(Call::ExpireRemainder, Error::InvalidState),
                 absent(Call::FlagDispute, Error::InvalidState),
+                absent(Call::Claim1, Error::InvalidState),
+                absent(Call::Reclaim1, Error::InvalidState),
+                absent(Call::Claim2, Error::InvalidState),
+                absent(Call::Reclaim2, Error::InvalidState),
             ],
         },
         Scenario {
             name: "Forfeited (terminal)",
             setup: forfeited,
-            expected: |w| list(w, &[]),
-            advertised: vec![],
+            expected: |w| {
+                list(
+                    w,
+                    &[act(
+                        &w.env,
+                        "withdraw_payout",
+                        AuthParty::BuyerOrCooperative,
+                        none(),
+                    )],
+                )
+            },
+            advertised: vec![Call::WithdrawPayout],
             absent: vec![
                 absent(Call::ReclaimNondelivery, Error::InvalidState),
                 absent(Call::Settle, Error::InvalidState),

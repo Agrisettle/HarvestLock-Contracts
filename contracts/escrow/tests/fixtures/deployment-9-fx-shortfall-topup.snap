@@ -45,6 +45,7 @@ step = settle => err(FxShortfallUnfunded)
 step = fund_fx_shortfall => ok
 check = contract_balance 105300006
 step = settle => ok
+step = withdraw_payout cooperative => ok
 # recorded: cooperative's total across all three payments = 15,000,000 +
 # 15,000,000 + 105,300,006 = 135,300,006, exactly fx_adjusted_total.
 check = coop_balance 135300006

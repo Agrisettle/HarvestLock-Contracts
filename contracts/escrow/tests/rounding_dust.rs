@@ -12,9 +12,8 @@
 //!   dust      = 59 - (29 + 29)          = 1
 //!
 //! That unit is not paid out by a tranche, so it stays in the contract's
-//! balance and is swept by whichever terminal path runs. These tests assert
-//! which party receives it on each path, rather than leaving the behavior to
-//! be inferred from the balance-based sweeps.
+//! balance and is allocated by whichever terminal path runs. Each test
+//! withdraws the resulting credit and asserts which party receives the dust.
 
 use harvestlock_escrow::{
     CommitmentTerms, Error, EscrowContract, EscrowContractClient, OracleConfig, Status,
@@ -120,6 +119,7 @@ fn cancel_refunds_the_dust_to_the_buyer() {
     assert_eq!(w.token.balance(&w.contract.address), 1);
 
     w.contract.cancel();
+    w.contract.withdraw_payout(&w.buyer);
 
     assert_eq!(w.contract.get_status(), Status::Cancelled);
     assert_eq!(w.token.balance(&w.contract.address), 0);
@@ -135,6 +135,7 @@ fn expire_remainder_window_sweeps_the_dust_to_the_cooperative() {
     w.advance(REMAINDER_WINDOW + 1);
 
     w.contract.expire_remainder_window();
+    w.contract.withdraw_payout(&w.cooperative);
 
     assert_eq!(w.contract.get_status(), Status::Defaulted);
     assert_eq!(w.token.balance(&w.contract.address), 0);
@@ -149,6 +150,7 @@ fn reclaim_on_nondelivery_refunds_the_dust_to_the_buyer() {
     w.advance(DELIVERY_WINDOW + 1);
 
     w.contract.reclaim_on_nondelivery();
+    w.contract.withdraw_payout(&w.buyer);
 
     assert_eq!(w.contract.get_status(), Status::Forfeited);
     assert_eq!(w.token.balance(&w.contract.address), 0);
@@ -163,6 +165,7 @@ fn settle_when_the_obligation_exceeds_the_balance_pays_the_dust_to_the_cooperati
     w.contract.fund_remainder();
     w.contract.confirm_delivery(&CONTRACTED_QUANTITY, &0);
     w.contract.settle();
+    w.contract.withdraw_payout(&w.cooperative);
 
     assert_eq!(w.contract.get_status(), Status::Settled);
     assert_eq!(w.token.balance(&w.contract.address), 0);
@@ -182,6 +185,8 @@ fn settle_after_a_partial_delivery_refunds_the_dust_to_the_buyer() {
     // Half the contracted quantity at full grade -> settlement_bps 5_000.
     w.contract.confirm_delivery(&(CONTRACTED_QUANTITY / 2), &0);
     w.contract.settle();
+    w.contract.withdraw_payout(&w.buyer);
+    w.contract.withdraw_payout(&w.cooperative);
 
     assert_eq!(w.contract.get_status(), Status::Settled);
     assert_eq!(w.token.balance(&w.contract.address), 0);
@@ -256,6 +261,7 @@ fn expire_fx_shortfall_window_sweeps_the_dust_to_the_cooperative() {
     let now = env.ledger().timestamp();
     env.ledger().set_timestamp(now + REMAINDER_WINDOW + 1);
     contract.expire_fx_shortfall_window();
+    contract.withdraw_payout(&cooperative);
 
     assert_eq!(contract.get_status(), Status::Defaulted);
     assert_eq!(token.balance(&contract.address), 0);

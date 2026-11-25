@@ -169,6 +169,7 @@ fn tranche_2_claim_and_tranche_1_reclaim_do_not_cross_contaminate() {
     // ---------- settle: the final split ----------
     s.contract.settle();
     assert_eq!(s.status(), Status::Settled);
+    s.contract.withdraw_payout(&s.cooperative);
 
     // Full delivery at full grade (settlement_bps = 10_000) is worth the
     // whole total. The cooperative already banked tranche 2 only, because

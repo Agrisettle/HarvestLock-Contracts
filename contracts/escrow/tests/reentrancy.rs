@@ -1,11 +1,10 @@
 //! Issue #217 — prove the checks-effects-interactions (CEI) ordering with a
 //! re-entrant mock SEP-41 token.
 //!
-//! Every value-moving method in `lib.rs` saves its state effect *before* it
-//! calls `token::Client::transfer` and annotates that with "Effects before
-//! interaction — see `lock`'s comment". Until this suite existed nothing
-//! actually called back into the escrow from inside a transfer, so the claim
-//! was untested. `MockToken` below is a deliberately hostile SEP-41 token: its
+//! Every token transfer in `lib.rs` saves its state effect *before* it calls
+//! `token::Client::transfer`. Terminal transitions now record credits without
+//! transferring; `withdraw_payout` clears the caller's credit before its
+//! transfer. `MockToken` below is a deliberately hostile SEP-41 token: its
 //! `transfer` invokes a caller-configured escrow function before returning,
 //! which is the strongest re-entry a token contract can attempt.
 //!
@@ -33,10 +32,10 @@
 //! callback reach the guard shows up as a failing test rather than silently
 //! weakening this suite.
 //!
-//! The callback target deliberately names the *same* method that is paying
-//! out (`claim_advance_1` from inside `claim_advance_1`, `lock` from inside
-//! `lock`, `settle` from inside `settle`, ...): a successful re-entry of the
-//! same call is the double-spend shape the ordering exists to prevent.
+//! The callback targets the state-changing method whose effects must already
+//! be committed before the withdrawal transfer (`settle` from inside a
+//! settlement withdrawal, `cancel` from inside a cancel withdrawal, etc.).
+//! The host rejects each attempt before that method can run.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -449,21 +448,20 @@ fn fund_remainder_cannot_reenter_itself() {
 }
 
 #[test]
-fn expire_remainder_window_cannot_reenter_itself() {
+fn expire_remainder_window_withdrawal_cannot_reenter_expiry() {
     let h = harness();
     h.escrow.lock();
     h.escrow.release_advance_1();
     h.escrow.claim_advance_1();
     h.escrow.mark_checkpoint();
     h.escrow.release_advance_2();
-    // Leave tranche 2 unclaimed: the default sweep must have a non-zero
-    // balance to move, otherwise there is no transfer and no callback.
+    // Leave tranche 2 unclaimed so the default credits a non-zero payout.
     h.escrow.ready_for_delivery();
     let deadline = h.escrow.get_commitment().remainder_deadline;
     h.env.ledger().set_timestamp(deadline + 1);
-    h.arm("expire_remainder_window");
-
     h.escrow.expire_remainder_window();
+    h.arm("expire_remainder_window");
+    h.escrow.withdraw_payout(&h.cooperative);
 
     h.assert_callback_blocked();
     assert_eq!(h.escrow.get_status(), Status::Defaulted);
@@ -474,15 +472,16 @@ fn expire_remainder_window_cannot_reenter_itself() {
 }
 
 #[test]
-fn reclaim_on_nondelivery_cannot_reenter_itself() {
+fn reclaim_on_nondelivery_withdrawal_cannot_reenter_reclaim() {
     let h = harness();
     h.escrow.lock();
     let deadline = h.escrow.get_commitment().delivery_deadline;
     h.env.ledger().set_timestamp(deadline + 1);
-    h.arm("reclaim_on_nondelivery");
     let buyer_before = h.token.balance(&h.buyer);
 
     h.escrow.reclaim_on_nondelivery();
+    h.arm("reclaim_on_nondelivery");
+    h.escrow.withdraw_payout(&h.buyer);
 
     h.assert_callback_blocked();
     assert_eq!(h.escrow.get_status(), Status::Forfeited);
@@ -491,34 +490,37 @@ fn reclaim_on_nondelivery_cannot_reenter_itself() {
 }
 
 #[test]
-fn expire_delivery_window_cannot_reenter_itself() {
+fn expire_delivery_window_withdrawal_cannot_reenter_expiry() {
     let h = harness();
     h.escrow.lock();
     let c = h.escrow.get_commitment();
     h.env
         .ledger()
         .set_timestamp(c.delivery_deadline + c.remainder_window_secs + 1);
-    h.arm("expire_delivery_window");
     let buyer_before = h.token.balance(&h.buyer);
 
     h.escrow.expire_delivery_window();
+    h.arm("expire_delivery_window");
+    h.escrow.withdraw_payout(&h.buyer);
 
     h.assert_callback_blocked();
     assert_eq!(h.escrow.get_status(), Status::Forfeited);
     assert_eq!(h.token.balance(&h.buyer), buyer_before + h.deposit());
 }
 
-/// A half-quantity delivery makes `settle` pay the cooperative *and* refund
-/// the buyer, so the hostile token gets two callback attempts in one call.
+/// A half-quantity delivery credits the cooperative and buyer separately;
+/// each independent withdrawal triggers a callback attempt.
 #[test]
 fn settle_cannot_reenter_itself_from_either_payout() {
     let h = harness();
     h.drive_to_delivered(500);
-    h.arm("settle");
     let coop_before = h.token.balance(&h.cooperative);
     let buyer_before = h.token.balance(&h.buyer);
 
     h.escrow.settle();
+    h.arm("settle");
+    h.escrow.withdraw_payout(&h.buyer);
+    h.escrow.withdraw_payout(&h.cooperative);
 
     assert_eq!(h.mock.attempts(), 2);
     assert_eq!(h.mock.last_callback_kind(), CallbackKind::HostAbort);
@@ -531,13 +533,14 @@ fn settle_cannot_reenter_itself_from_either_payout() {
 }
 
 #[test]
-fn cancel_cannot_reenter_itself() {
+fn cancel_withdrawal_cannot_reenter_cancel() {
     let h = harness();
     h.escrow.lock();
-    h.arm("cancel");
     let buyer_before = h.token.balance(&h.buyer);
 
     h.escrow.cancel();
+    h.arm("cancel");
+    h.escrow.withdraw_payout(&h.buyer);
 
     h.assert_callback_blocked();
     assert_eq!(h.escrow.get_status(), Status::Cancelled);
@@ -584,16 +587,16 @@ fn fund_fx_shortfall_cannot_reenter_itself() {
 }
 
 #[test]
-fn expire_fx_shortfall_window_cannot_reenter_itself() {
+fn expire_fx_shortfall_window_withdrawal_cannot_reenter_expiry() {
     let h = oracle_harness();
     h.drive_to_delivered(1_000);
     h.escrow.resolve_fx_shortfall();
     let deadline = h.escrow.get_commitment().fx_shortfall_deadline;
     assert!(deadline > 0, "test setup must produce a real shortfall");
     h.env.ledger().set_timestamp(deadline + 1);
-    h.arm("expire_fx_shortfall_window");
-
     h.escrow.expire_fx_shortfall_window();
+    h.arm("expire_fx_shortfall_window");
+    h.escrow.withdraw_payout(&h.cooperative);
 
     h.assert_callback_blocked();
     assert_eq!(h.escrow.get_status(), Status::Defaulted);

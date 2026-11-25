@@ -213,7 +213,7 @@ values it reads without renaming a single field.
 }
 ```
 
-*Cooperative claims tranche 1, if within the window. Boundary (#111): "within" is inclusive of the deadline instant.*
+*Cooperative claims tranche 1, if within the window. Boundary (#111): "within" is inclusive of the deadline instant. An open tranche remains actionable through a dispute, but not after a terminal outcome allocates the remaining escrow.*
 
 ### 11. `reclaim_advance_1`
 
@@ -228,7 +228,7 @@ values it reads without renaming a single field.
 }
 ```
 
-*Buyer reclaims tranche 1, if the window has passed unclaimed. Boundary (#111): the exact complement of `claim_advance_1`.*
+*Buyer reclaims tranche 1, if the window has passed unclaimed. Boundary (#111): the exact complement of `claim_advance_1`. An open tranche remains actionable through a dispute, but not after a terminal outcome allocates the remaining escrow.*
 
 ### 12. `mark_checkpoint`
 
@@ -603,7 +603,24 @@ values it reads without renaming a single field.
 
 *No auth required — read-only view, callable by anyone. Returns every state-changing call the current commitment currently permits, each as an `Action { function, auth, deadline }` where `function` is the Soroban symbol to invoke, `auth` is the party whose `require_auth()` the call needs (or `Anyone` for permissionless calls), and `deadline` bounds the call by timestamp (`None` when no timing gate applies, `Inclusive(T)` when legal up to and including `T`, `Exclusive(T)` when legal only strictly after `T`).*
 
-*Every entry is produced by the same private guard predicate (`can_lock`, `can_claim_tranche`, `can_settle`, …) the real method calls, so the view cannot drift from the checks that actually authorize the call. `initialize` is deliberately excluded (there is no commitment to derive actions from before it runs — an empty list is returned), and the read-only getters/`oracle_rate` are excluded (they do not change state and are always callable). Oracle-backed actions are advertised purely from local state (a configured oracle and an unresolved FX step); quote freshness is an external read, so an advertised `resolve_fx_shortfall` can still return `Error::OracleStale` until the oracle publishes a fresh quote — the `fx_quote_stale` flag on `get_commitment` is the companion "waiting on a fresh quote" signal.*
+*Each state-machine action is produced by the same private guard predicate (`can_lock`, `can_claim_tranche`, `can_settle`, …) the real method calls. `withdraw_payout` is advertised when either beneficiary has a recorded credit. `initialize` is deliberately excluded (there is no commitment to derive actions from before it runs — an empty list is returned), and the read-only getters/`oracle_rate` are excluded (they do not change state and are always callable). Oracle-backed actions are advertised purely from local state (a configured oracle and an unresolved FX step); quote freshness is an external read, so an advertised `resolve_fx_shortfall` can still return `Error::OracleStale` until the oracle publishes a fresh quote — the `fx_quote_stale` flag on `get_commitment` is the companion "waiting on a fresh quote" signal.*
+
+### 32. `withdraw_payout`
+
+```json
+{
+  "name": "withdraw_payout",
+  "args": [
+    { "name": "recipient", "type": "Address" }
+  ],
+  "returns": "Result<(), Error>",
+  "errors": ["NotAParty", "NoPayout"],
+  "state_transition": null,
+  "auth_requirement": "buyer_or_cooperative"
+}
+```
+
+*Withdraws only the caller's recorded terminal payout credit. The buyer and cooperative withdraw independently; a failed token transfer rolls back only that withdrawal and leaves the credit retryable. If both roles use the same address, one call withdraws both credits.*
 
 ---
 

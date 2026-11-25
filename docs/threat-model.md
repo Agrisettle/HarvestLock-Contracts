@@ -48,7 +48,7 @@ document will not accept being crossed.
 | --- | --- | --- |
 | The escrowed balance (deposit + funded remainder + FX top-ups) | A misdirected payout can't be reversed | **Unsafe** |
 | The settlement outcome (`settlement_bps`, the FX number) | A wrong number *is* a wrong payout | **Unsafe** |
-| Contract liveness (money stuck behind a halted state machine) | Refusals and freezes keep funds in the contract | Recoverable: visible, deadline-bounded |
+| Contract liveness (money stuck behind a halted state machine or unreceivable payout) | Refusals and freezes keep funds in the contract | Recoverable by retry when the token permits receipt; one beneficiary cannot block the other's withdrawal |
 | The allocation ledger (transparency + NDPA unlinkability) | A wrong record causes off-chain harm; a linkable hash causes privacy harm | Detective, off-chain consequences |
 | Observability (`status_changed` events, public state) | An indexer can't detect what it can't see | Detective |
 
@@ -91,15 +91,15 @@ linked section per arrow.
 
 | Actor | What they control | What they can do to this contract | What they cannot do |
 | --- | --- | --- | --- |
-| **Buyer** | Their Stellar key; the deal's terms at `initialize` (amounts, bps, windows, token, oracle config) | `initialize`, `lock`, `fund_remainder`, `fund_fx_shortfall`, `reclaim_advance_*`, `reclaim_on_nondelivery`; co-sign `cancel` / `reassign_buyer`; flag a dispute | Unilaterally cancel; confirm delivery; claim an advance; withhold `settle` once its conditions are met; claw back an advance the cooperative already claimed; amend terms after `initialize` (no setter exists) |
-| **Cooperative** | Their Stellar key; the member list authored pre-`lock` | `set_allocation` (once, pre-`lock`), `claim_advance_*`, `ready_for_delivery`; co-sign `cancel` / `reassign_buyer`; flag a dispute | Attest checkpoint or delivery; cancel alone; force `settle` early; change or amend the allocation after `lock`; receive the remainder before the buyer funds it |
+| **Buyer** | Their Stellar key; the deal's terms at `initialize` (amounts, bps, windows, token, oracle config) | `initialize`, `lock`, `fund_remainder`, `fund_fx_shortfall`, `reclaim_advance_*`, `reclaim_on_nondelivery`, withdraw their own terminal payout; co-sign `cancel` / `reassign_buyer`; flag a dispute | Unilaterally cancel; confirm delivery; claim an advance; withhold `settle` once its conditions are met; claw back an advance the cooperative already claimed; amend terms after `initialize` (no setter exists) |
+| **Cooperative** | Their Stellar key; the member list authored pre-`lock` | `set_allocation` (once, pre-`lock`), `claim_advance_*`, `ready_for_delivery`, withdraw their own terminal payout; co-sign `cancel` / `reassign_buyer`; flag a dispute | Attest checkpoint or delivery; cancel alone; force `settle` early; change or amend the allocation after `lock`; receive the remainder before the buyer funds it |
 | **Warehouse operator** | Their Stellar key; their own off-chain grading/appeals process | `mark_checkpoint`, `confirm_delivery` (the attestation that unlocks settlement); flag a dispute | Move funds — the contract never pays the operator anything; adjudicate disputes on chain; alter `grade_price_bps` (fixed at `initialize`); be over-paid or directed anywhere by any call |
 | **Any third party** (stranger, indexer, griefer) | Nothing on chain | Call the 8 permissionless functions, which can only *complete a check the deal already fixed*; call any view | Flag a dispute (`NotAParty`); call any gated function; supply an outcome, destination, or amount to any call; read anything secret — no confidentiality is claimed, none exists |
 | **Reflector oracle** (external) | Its own published quotes | Supply the rate `oracle_rate` / `resolve_fx_shortfall` / `refresh_fx_quote_status` read | Choose the staleness bound, the asset symbol, or the oracle address — all fixed by the buyer at `initialize`; supply a stale or future-dated quote as if fresh (`OracleStale` / `OracleTimestampInFuture`, hard errors) |
 | **HarvestLock / API maintainers** (off-chain) | Which transactions get built and submitted; the reputation store | Build, sign-request, and submit transactions on behalf of users; censor users *off chain*; enforce the default/forfeiture bars app-side | Sign *as* any party, pause, upgrade, drain, or redirect the contract — no HarvestLock address exists anywhere in the contract (PRD §4.5) |
 | **Member farmers** (record subjects) | Their off-chain identity | Nothing — no member key is ever a contract principal | Read or alter their on-chain `member_hash` row; be paid by the contract (v1 `settle` pays the cooperative a lump sum) |
 | **Deployers / maintainers** | Source code, CI, the WASM hash | Ship a new contract version; review PRs | Change a deployed instance — there is no upgrade entrypoint, by design |
-| **Token contract** (SAC / native XLM) | Its own transfer semantics | Halt every call that touches it (its failure unwinds the whole invocation) | Be swapped after `initialize` (address stored at creation) |
+| **Token contract** (SAC / native XLM) | Its own transfer semantics | Reject an individual beneficiary's withdrawal; a failed transfer rolls back only that withdrawal | Be swapped after `initialize` (address stored at creation) |
 
 Note on being named: the cooperative and warehouse operator **never sign at
 `initialize`** — only the buyer does. A commitment can therefore be created
@@ -110,7 +110,7 @@ the only funds at risk before then are the buyer's own.
 
 ## The authorization surface in one screen
 
-32 public functions, 5 shapes, **zero un-gated fund-moving paths** — 13
+33 public functions, 6 shapes, **zero un-gated fund-moving paths** — 14
 single-party gates, 8 permissionless state changes, 3 multi-party mutual
 actions, 1 caller-authenticated flag, 7 no-auth views. The full table with
 PRD citations is [`authorization-matrix.md`](./authorization-matrix.md) §1;
@@ -300,11 +300,11 @@ construction for every *status-gated* call — none of them ever accepts
 `Disputed` as a required status — and one test walks those calls to prove
 it rather than asserting it in prose:
 `flag_dispute_freezes_every_other_state_changing_call`. The exception is
-`claim_advance_1/2` and `reclaim_advance_1/2`: `claim_tranche` /
-`reclaim_tranche` guard only the tranche deadline, the one-shot flags, and
-the party's auth, so a dispute does **not** block a claim or a reclaim. A
-dispute therefore cannot be used to protect a tranche from the other side
-(and equally cannot extend a window). See
+`claim_advance_1/2` and `reclaim_advance_1/2`: open tranche windows remain
+actionable during a dispute, so a dispute does **not** protect a tranche from
+the other side (and equally cannot extend a window). Terminal transitions
+close unresolved tranche rights when they allocate the remaining escrow, so
+no later claim can spend a terminal beneficiary's credit. See
 [`dispute-frontrunning.md`](./dispute-frontrunning.md) §2.
 
 #### 15. Deadlines keep ticking while a dispute is open
@@ -601,6 +601,23 @@ against two deliberately broken tokens and records what breaks:
 The on-chain mitigation is no stronger than §4.5's custody-model
 assumption — the buyer picked the token — but the requirement is now
 documented at both the function-doc-comment layer and here, not folklore.
+
+#### 31. One recipient cannot receive a terminal payout
+**Verdict: defended against cross-party blocking; individual liveness remains
+an accepted token risk.** Terminal calls record each beneficiary's
+entitlement instead of transferring it inline. `withdraw_payout` authenticates
+the beneficiary, clears only that party's credit, then transfers it. If the
+token rejects the buyer (for example, an issuer-deauthorized classic-asset
+SAC trustline), `settle` still reaches `Settled`, the buyer's failed
+withdrawal rolls back without consuming its credit, and the cooperative can
+withdraw independently; the converse is true when the cooperative is the
+unreceivable recipient. The trade-off is an extra transaction and fee for
+each beneficiary, plus funds remain in escrow until each beneficiary
+withdraws. If the issuer never reauthorizes a recipient, that recipient's
+own payout remains stuck; this design prevents that party from blocking the
+other, but cannot override token authorization. Tests:
+`deauthorized_buyer_cannot_block_cooperative_settlement_withdrawal` and
+`deauthorized_cooperative_cannot_block_buyer_settlement_withdrawal`.
 
 ## Out of scope
 

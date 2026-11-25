@@ -761,6 +761,7 @@ fn healthy_oracle_path_records_the_expected_shortfall() {
 
     s.w.contract.fund_fx_shortfall();
     s.w.contract.settle();
+    s.w.contract.withdraw_payout(&s.w.cooperative);
     assert_eq!(s.w.token.balance(&s.w.cooperative), 1_750_000);
     assert_eq!(s.w.status(), Status::Settled);
 }

@@ -13,7 +13,8 @@
 //! Two deliberately non-standard mock tokens are wired up here, each
 //! implementing the subset of SEP-41 the escrow actually uses (`balance`,
 //! `transfer`) — Soroban matches cross-contract calls on XDR shape, so
-//! that subset is enough for `lock`/`fund_remainder`/`settle`/`cancel` to
+//! that subset is enough for `lock`/`fund_remainder`/`settle`/`cancel`/
+//! `withdraw_payout` to
 //! run exactly as they would against a real SAC:
 //!
 //! 1. **Fee-on-transfer**: each `transfer(amount)` credits the receiver
@@ -36,28 +37,18 @@
 //! where the token itself, under normal use, makes the escrow's internal
 //! accounting wrong.
 //!
-//! What each test asserts (pinning current behavior rather than proposing
-//! a defense):
+//! What each test asserts:
 //!
 //! - **Fee-on-transfer, `lock` -> `settle`**: `lock` escrows deposit-minus-fee;
-//!   `fund_remainder` escrows remainder-minus-fee; `settle` pays
-//!   `min(owed, balance)` so the cooperative is paid *the contract's
-//!   current balance* when `owed` would exceed it, and the buyer's refund
-//!   is zero. The lost stroops are the fee, with the token contract
-//!   itself as the de-facto third party in the deal.
-//! - **Fee-on-transfer, `cancel`**: `cancel` after `lock` returns exactly
-//!   what the contract currently holds (deposit-minus-fee), not the
-//!   deposit it tried to pull — the buyer's net loss is two fees across
-//!   the full lock/cancel cycle (one inbound, one outbound).
-//! - **Misreporting, `settle`**: `settle` reads the inflated balance,
-//!   tries to pay against it, and the transfer the token actually
-//!   performs traps when the `balance` lie makes the escrow attempt to
-//!   move stroops that aren't really there. Soroban's atomicity rolls
-//!   back the whole `settle` call, so `status` stays `Delivered` — the
-//!   commitment is stuck, not drained.
-//! - **Misreporting, `cancel`**: the same transfer trap applies — `cancel`
-//!   tries to return the inflated amount and the token aborts; `status`
-//!   stays unchanged.
+//!   `fund_remainder` escrows remainder-minus-fee; `settle` records the
+//!   contract's actual balance as the cooperative's credit. The cooperative
+//!   loses one more fee on withdrawal.
+//! - **Fee-on-transfer, `cancel`**: cancel records the actual deposit-minus-fee
+//!   held; the buyer loses one more fee on withdrawal.
+//! - **Misreporting, terminal action + withdrawal**: terminal actions record
+//!   the token-reported entitlement without attempting a transfer. Withdrawal
+//!   traps when the token rejects the overdraw, leaving the terminal state
+//!   and payout credit intact.
 //!
 //! Both tokens are kept per-instance (each test creates a fresh contract),
 //! so their simulated misbehavior cannot cross between tests. Neither
@@ -155,7 +146,7 @@ mod fee_on_transfer_token {
 
 /// How much the token over-reports its holdings by, in the misreporting
 /// mock's `balance()` lie. Tests choose per-case values via `set_lie`.
-const MISREPORT_LIE: i128 = 10_000;
+const MISREPORT_LIE: i128 = 1_000_000;
 
 mod misreporting_token {
     //! `balance(id)` returns `real + lie(id)` — the token lies *upward*
@@ -403,10 +394,17 @@ fn fee_on_transfer_lock_and_settle_leaves_the_escrow_short_by_the_fees_swallowed
 
     f.contract.settle();
 
-    // The escrow is fully drained — `settle`'s owed_from_remainder is the
-    // honest REMAINDER (claimed_by_coop uses bps_amount, undisturbed by
-    // the fee), and the real balance is less than that, so `min(owed,
-    // balance)` falls back to `balance`. Nothing is refunded to the buyer.
+    // `settle` records the actual balance as the cooperative's credit; the
+    // outbound token transfer occurs only on withdrawal.
+    assert_eq!(
+        f.contract.get_commitment().cooperative_payout,
+        expected_escrow_before_settle
+    );
+    assert_eq!(
+        balance_of(&f.env, &f.custom_token, &f.contract.address),
+        expected_escrow_before_settle
+    );
+    f.contract.withdraw_payout(&f.cooperative);
     assert_eq!(balance_of(&f.env, &f.custom_token, &f.contract.address), 0);
 
     // Three transfer edges between buyer wallet and cooperative wallet:
@@ -442,8 +440,12 @@ fn fee_on_transfer_cancel_refunds_what_is_actually_held_not_what_was_sent() {
 
     f.contract.cancel();
 
-    // No money sits in the escrow after cancel, same shape as the normal
-    // SAC case.
+    // Cancel records the amount held; the buyer receives it on withdrawal.
+    assert_eq!(
+        balance_of(&f.env, &f.custom_token, &f.contract.address),
+        escrow_after_lock
+    );
+    f.contract.withdraw_payout(&f.buyer);
     assert_eq!(balance_of(&f.env, &f.custom_token, &f.contract.address), 0);
     // Buyer receives (balance - FEE) on the refund leg — the escrow was
     // already short by one FEE from the lock inbound, and the refund
@@ -458,12 +460,11 @@ fn fee_on_transfer_cancel_refunds_what_is_actually_held_not_what_was_sent() {
 
 // ---------- misreporting balance ----------
 
-/// `settle` reads the inflated balance, and the subsequent outbound
-/// transfer traps inside the token when it tries to move stroops that
-/// aren't really there. Soroban's atomicity rolls back the whole call,
-/// so `status` stays `Delivered` — the commitment is stuck, not drained.
+/// `settle` records credits without touching the token. The inflated balance
+/// creates an oversized buyer refund, whose later withdrawal traps; the
+/// terminal state and credit remain intact.
 #[test]
-fn misreporting_balance_traps_settle_but_never_drains_the_escrow() {
+fn misreporting_balance_traps_settlement_withdrawal_without_erasing_credit() {
     let f = misreporting_fixture();
     drive_to_delivered(&f);
 
@@ -474,13 +475,17 @@ fn misreporting_balance_traps_settle_but_never_drains_the_escrow() {
         .set_lie(&f.contract.address, &MISREPORT_LIE);
 
     let real_before = real_balance(&f.env, &f.custom_token, &f.contract.address);
-    let settle_result = f.contract.try_settle();
+    f.contract.settle();
+    assert_eq!(f.contract.get_status(), Status::Settled);
+    let payout = f.contract.get_commitment().buyer_payout;
+    assert!(payout > real_before);
+
+    let withdrawal = f.contract.try_withdraw_payout(&f.buyer);
     assert!(
-        settle_result.is_err(),
-        "a transfer that overdraws the real balance must not succeed just because balance() lied"
+        withdrawal.is_err(),
+        "a withdrawal that overdraws the real balance must trap even if balance() lied"
     );
-    assert_eq!(f.contract.get_status(), Status::Delivered);
-    // Real balance unchanged — the rolled-back transfer moved nothing.
+    assert_eq!(f.contract.get_commitment().buyer_payout, payout);
     assert_eq!(
         real_balance(&f.env, &f.custom_token, &f.contract.address),
         real_before
@@ -495,12 +500,11 @@ fn misreporting_balance_traps_settle_but_never_drains_the_escrow() {
     );
 }
 
-/// `cancel` follows the same `balance()` -> `transfer(balance)` shape as
-/// `settle`'s coop-payment leg, so an inflated `balance()` traps it the
-/// same way: the cancel aborts, the escrow is not drained, and `status`
-/// stays whatever it was (here, `Locked`).
+/// `cancel` records the token-reported amount without transferring it.
+/// Withdrawal traps when `balance()` has lied upward, leaving the
+/// cancellation and its retryable credit intact.
 #[test]
-fn misreporting_balance_also_traps_cancel_without_draining_escrow() {
+fn misreporting_balance_traps_cancel_withdrawal_without_erasing_credit() {
     let f = misreporting_fixture();
     f.contract.lock();
     let real_before = real_balance(&f.env, &f.custom_token, &f.contract.address);
@@ -508,13 +512,17 @@ fn misreporting_balance_also_traps_cancel_without_draining_escrow() {
     misreporting_token::MisreportingTokenClient::new(&f.env, &f.custom_token)
         .set_lie(&f.contract.address, &MISREPORT_LIE);
 
-    let cancel_result = f.contract.try_cancel();
+    f.contract.cancel();
+    let payout = f.contract.get_commitment().buyer_payout;
+    assert!(payout > real_before);
+    let withdrawal = f.contract.try_withdraw_payout(&f.buyer);
     assert!(
-        cancel_result.is_err(),
-        "the refund transfer must trap inside the token rather than draining stroops that don't exist"
+        withdrawal.is_err(),
+        "the refund withdrawal must trap inside the token rather than draining nonexistent stroops"
     );
-    // Status didn't advance; nothing left the escrow.
-    assert_eq!(f.contract.get_status(), Status::Locked);
+    // Cancellation committed, while the failed transfer moved nothing.
+    assert_eq!(f.contract.get_status(), Status::Cancelled);
+    assert_eq!(f.contract.get_commitment().buyer_payout, payout);
     assert_eq!(
         real_balance(&f.env, &f.custom_token, &f.contract.address),
         real_before

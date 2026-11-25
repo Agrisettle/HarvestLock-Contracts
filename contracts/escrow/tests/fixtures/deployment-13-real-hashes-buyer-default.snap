@@ -39,6 +39,7 @@ step = ready_for_delivery => ok
 check = status ReadyForDelivery
 step = advance 16
 step = expire_remainder_window => ok
+step = withdraw_payout cooperative => ok
 check = coop_balance 30000000
 check = contract_balance 0
 check = buyer_balance 70000000

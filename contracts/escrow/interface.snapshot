@@ -46,6 +46,7 @@ error Error::InvalidState = 3
 error Error::InvalidWindow = 6
 error Error::LockAfterDeliveryDeadline = 47
 error Error::NoFxShortfall = 31
+error Error::NoPayout = 49
 error Error::NotAParty = 35
 error Error::NotInitialized = 2
 error Error::NotYetOpened = 7
@@ -111,6 +112,7 @@ fn resolve_dispute() -> Result<(), Error>
 fn resolve_fx_shortfall() -> Result<(), Error>
 fn set_allocation(members: Vec<AllocationMember>) -> Result<(), Error>
 fn settle() -> Result<(), Error>
+fn withdraw_payout(recipient: Address) -> Result<(), Error>
 struct Action.auth: AuthParty
 struct Action.deadline: ActionDeadline
 struct Action.function: Symbol
@@ -125,9 +127,13 @@ struct Commitment.advance2_claimed: bool
 struct Commitment.advance2_deadline: u64
 struct Commitment.advance2_expired: bool
 struct Commitment.buyer: Address
+struct Commitment.buyer_payout: i128
+struct Commitment.buyer_payout_reason: Symbol
 struct Commitment.claim_window_secs: u64
 struct Commitment.contracted_quantity: u32
 struct Commitment.cooperative: Address
+struct Commitment.cooperative_payout: i128
+struct Commitment.cooperative_payout_reason: Symbol
 struct Commitment.created_at: u64
 struct Commitment.delivered_quantity: u32
 struct Commitment.delivery_deadline: u64
@@ -207,6 +213,7 @@ union AuthParty::Buyer
 union AuthParty::BuyerAndCooperative
 union AuthParty::BuyerCooperativeAndNewBuyer
 union AuthParty::BuyerCooperativeAndNewOperator
+union AuthParty::BuyerOrCooperative
 union AuthParty::Cooperative
 union AuthParty::WarehouseOperator
 union DisputeOutcome::Expired
