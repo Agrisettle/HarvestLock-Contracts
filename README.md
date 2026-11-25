@@ -128,6 +128,7 @@ libraries a fresh Linux runner is missing.
 
 - **PRD**: [`docs/PRD.md`](https://github.com/Agrisettle/HarvestLock/blob/main/docs/PRD.md) in the `HarvestLock` repo — see §4.8 (contract design), §4.5 (why this can't hold custody keys), §16.3 (oracle staleness and depeg handling the contract must account for)
 - **Authorization model**: [`docs/authorization-matrix.md`](./docs/authorization-matrix.md) — every `require_auth()` site in the contract mapped to the PRD's model, including the two places the code is deliberately stricter than a plain PRD reading
+- **Sequence diagrams**: [`docs/sequences.md`](./docs/sequences.md) — who signs what and which contracts get called for `lock`, the multi-party `cancel`/`reassign_buyer`/`resolve_dispute` (including `require_once_each` dedup), `resolve_fx_shortfall` and `settle`
 - **Dispute scope**: [`docs/dispute-scope.md`](./docs/dispute-scope.md) — what `flag_dispute`/`resolve_dispute` cover (a bounded pause) and deliberately don't (arbitration)
 - **Threat model**: [`docs/threat-model.md`](./docs/threat-model.md) — the actor table and the attack register, with a defended/accepted verdict and the test that holds each defended one
 - **Terminal outcomes**: [`docs/terminal-outcomes.md`](./docs/terminal-outcomes.md) — what the buyer, cooperative, and operator actually walk away with in `Settled`/`Defaulted`/`Forfeited`/`Cancelled`, cross-referenced against the off-chain reputation consequences
