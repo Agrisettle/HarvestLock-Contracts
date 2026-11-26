@@ -12,7 +12,7 @@
 #
 #   BLESS_EVENTS_SNAPSHOT=1 cargo test -p harvestlock-escrow --test events_snapshot
 #
-status_changed topics=[Symbol(status_changed), Vec([Symbol(Draft)]), Vec([Symbol(Locked)])] data=Map({})
+status_changed topics=[Symbol(status_changed), Vec([Symbol(Draft)]), Vec([Symbol(Locked)])] data=Void
 payout topics=[Symbol(payout), Symbol(coop_pay)] data=Map({Symbol(amount): I128(0,1000), Symbol(to): Address})
 tranche_claimed topics=[Symbol(tranche_claimed), U32(1)] data=Map({Symbol(amount): I128(0,150000), Symbol(to): Address})
 tranche_reclaimed topics=[Symbol(tranche_reclaimed), U32(2)] data=Map({Symbol(amount): I128(0,150000), Symbol(to): Address})
@@ -22,7 +22,7 @@ buyer_reassigned topics=[Symbol(buyer_reassigned), Address, Address] data=Map({}
 dispute_flagged topics=[Symbol(dispute_flagged), Address] data=Map({Symbol(deadline): U64(604800), Symbol(pre_status): Vec([Symbol(Locked)])})
 dispute_ended topics=[Symbol(dispute_ended), Vec([Symbol(Resolved)])] data=Map({Symbol(restored): Vec([Symbol(Locked)])})
 fx_resolved topics=[Symbol(fx_resolved)] data=Map({Symbol(deadline): U64(604800), Symbol(fx_adjusted_total): I128(0,1334000), Symbol(rate): I128(0,66700000000), Symbol(rate_timestamp): U64(1), Symbol(shortfall): I128(0,334000)})
-fx_quote_stale_changed topics=[Symbol(fx_quote_stale_changed)] data=Map({Symbol(stale): Bool(true)})
+fx_quote_stale_changed topics=[Symbol(fx_quote_stale_changed)] data=Bool(true)
 delivery_confirmed topics=[Symbol(delivery_confirmed), U32(0)] data=Map({Symbol(delivered_quantity): U32(500), Symbol(settlement_bps): U32(5000)})
 allocation_recorded topics=[Symbol(allocation_recorded)] data=Map({Symbol(member_count): U32(2), Symbol(total_share_bps): U32(10000)})
 oracle_config_replaced topics=[Symbol(oracle_config_replaced)] data=Map({Symbol(new_oracle_contract): Address})
