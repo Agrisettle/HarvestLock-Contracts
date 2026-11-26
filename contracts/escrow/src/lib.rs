@@ -38,7 +38,7 @@
 //! All absolute deadlines here follow one boundary rule: the recorded
 //! deadline timestamp is the *last* second on which the original window
 //! is still open, and every deadline-triggered failure path opens
-//! strictly after it. So at `now == deadline`, `fund_remainder`,
+//! strictly after it. So at `now == deadline`, `lock`, `fund_remainder`,
 //! `fund_fx_shortfall` and `resolve_dispute` still succeed, while
 //! `expire_remainder_window`, `expire_fx_shortfall_window`,
 //! `reclaim_on_nondelivery` and `expire_dispute_window` still refuse — a
@@ -164,11 +164,39 @@ extern crate std;
 
 mod reflector;
 
+/// The shared test harness (#274): one copy of the fixtures, constants and
+/// clock helpers behind every suite — the in-crate unit tests in
+/// `src/test.rs` and the integration suites in `tests/`. Declared here rather
+/// than duplicated so the two can't drift; see the module's own docs for how
+/// each suite reaches it and why the integration suites need the `testutils`
+/// feature (which `Cargo.toml`'s self dev-dependency turns on for them).
+#[cfg(any(test, feature = "testutils"))]
+pub mod testutils;
+
 use reflector::{Asset as ReflectorAsset, ReflectorPulseClient};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token,
     Address, BytesN, Env, Symbol, Vec,
 };
+
+// Build metadata embedded in the WASM's `contractmetav0` custom section (#246),
+// so a deployed contract can say which version and source it came from without
+// a lookup in CHANGELOG.md. Read it back with:
+//
+//   stellar contract info meta --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+//
+// Both values come from Cargo, so there is one place to change each:
+// `version` from `contracts/escrow/Cargo.toml`'s `version` (kept in step with
+// the deployment line per docs/versioning.md §5), `repository` from the
+// workspace `[workspace.package] repository`. Deliberately no timestamp, git
+// hash or other build-environment value: those would differ between two clean
+// builds of the same commit and break the `build-wasm` reproducibility check.
+// See docs/versioning.md §6.
+soroban_sdk::contractmeta!(
+    key = "version",
+    val = concat!("escrow-v", env!("CARGO_PKG_VERSION"))
+);
+soroban_sdk::contractmeta!(key = "repository", val = env!("CARGO_PKG_REPOSITORY"));
 
 /// Maximum number of entries `initialize` accepts in `grade_price_bps`.
 /// Deliberately generous — the PRD's grading examples are 3 tiers (A/B/C),
@@ -184,6 +212,19 @@ pub const MAX_GRADE_ENTRIES: u32 = 16;
 /// longer than that is a caller mistake, not a bigger cooperative. See the
 /// `AllocationTooLarge` error.
 pub const MAX_ALLOCATION_MEMBERS: u32 = 200;
+
+/// Largest `OracleConfig::denominated_amount` `initialize` accepts (#247):
+/// the biggest value for which `bps_amount(denominated_amount, 10_000)` —
+/// `denominated_amount * 10_000`, the largest multiply `resolve_fx_shortfall`
+/// performs on it, since `settlement_bps` never exceeds 10_000 — still fits
+/// in an `i128`. Anything above would make settlement trap on overflow
+/// rather than be refused up front with `InvalidOracleConfig`.
+///
+/// This bounds only the `bps_amount` step. The later
+/// `ngn_owed * rate.price` multiply depends on a live oracle value that
+/// `initialize` cannot know, and is the F4 finding pinned in
+/// `tests/oracle_fault_injection.rs`.
+pub const MAX_DENOMINATED_AMOUNT: i128 = i128::MAX / 10_000;
 
 /// Largest `total_amount` `initialize` accepts.
 ///
@@ -360,10 +401,14 @@ pub enum Error {
     InvalidAllocation = 22,
     /// `get_allocation` called before `set_allocation` ever ran.
     AllocationNotSet = 23,
-    /// `initialize`'s `oracle_config` was `Some` with `max_age_secs == 0`
-    /// — a zero staleness bound would reject every real quote, which is
-    /// never what a caller actually wants (that's what leaving
-    /// `oracle_config` as `None` is for).
+    /// `initialize`'s `oracle_config` was `Some` with either:
+    /// - `max_age_secs == 0`: a zero staleness bound would reject every
+    ///   real quote, which is never what a caller actually wants (that's
+    ///   what leaving `oracle_config` as `None` is for); or
+    /// - `denominated_amount <= 0` or `> MAX_DENOMINATED_AMOUNT` (#247):
+    ///   a non-positive value would make `resolve_fx_shortfall` owe the
+    ///   cooperative nothing after a full delivery, and an oversized one
+    ///   would overflow `bps_amount` and trap at settlement.
     InvalidOracleConfig = 24,
     /// `oracle_rate` or `resolve_fx_shortfall` called but `initialize`
     /// never set an `oracle_config` for this commitment — the only two
@@ -448,6 +493,39 @@ pub enum Error {
     /// belongs to the operator's confirmation window; strictly after it, only
     /// `reclaim_on_nondelivery` is legal (#199).
     DeliveryDeadlinePassed = 43,
+    /// The oracle conversion's numerator or decimal divisor cannot be
+    /// represented as an `i128`; settlement must not trap on unusable oracle
+    /// values.
+    OracleConversionOutOfRange = 44,
+    /// The configured Reflector oracle returned a quote timestamp later than
+    /// the current ledger timestamp; future quotes cannot satisfy freshness.
+    OracleTimestampInFuture = 45,
+    /// The configured oracle contract could not answer at all (#245): the
+    /// cross-contract `lastprice` or `decimals` call failed in a way the
+    /// host lets the caller recover from. That covers an
+    /// `oracle_config.oracle_contract` with no contract deployed behind it,
+    /// a callee that panics or traps, and a callee whose reply doesn't
+    /// decode as the expected type. Distinct from `OraclePriceUnavailable`,
+    /// which means the oracle *did* answer and quotes no such asset.
+    ///
+    /// Not every failure can become this error: the host still aborts the
+    /// whole invocation, with no contract error to return, when the
+    /// callee uses up the transaction's shared CPU/memory budget. See the
+    /// header of `tests/oracle_fault_injection.rs` for which failures are
+    /// recoverable and which still abort.
+    OracleUnavailable = 46,
+    /// `lock` called after `delivery_deadline` has *strictly* passed
+    /// (`now > delivery_deadline`) — the deadline second itself is still in
+    /// time, matching every other deadline here. The delivery window is the
+    /// cooperative's time to perform and it starts at `initialize` (see
+    /// `Commitment::delivery_deadline`), so a lock that lands after it would
+    /// hand the buyer an immediate `reclaim_on_nondelivery` — a `Forfeited`
+    /// strike against a cooperative that never had a window to deliver in
+    /// (#277).
+    LockAfterDeliveryDeadline = 47,
+    /// `extend_delivery_deadline` was asked to move the deadline backwards
+    /// or leave it unchanged.
+    DeliveryDeadlineNotExtended = 48,
 }
 
 /// Instance-storage keys. All persistent state for a commitment lives under
@@ -504,6 +582,15 @@ pub struct OracleConfig {
     /// oracle, read live at settlement and assumed immutable (see
     /// `docs/reflector-decimals-assumption.md`, issue #63); this field is
     /// the deal's value in the same 7-decimal units as `total_amount`.
+    ///
+    /// **Must be in `1..=MAX_DENOMINATED_AMOUNT`** (#247), or `initialize`
+    /// refuses with `InvalidOracleConfig`. Zero or negative would make
+    /// `resolve_fx_shortfall`'s `fx_adjusted_total <= 0`, so `settle` would
+    /// pay the cooperative nothing and refund everything to the buyer after
+    /// a full delivery. Above `MAX_DENOMINATED_AMOUNT` (`i128::MAX / 10_000`),
+    /// `bps_amount(denominated_amount, settlement_bps)` would overflow and
+    /// trap at settlement. Both mistakes are caught at deploy time instead
+    /// of only showing up when the deal settles.
     pub denominated_amount: i128,
 }
 
@@ -662,6 +749,19 @@ pub struct Commitment {
     /// once at `initialize` — unlike the tranche/remainder deadlines,
     /// this one doesn't depend on some other call happening first, so
     /// there's no "0 = unset" state for it.
+    ///
+    /// **The delivery window starts at `initialize`, not at `lock`**: it is
+    /// the cooperative's time to reach `Delivered`, anchored to the moment
+    /// the deal was created (`created_at`), and it is therefore already
+    /// ticking while the commitment sits in `Draft`. That is deliberate —
+    /// the window is the buyer's protection against a cooperative that
+    /// never delivers, and re-anchoring it at `lock` would let a buyer
+    /// extend it by simply locking late. The complementary guard is on the
+    /// other side of that trade-off (#277): `lock` refuses once
+    /// `now > delivery_deadline` with
+    /// [`Error::LockAfterDeliveryDeadline`], so a buyer can never lock into
+    /// a window that has already closed and immediately forfeit the
+    /// cooperative's position via `reclaim_on_nondelivery`.
     pub delivery_deadline: u64,
 
     /// 0 = not yet opened. Once `release_advance_1` runs, this is set to
@@ -688,7 +788,12 @@ pub struct Commitment {
     /// Same semantics as `advance1_expired`.
     pub advance2_expired: bool,
 
-    /// 0 = not yet opened. Set by `ready_for_delivery`.
+    /// Set by `ready_for_delivery` when the remainder is non-zero and by
+    /// `fund_remainder` once the buyer's second deposit lands. **Also set by
+    /// `ready_for_delivery` itself when the remainder is zero** (#275): a
+    /// deposit covering all of `total_amount` (advance bps summing to 10 000)
+    /// leaves nothing to fund, so the window opens already satisfied and the
+    /// buyer can't be defaulted for skipping a call that moves no tokens.
     pub remainder_deadline: u64,
     /// `true` once `fund_remainder` has transferred the second-phase payment
     /// into escrow. Guards `confirm_delivery` (delivery cannot be confirmed
@@ -853,6 +958,16 @@ impl Commitment {
                 "invariant: remainder_funded with remainder_deadline == 0"
             );
         }
+        // #275: a deposit that already covers `total_amount` leaves nothing
+        // for `fund_remainder` to escrow, so the remainder window opens
+        // already satisfied — there is no state where a zero remainder is
+        // unfunded and the buyer can be defaulted over it.
+        if self.remainder_deadline != 0 && EscrowContract::remainder_amount(self) == 0 {
+            assert!(
+                self.remainder_funded,
+                "invariant: zero remainder left unfunded with a window open"
+            );
+        }
         // A shortfall exists iff it has a deadline to cure it by.
         assert!(
             (self.fx_shortfall_amount > 0) == (self.fx_shortfall_deadline != 0),
@@ -876,7 +991,15 @@ impl Commitment {
 /// Bumped whenever a field is added, removed, renamed, or changes meaning —
 /// see `docs/versioning.md` §2. Storage-only changes to [`Commitment`] do
 /// **not** bump it; that is the whole point of the view.
-pub const COMMITMENT_VIEW_SCHEMA_VERSION: u32 = 1;
+///
+/// **Version 2 (#270)**: `terms.delivery_deadline` became
+/// `terms.delivery_window_secs`, so the agreed-terms struct is literally
+/// the same type `initialize` accepts (named fields in both directions)
+/// instead of two look-alike shapes. A reader written against version 1
+/// must recompute the absolute deadline as `created_at +
+/// terms.delivery_window_secs`; that is the only field whose meaning
+/// moved, and every other field kept its name and meaning.
+pub const COMMITMENT_VIEW_SCHEMA_VERSION: u32 = 2;
 
 /// The three named parties plus the settlement token.
 #[contracttype]
@@ -889,16 +1012,48 @@ pub struct CommitmentParties {
 }
 
 /// The deal's agreed terms and windows, fixed at `initialize`.
+///
+/// **The one definition of "the terms" (#270).** `initialize` takes this
+/// struct instead of a run of eight positional arguments, and
+/// `get_commitment_view` returns the same struct as `terms` — so the
+/// generated bindings, the read model, and `docs/0002-interface-spec.md`
+/// all name the same fields. That is the whole point: `advance1_bps` and
+/// `advance2_bps` are adjacent `u32`s, and `claim_window_secs`,
+/// `remainder_window_secs` and `delivery_window_secs` are adjacent `u64`s,
+/// so a positional swap type-checked and silently produced a different
+/// deal. A named field cannot be swapped silently, and generated clients
+/// carry the names through.
+///
+/// `delivery_window_secs` is the *window length*, not the absolute
+/// deadline: `initialize` computes `delivery_deadline = created_at +
+/// delivery_window_secs` once and stores that absolute value in
+/// [`Commitment`]. The view reconstructs the window as
+/// `delivery_deadline - created_at`, which is exactly the value passed
+/// here, so the read shape reports the *agreed term* rather than a
+/// clock-derived one. Every other field is stored verbatim.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitmentTerms {
     pub total_amount: i128,
+    /// Basis points of `total_amount` released at lock-in. 0-10_000, and
+    /// `advance1_bps + advance2_bps <= 10_000`.
     pub advance1_bps: u32,
+    /// Basis points released at the mid-season checkpoint. Together with
+    /// `advance1_bps` this defines the deposit `lock` escrows.
     pub advance2_bps: u32,
+    /// How long the cooperative has to claim an advance once it opens.
     pub claim_window_secs: u64,
+    /// How long the buyer has to fund the remainder once
+    /// `ready_for_delivery` opens the window.
     pub remainder_window_secs: u64,
-    pub delivery_deadline: u64,
+    /// How long after `created_at` the cooperative has to reach
+    /// `Delivered`. Must be > 0.
+    pub delivery_window_secs: u64,
+    /// The quantity the buyer is contracting for, in caller-defined units.
     pub contracted_quantity: u32,
+    /// Pre-agreed grade -> price multiplier table, in basis points
+    /// (10_000 = full price). Non-empty, at most `MAX_GRADE_ENTRIES`
+    /// entries, every entry <= 10_000.
     pub grade_price_bps: Vec<u32>,
 }
 
@@ -1018,7 +1173,12 @@ impl CommitmentView {
                 advance2_bps: c.advance2_bps,
                 claim_window_secs: c.claim_window_secs,
                 remainder_window_secs: c.remainder_window_secs,
-                delivery_deadline: c.delivery_deadline,
+                // The stored field is the absolute deadline `initialize`
+                // computed; subtract `created_at` to report the agreed
+                // window itself. `check_invariants` guarantees
+                // `delivery_deadline >= created_at`, so this cannot
+                // underflow.
+                delivery_window_secs: c.delivery_deadline - c.created_at,
                 contracted_quantity: c.contracted_quantity,
                 grade_price_bps: c.grade_price_bps.clone(),
             },
@@ -1093,8 +1253,286 @@ pub struct StatusChanged {
     pub to: Status,
 }
 
-/// Contract entrypoint. All public functions are hosted here via
-/// `#[contractimpl]`; one instance is deployed per escrow commitment.
+/// Emitted after every fund transfer in a terminal or payout path —
+/// `settle` (once per non-zero leg), `cancel`, `expire_remainder_window`,
+/// `reclaim_on_nondelivery`, and `expire_fx_shortfall_window`.
+/// `reason` is a short symbol naming the call so an indexer can reconstruct
+/// each party's final balance from escrow events alone (#204).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Payout {
+    #[topic]
+    pub reason: Symbol,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `claim_advance_1` / `claim_advance_2` after a tranche is
+/// transferred to the cooperative. `tranche` is 1 or 2 (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrancheClaimed {
+    #[topic]
+    pub tranche: u32,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `reclaim_advance_1` / `reclaim_advance_2` after a lapsed
+/// tranche is returned to the buyer (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrancheReclaimed {
+    #[topic]
+    pub tranche: u32,
+    pub to: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `fund_remainder` after the buyer's second deposit lands (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemainderFunded {
+    pub from: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `fund_fx_shortfall` after the buyer's FX top-up lands (#202).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FxShortfallFunded {
+    pub from: Address,
+    pub amount: i128,
+}
+
+/// Emitted by `reassign_buyer` after the buyer position is novated to `new_buyer` (#206).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuyerReassigned {
+    #[topic]
+    pub previous: Address,
+    #[topic]
+    pub new_buyer: Address,
+}
+
+/// Whether a dispute ended by unanimous consent or by the window expiring (#208).
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisputeOutcome {
+    Resolved,
+    Expired,
+}
+
+/// Emitted by `flag_dispute` when a named party freezes the commitment (#208).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeFlagged {
+    #[topic]
+    pub flagger: Address,
+    pub pre_status: Status,
+    pub deadline: u64,
+}
+
+/// Emitted by `resolve_dispute` and `expire_dispute_window` when a dispute ends (#208).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeEnded {
+    #[topic]
+    pub outcome: DisputeOutcome,
+    pub restored: Status,
+}
+
+/// Emitted by `resolve_fx_shortfall` after the FX shortfall amount is computed (#210).
+/// `deadline` is 0 when `shortfall` is 0 (no top-up window needed).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FxResolved {
+    pub rate: i128,
+    pub rate_timestamp: u64,
+    pub fx_adjusted_total: i128,
+    pub shortfall: i128,
+    pub deadline: u64,
+}
+
+/// Emitted by `refresh_fx_quote_status` when `fx_quote_stale` changes (#210).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FxQuoteStaleChanged {
+    pub stale: bool,
+}
+
+/// Emitted by `confirm_delivery` after the operator's attestation is recorded (#212).
+/// The three fields together are the trust anchor for every downstream
+/// calculation: `settlement_bps` is derived from `delivered_quantity` ×
+/// `grade_price_bps[grade_index]` / `contracted_quantity`, computed once and
+/// never re-derived. Per-member hashes stay out of this event — see
+/// `docs/allocation-salt-analysis.md` for why member identity belongs
+/// off-chain.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliveryConfirmed {
+    #[topic]
+    pub grade_index: u32,
+    pub delivered_quantity: u32,
+    pub settlement_bps: u32,
+}
+
+/// Emitted by `set_allocation` after the member entitlement ledger is
+/// recorded (#212). Reports the aggregate shape (member count and total
+/// share basis points) without exposing individual hashes, so an indexer
+/// can verify completeness without decoding the full allocation list.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllocationRecorded {
+    pub member_count: u32,
+    pub total_share_bps: u32,
+}
+
+/// Emitted by `replace_oracle_config` when both parties consent to swap the
+/// oracle address (#215). The old config is not stored after replacement;
+/// subscribers that need it can read it from this event's context, via the
+/// previous `initialize` transaction's arguments.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleConfigReplaced {
+    pub new_oracle_contract: Address,
+}
+
+/// The pre-delivery range: every status `cancel` and `reassign_buyer`
+/// accept. Past `Delivered` the buyer no longer gates any remaining action,
+/// so moving a position or unwinding the deal there would be a no-op
+/// dressed up as a real transfer — see those functions' doc comments.
+const PRE_DELIVERY: &[Status] = &[
+    Status::Draft,
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+];
+
+/// The range with funds already at stake or a claim outstanding, but no
+/// delivery attested yet: the two seller-failure paths
+/// (`reclaim_on_nondelivery`, `expire_delivery_window`) are reachable
+/// exactly here, and `Draft` is deliberately excluded (nothing was ever
+/// escrowed at that point).
+const LOCKED_THROUGH_READY: &[Status] = &[
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+];
+
+/// The dispute window: everything the three named parties can freeze — from
+/// the first status with money escrowed (`Locked`) through the operator's
+/// delivery attestation (`Delivered`). Not `Draft` (nothing to freeze), not
+/// any terminal status, and not `Disputed` itself (a dispute can't be
+/// re-flagged while it is already open).
+const LOCKED_THROUGH_DELIVERED: &[Status] = &[
+    Status::Locked,
+    Status::Advance1Released,
+    Status::CheckpointPassed,
+    Status::Advance2Released,
+    Status::ReadyForDelivery,
+    Status::Delivered,
+];
+
+/// One status-gated public method — the key into the declared transition
+/// table, [`Self::allowed_from`].
+///
+/// This enum plus that one function **is** the state machine's source of
+/// truth (#227). Every `can_*` guard in this file begins with
+/// `Self::require_status(c, Method::X)`, so a method's accepted source
+/// statuses are written exactly once; before this table existed, the same
+/// `Locked..=ReadyForDelivery` range was hand-copied into four different
+/// guard functions and `Disputed`-is-never-accepted was implied by a dozen
+/// separate lists that all had to stay in sync. Adding a call means adding
+/// a row here, and a status that admits nothing can be read off the table
+/// directly.
+///
+/// Two rows (`ClaimAdvance1`/`ClaimAdvance2`, `ReclaimAdvance1`/
+/// `ReclaimAdvance2`) declare **no** status gate, and that is deliberate,
+/// not an omission: an advance window, once opened, stays claimable (or
+/// reclaimable) while `advanceN_deadline` is open regardless of what the
+/// deal's status has since moved on to — crop progress doesn't wait on
+/// paperwork, and a dispute freeze deliberately does not stop a tranche
+/// window that is already ticking (pinned by
+/// `claim_advance_1_while_disputed_still_pays` and
+/// `reclaim_advance_1_while_disputed_still_refunds`). Their real guards are
+/// the deadline/flag predicates in `can_claim_tranche`/
+/// `can_reclaim_tranche`, which is why the table says `None` rather than
+/// listing every status.
+#[derive(Clone, Copy)]
+enum Method {
+    SetAllocation,
+    Lock,
+    ExtendDeliveryDeadline,
+    ReleaseAdvance1,
+    ClaimAdvance1,
+    ReclaimAdvance1,
+    MarkCheckpoint,
+    ReleaseAdvance2,
+    ClaimAdvance2,
+    ReclaimAdvance2,
+    ReadyForDelivery,
+    FundRemainder,
+    ExpireRemainderWindow,
+    ReclaimOnNondelivery,
+    ExpireDeliveryWindow,
+    ConfirmDelivery,
+    Settle,
+    ResolveFxShortfall,
+    RefreshFxQuoteStatus,
+    ReplaceOracleConfig,
+    FundFxShortfall,
+    ExpireFxShortfallWindow,
+    Cancel,
+    ReassignBuyer,
+    FlagDispute,
+    ResolveDispute,
+    ExpireDisputeWindow,
+}
+
+impl Method {
+    /// The declared transition table: for each method, the source statuses
+    /// it accepts. `None` means "this method has no status gate at all"
+    /// (see the enum's doc for the two tranche pairs, and why).
+    ///
+    /// An empty list is never used: a method reachable from nowhere is far
+    /// more likely to be a table mistake than a real state, and is
+    /// impossible to exercise.
+    const fn allowed_from(self) -> Option<&'static [Status]> {
+        match self {
+            Method::SetAllocation | Method::Lock => Some(&[Status::Draft]),
+            Method::ExtendDeliveryDeadline => Some(LOCKED_THROUGH_READY),
+            Method::ReleaseAdvance1 => Some(&[Status::Locked]),
+            Method::MarkCheckpoint => Some(&[Status::Advance1Released]),
+            Method::ReleaseAdvance2 => Some(&[Status::CheckpointPassed]),
+            Method::ReadyForDelivery => Some(&[Status::Advance2Released]),
+            Method::ClaimAdvance1
+            | Method::ReclaimAdvance1
+            | Method::ClaimAdvance2
+            | Method::ReclaimAdvance2 => None,
+            Method::FundRemainder | Method::ExpireRemainderWindow | Method::ConfirmDelivery => {
+                Some(&[Status::ReadyForDelivery])
+            }
+            Method::ReclaimOnNondelivery | Method::ExpireDeliveryWindow => {
+                Some(LOCKED_THROUGH_READY)
+            }
+            Method::Settle
+            | Method::ResolveFxShortfall
+            | Method::RefreshFxQuoteStatus
+            | Method::ReplaceOracleConfig
+            | Method::FundFxShortfall
+            | Method::ExpireFxShortfallWindow => Some(&[Status::Delivered]),
+            Method::Cancel | Method::ReassignBuyer => Some(PRE_DELIVERY),
+            Method::FlagDispute => Some(LOCKED_THROUGH_DELIVERED),
+            Method::ResolveDispute | Method::ExpireDisputeWindow => Some(&[Status::Disputed]),
+        }
+    }
+}
+
 #[contract]
 pub struct EscrowContract;
 
@@ -1161,24 +1599,43 @@ impl EscrowContract {
     /// reason. The only thing an abandoned Draft leaves behind is its
     /// storage entry, whose lifetime (and eventual archival) is covered by
     /// docs/storage-ttl.md — a dead record, not lost money.
+    ///
+    /// **Signature (#270)**: the eight numeric/list terms travel as one
+    /// named [`CommitmentTerms`] struct rather than eight positional
+    /// parameters, so a swapped `advance1_bps`/`advance2_bps` — or
+    /// `claim_window_secs`/`remainder_window_secs` — can no longer
+    /// type-check, and generated clients name every field. The parties and
+    /// the optional `oracle_config` stay standalone arguments: an
+    /// `Address` cannot be confused for another `Address` by position in
+    /// the way adjacent `u32`/`u64` terms can, and `OracleConfig` is a
+    /// separate optional concern, not an agreed term. Per
+    /// docs/versioning.md §2 this is a MINOR **BREAKING** change; the
+    /// migration is one call-site reshape, with validation and stored
+    /// state identical to before.
     pub fn initialize(
         env: Env,
         buyer: Address,
         cooperative: Address,
         warehouse_operator: Address,
         token: Address,
-        total_amount: i128,
-        advance1_bps: u32,
-        advance2_bps: u32,
-        claim_window_secs: u64,
-        remainder_window_secs: u64,
-        delivery_window_secs: u64,
-        contracted_quantity: u32,
-        grade_price_bps: Vec<u32>,
+        terms: CommitmentTerms,
         // Some if this deal needs the oracle_rate conversion path — see
         // the module doc. None for a plain deal.
         oracle_config: Option<OracleConfig>,
     ) -> Result<(), Error> {
+        // Destructured once, so every guard and the stored struct below
+        // read exactly the names the positional parameters used to have.
+        // The validation order is unchanged.
+        let CommitmentTerms {
+            total_amount,
+            advance1_bps,
+            advance2_bps,
+            claim_window_secs,
+            remainder_window_secs,
+            delivery_window_secs,
+            contracted_quantity,
+            grade_price_bps,
+        } = terms;
         if env.storage().instance().has(&DataKey::Commitment) {
             return Err(Error::AlreadyInitialized);
         }
@@ -1207,6 +1664,19 @@ impl EscrowContract {
         }
         if let Some(oc) = &oracle_config {
             if oc.max_age_secs == 0 {
+                return Err(Error::InvalidOracleConfig);
+            }
+            // #247: `denominated_amount` is what decides the cooperative's
+            // payout on an oracle deal (`resolve_fx_shortfall` reprices it),
+            // so it gets the same "must be positive" bar `total_amount` gets
+            // above. Zero or negative would make `fx_adjusted_total <= 0`,
+            // clamp `owed_from_remainder` to 0, and let `settle` refund the
+            // whole escrow to the buyer after a full delivery. The upper
+            // bound rejects any value for which `bps_amount(_, 10_000)` —
+            // the largest multiplier `resolve_fx_shortfall` can apply, since
+            // `settlement_bps <= 10_000` — would overflow `i128` and trap at
+            // settlement instead of being refused here.
+            if oc.denominated_amount <= 0 || oc.denominated_amount > MAX_DENOMINATED_AMOUNT {
                 return Err(Error::InvalidOracleConfig);
             }
         }
@@ -1329,17 +1799,31 @@ impl EscrowContract {
     /// rather than re-reading storage, since `resolve_fx_shortfall`
     /// already has its own copy in hand and needs the rest of it
     /// (`denominated_amount`) right after this call.
+    ///
+    /// Uses the generated `try_lastprice`, not the panicking `lastprice`
+    /// (#245). A missing or crashing oracle, or a reply that doesn't decode
+    /// as `Option<PriceData>`, comes back as `Error::OracleUnavailable`
+    /// instead of aborting the caller's whole invocation.
     fn read_oracle_rate(env: &Env, config: &OracleConfig) -> Result<OracleRate, Error> {
         let client = ReflectorPulseClient::new(env, &config.oracle_contract);
-        let quote = client
-            .lastprice(&ReflectorAsset::Other(config.price_asset.clone()))
+        let quote =
+            match client.try_lastprice(&ReflectorAsset::Other(config.price_asset.clone())) {
+                Ok(Ok(quote)) => quote,
+                // Outer `Err`: the call itself failed (no contract there, the
+                // callee panicked or returned an error). Inner `Err`: it
+                // answered, but not with a value of the expected type.
+                Ok(Err(_)) | Err(_) => return Err(Error::OracleUnavailable),
+            }
             .ok_or(Error::OraclePriceUnavailable)?;
         if quote.price <= 0 {
             return Err(Error::OraclePriceInvalid);
         }
 
         let now = env.ledger().timestamp();
-        let age = now.saturating_sub(quote.timestamp);
+        if quote.timestamp > now {
+            return Err(Error::OracleTimestampInFuture);
+        }
+        let age = now - quote.timestamp;
         if age > config.max_age_secs {
             return Err(Error::OracleStale);
         }
@@ -1397,7 +1881,10 @@ impl EscrowContract {
         c.cooperative.require_auth();
 
         let member_count = members.len();
-        env.storage().instance().set(&DataKey::Allocation, &members);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Allocation, &members);
+        Self::bump_allocation_ttl(&env);
         AllocationRecorded {
             member_count,
             total_share_bps: total_bps,
@@ -1412,15 +1899,45 @@ impl EscrowContract {
     pub fn get_allocation(env: Env) -> Result<Vec<AllocationMember>, Error> {
         let _ = Self::load(&env)?; // NotInitialized if the commitment itself doesn't exist
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Allocation)
             .ok_or(Error::AllocationNotSet)
+    }
+
+    /// Extends the delivery window by mutual consent while the commitment is
+    /// still pre-delivery and the original deadline has not passed. The
+    /// deadline is monotonic: a consent call can only add time, never revoke
+    /// time that was already promised to the cooperative.
+    pub fn extend_delivery_deadline(env: Env, new_deadline: u64) -> Result<(), Error> {
+        let mut c = Self::load(&env)?;
+        Self::can_extend_delivery_deadline(&c, env.ledger().timestamp(), new_deadline)?;
+        Self::require_once_each(&[&c.buyer, &c.cooperative]);
+        c.delivery_deadline = new_deadline;
+        Self::save(&env, &c);
+        Ok(())
     }
 
     /// Draft -> Locked. Pulls the buyer's **deposit** into the contract —
     /// `advance1_bps + advance2_bps` of `total_amount`, not the full
     /// amount. See module docs for why this changed from earlier versions
     /// of this contract, which escrowed everything here.
+    ///
+    /// Requires buyer auth.
+    ///
+    /// **Refused once `delivery_deadline` has strictly passed (#277)**: the
+    /// delivery window counts from `initialize`, not from this call (see
+    /// `Commitment::delivery_deadline` for why), so locking after it would
+    /// buy the buyer a same-second `reclaim_on_nondelivery` and a free
+    /// `Forfeited` against a cooperative that never had time to deliver.
+    /// The deadline second itself is still in time — `now > delivery_deadline`
+    /// is the only rejection (`RemainderWindowPassed`/`ClaimWindowPassed`
+    /// use the same inclusive cut-off), so
+    /// `lock_exactly_at_the_delivery_deadline_still_succeeds` pins the
+    /// boundary from both sides. Rejecting here is the guard half of the
+    /// fix; the alternative considered and not taken was re-anchoring
+    /// `delivery_deadline` to `max(delivery_deadline, lock time + window)`,
+    /// which would have let a buyer extend the cooperative's deadline
+    /// unilaterally.
     ///
     /// No prior SEP-41 `approve()` needed — verified live against real
     /// testnet, not assumed. Soroban's single-transaction nested-
@@ -1433,19 +1950,30 @@ impl EscrowContract {
     /// replaces it with what was actually verified.)
     pub fn lock(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
-        Self::can_lock(&c)?;
+        Self::can_lock(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
         let deposit = Self::deposit_amount(&c);
 
         // State is updated and saved *before* the external transfer
-        // (checks-effects-interactions): if a reentrant call somehow
-        // landed mid-transfer, it would see `Locked` already and be
-        // rejected by the guard above, instead of being able to pull the
-        // deposit a second time before this invocation's save lands.
-        // The standard SAC/native token used here has no such hook — this
-        // is defensive hardening against a future token type, not a
-        // response to a demonstrated exploit against the current one.
+        // (checks-effects-interactions), so the effect is committed even
+        // if the transfer itself later fails: Soroban then rolls the whole
+        // invocation back, including this save, so an `Err` still leaves
+        // nothing behind.
+        //
+        // Two layers defend a mid-transfer re-entry, and `tests/reentrancy.rs`
+        // pins which one actually applies. On soroban-env-host 29.0.1 the
+        // host rejects any call back into a contract already on the call
+        // stack ("Contract re-entry is not allowed") *before* this
+        // contract's frame runs, so a hostile token's callback is stopped at
+        // the host — the saved `Locked` status is never even read. The
+        // ordering is retained as defence in depth: if a future host or a
+        // different token standard ever allowed that callback through, the
+        // re-entrant call would see `Locked` already and be rejected by the
+        // guard above instead of pulling the deposit a second time. The
+        // standard SAC/native token used here has no callback hook at all;
+        // this remains hardening against a future token type, not a response
+        // to a demonstrated exploit against the current one.
         Self::set_status(&env, &mut c, Status::Locked);
         Self::save(&env, &c);
 
@@ -1624,19 +2152,29 @@ impl EscrowContract {
     /// starts the clock that can end in `Defaulted`), so it shouldn't be
     /// triggerable by just anyone.
     ///
-    /// **What it changes**: advances status to `ReadyForDelivery`, sets
-    /// `Commitment::remainder_deadline` to `now + remainder_window_secs`.
-    /// No token transfers.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` — `initialize` has not run yet.
-    /// - `InvalidState` — status is not `Advance2Released`.
+    /// **A zero remainder is funded here, not by a token transfer (#275).**
+    /// `lock` escrows `advance1_bps + advance2_bps` of `total_amount` and
+    /// `fund_remainder` escrows the rest; when an advance split sums to
+    /// exactly 10 000 bps the deposit *is* `total_amount`, so there is no
+    /// remainder to send. Requiring `fund_remainder` anyway would let a
+    /// fully-prepaid buyer be marked `Defaulted` — and lose the whole
+    /// deposit to the cooperative — by not making a call that moves zero
+    /// tokens before `remainder_deadline`. So when the remainder is zero,
+    /// this call sets `remainder_funded` itself, which keeps
+    /// `expire_remainder_window`'s buyer-default (`RemainderAlreadyFunded`)
+    /// and `confirm_delivery`'s gate (`RemainderNotFunded`) meaningful: the
+    /// first is unreachable, the second already satisfied. No
+    /// `RemainderFunded` event is emitted for it, because no funds were
+    /// funded — the state is observable in `get_commitment`.
     pub fn ready_for_delivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_ready_for_delivery(&c)?;
         c.cooperative.require_auth();
         c.remainder_deadline = env.ledger().timestamp() + c.remainder_window_secs;
+        // #275: nothing left to escrow, so nothing to default on.
+        if Self::remainder_amount(&c) == 0 {
+            c.remainder_funded = true;
+        }
         Self::set_status(&env, &mut c, Status::ReadyForDelivery);
         Self::save(&env, &c);
         Ok(())
@@ -1655,22 +2193,19 @@ impl EscrowContract {
     /// which is what keeps the boundary from being ambiguous — the two
     /// calls are never both legal at the same timestamp.
     ///
-    /// **What it changes**: sets `Commitment::remainder_funded = true`,
-    /// transfers `total_amount - deposit` from the buyer into escrow.
-    /// Status does not change.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` — `initialize` has not run yet.
-    /// - `InvalidState` — status is not `ReadyForDelivery`.
-    /// - `RemainderAlreadyFunded` — `fund_remainder` has already run.
-    /// - `RemainderWindowPassed` — `now > remainder_deadline`; too late to fund.
+    /// **A zero remainder is already funded (#275)**: when
+    /// `advance1_bps + advance2_bps == 10_000`, `lock` has escrowed the
+    /// whole `total_amount`, `ready_for_delivery` marked the remainder
+    /// funded on the buyer's behalf, and this call refuses with
+    /// `RemainderAlreadyFunded` instead of transferring zero tokens. The
+    /// deal can go straight to `confirm_delivery` — no no-op call is
+    /// required, and none can be held against the buyer.
     pub fn fund_remainder(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_fund_remainder(&c, env.ledger().timestamp())?;
         c.buyer.require_auth();
 
-        let remainder = c.total_amount - Self::deposit_amount(&c);
+        let remainder = Self::remainder_amount(&c);
 
         // Effects before interaction — see `lock`'s comment for why.
         c.remainder_funded = true;
@@ -1708,18 +2243,11 @@ impl EscrowContract {
     /// including an off-chain watcher — can trigger it once the fact of
     /// the matter (deadline passed, unfunded) is true.
     ///
-    /// **What it changes**: advances status to `Defaulted`, transfers the
-    /// contract's entire token balance (the deposit, or what remains of it
-    /// after any claimed advances) to the cooperative.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` — `initialize` has not run yet.
-    /// - `InvalidState` — status is not `ReadyForDelivery`.
-    /// - `RemainderAlreadyFunded` — the remainder was funded; there is no
-    ///   default to trigger.
-    /// - `RemainderWindowNotPassed` — `now <= remainder_deadline`; the
-    ///   buyer's payment window has not yet closed.
+    /// **Unreachable for a fully-prepaid commitment (#275)**: when the
+    /// advance bps sum to 10 000 there is no remainder, `ready_for_delivery`
+    /// marks it funded, and this call refuses with
+    /// `RemainderAlreadyFunded` — the buyer can never be defaulted for not
+    /// sending zero tokens.
     pub fn expire_remainder_window(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_expire_remainder_window(&c, env.ledger().timestamp())?;
@@ -1754,18 +2282,10 @@ impl EscrowContract {
     ///
     /// Not reachable from `Draft`: nothing's ever been escrowed at that
     /// point, so there's nothing to reclaim and no real event has
-    /// occurred worth recording as a forfeiture.
-    ///
-    /// **What it changes**: advances status to `Forfeited`, transfers the
-    /// contract's entire token balance back to the buyer.
-    ///
-    /// # Errors
-    ///
-    /// - `NotInitialized` — `initialize` has not run yet.
-    /// - `InvalidState` — status is not one of `Locked`, `Advance1Released`,
-    ///   `CheckpointPassed`, `Advance2Released`, or `ReadyForDelivery`.
-    /// - `DeliveryDeadlineNotPassed` — `now <= delivery_deadline`; the
-    ///   cooperative's delivery window is still open.
+    /// occurred worth recording as a forfeiture. Since `lock` refuses once
+    /// `delivery_deadline` has passed (#277), there is also no way to reach
+    /// `Locked` with the delivery window already closed, so this sweep can
+    /// only ever fire against a window the cooperative actually had.
     pub fn reclaim_on_nondelivery(env: Env) -> Result<(), Error> {
         let mut c = Self::load(&env)?;
         Self::can_reclaim_on_nondelivery(&c, env.ledger().timestamp())?;
@@ -1936,15 +2456,7 @@ impl EscrowContract {
         } else {
             Self::bps_amount(c.total_amount, c.settlement_bps)
         };
-        let claimed_by_coop = (if c.advance1_claimed {
-            Self::bps_amount(c.total_amount, c.advance1_bps)
-        } else {
-            0
-        }) + (if c.advance2_claimed {
-            Self::bps_amount(c.total_amount, c.advance2_bps)
-        } else {
-            0
-        });
+        let claimed_by_coop = Self::claimed_by_coop(&c);
         let owed_from_remainder = (adjusted_total - claimed_by_coop).max(0);
 
         // Effects before interaction — see `lock`'s comment for why.
@@ -2008,8 +2520,9 @@ impl EscrowContract {
     /// real contract makes `decimals` immutable (write-once at `config`, no
     /// setter; SEP-40 likewise says it "should never change"), so the trust
     /// is well-placed for the deployed oracle. If it were ever violated the
-    /// conversion would silently rescale by a power of ten rather than
-    /// error — see `docs/reflector-decimals-assumption.md` and the
+    /// conversion would silently rescale by a power of ten when representable;
+    /// unrepresentable arithmetic returns `OracleConversionOutOfRange` rather
+    /// than trapping. See `docs/reflector-decimals-assumption.md` and the
     /// `a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall`
     /// test that pins it.
     ///
@@ -2046,8 +2559,14 @@ impl EscrowContract {
             .ok_or(Error::OracleNotConfigured)?;
 
         let rate = Self::read_oracle_rate(&env, &oracle_config)?;
+        // `try_decimals`, not `decimals` (#245): `lastprice` just succeeded
+        // above, but the oracle can still fail on this second call, and
+        // that should also be a contract error rather than a host abort.
         let oracle_decimals =
-            ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
+            match ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).try_decimals() {
+                Ok(Ok(decimals)) => decimals,
+                Ok(Err(_)) | Err(_) => return Err(Error::OracleUnavailable),
+            };
         let token_decimals = token::Client::new(&env, &c.token).decimals();
 
         let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
@@ -2061,34 +2580,19 @@ impl EscrowContract {
         // `10^token_decimals` and dividing at the end) keeps an 18-decimal
         // token's conversion from overflowing i128 on realistic amounts; the
         // cost is flooring once at 7-decimal precision before scaling.
-        let fx_in_denominated_decimals = ngn_owed * rate.price / 10i128.pow(oracle_decimals);
+        let fx_in_denominated_decimals =
+            Self::checked_fx_conversion(ngn_owed, rate.price, oracle_decimals)?;
         let fx_adjusted_total = if token_decimals >= 7 {
             fx_in_denominated_decimals * 10i128.pow(token_decimals - 7)
         } else {
             fx_in_denominated_decimals / 10i128.pow(7 - token_decimals)
         };
 
-        let claimed_by_coop = (if c.advance1_claimed {
-            Self::bps_amount(c.total_amount, c.advance1_bps)
-        } else {
-            0
-        }) + (if c.advance2_claimed {
-            Self::bps_amount(c.total_amount, c.advance2_bps)
-        } else {
-            0
-        });
+        let claimed_by_coop = Self::claimed_by_coop(&c);
         // Reclaimed tranches were returned to the buyer and are no longer in
         // escrow, so the coop has no claim on them; subtract them so we do not
         // charge the buyer a shortfall for funds they already recovered.
-        let reclaimed_by_buyer = (if c.advance1_expired {
-            Self::bps_amount(c.total_amount, c.advance1_bps)
-        } else {
-            0
-        }) + (if c.advance2_expired {
-            Self::bps_amount(c.total_amount, c.advance2_bps)
-        } else {
-            0
-        });
+        let reclaimed_by_buyer = Self::reclaimed_by_buyer(&c);
         let owed_from_remainder = (fx_adjusted_total - claimed_by_coop - reclaimed_by_buyer).max(0);
         let available_balance =
             token::Client::new(&env, &c.token).balance(&env.current_contract_address());
@@ -2140,9 +2644,20 @@ impl EscrowContract {
     /// instead of setting anything: "the oracle doesn't quote this asset
     /// at all" is a permanent configuration gap, not "come back later",
     /// and conflating the two would tell a watcher to wait for something
-    /// that may never arrive. Host-level failures (unreachable/crashed
-    /// oracle) likewise write nothing — same fault-injection findings as
-    /// `oracle_rate` (F1).
+    /// that may never arrive.
+    ///
+    /// An unreachable or crashing oracle (#245) now comes back as
+    /// `Error::OracleUnavailable`, not a host abort, and like
+    /// `OraclePriceUnavailable` it also writes nothing. Two reasons to
+    /// return the error rather than set `fx_quote_stale` or add a new flag:
+    /// (a) `oracle_config` has no setter, so an address with no contract
+    /// behind it is just as permanent a misconfiguration as an unquoted
+    /// asset, and telling a watcher to wait would be wrong; (b) a new
+    /// `Commitment` field would change `get_commitment`'s return shape (an
+    /// ABI change under docs/versioning.md §2) for information the caller
+    /// already gets from the error code. What changes for callers is that
+    /// the probe now *returns* that error code instead of aborting, so the
+    /// API can record why settlement is stuck instead of just "unreadable".
     ///
     /// The flag is **informational only**: no guard reads it, and
     /// `resolve_fx_shortfall` still enforces staleness itself — its
@@ -2528,10 +3043,14 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_lock(&c),
+            Self::can_lock(&c, now),
             "lock",
             AuthParty::Buyer,
-            ActionDeadline::None,
+            // #277: `lock` is only legal while the delivery window that
+            // `initialize` started is still open, so advertise that bound
+            // rather than "no deadline" — an advertised action must always
+            // be one the contract would actually accept.
+            ActionDeadline::Inclusive(c.delivery_deadline),
         );
         Self::push_action(
             &env,
@@ -2688,6 +3207,14 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
+            Self::can_extend_delivery_deadline(&c, now, c.delivery_deadline.saturating_add(1)),
+            "extend_delivery_deadline",
+            AuthParty::BuyerAndCooperative,
+            ActionDeadline::Inclusive(c.delivery_deadline),
+        );
+        Self::push_action(
+            &env,
+            &mut actions,
             Self::can_cancel(&c),
             "cancel",
             AuthParty::BuyerAndCooperative,
@@ -2747,18 +3274,9 @@ impl EscrowContract {
 
     // -- internal --
 
-    /// The single TTL-extension point for this contract's storage (#98).
-    ///
-    /// Every entry this contract writes lives in *instance* storage —
-    /// `DataKey::Commitment`, `DataKey::Allocation`, and
-    /// `DataKey::OracleConfig` are all fields of one `ContractData`
-    /// ledger entry (the contract instance itself), so extending that
-    /// one entry keeps all of them (and the contract's own WASM code
-    /// entry, which `Instance::extend_ttl` bumps together with the
-    /// instance) alive at once. Nothing here uses `env.storage()
-    /// .persistent()` or `temporary()`, so there are no per-key TTLs to
-    /// manage — see docs/storage-ttl.md for the full audit and why this
-    /// shape (one entry, one TTL, one extension point) is the finding.
+    /// Extends the instance/code entry and the separate persistent
+    /// allocation entry (#98/#232). Both are topped up only when their
+    /// remaining lifetime falls below half the network maximum.
     ///
     /// Without this call the entry would keep only the TTL it got at
     /// deploy time (`min_persistent_entry_ttl` ledgers): Soroban does
@@ -2781,6 +3299,16 @@ impl EscrowContract {
     fn bump_instance_ttl(env: &Env) {
         let max_ttl = env.storage().max_ttl();
         env.storage().instance().extend_ttl(max_ttl / 2, max_ttl);
+        Self::bump_allocation_ttl(env);
+    }
+
+    fn bump_allocation_ttl(env: &Env) {
+        let max_ttl = env.storage().max_ttl();
+        if env.storage().persistent().has(&DataKey::Allocation) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::Allocation, max_ttl / 2, max_ttl);
+        }
     }
 
     fn load(env: &Env) -> Result<Commitment, Error> {
@@ -2867,14 +3395,23 @@ impl EscrowContract {
 
     fn can_set_allocation(env: &Env, c: &Commitment) -> Result<(), Error> {
         Self::require_status(c, Method::SetAllocation)?;
-        if env.storage().instance().has(&DataKey::Allocation) {
+        if env.storage().persistent().has(&DataKey::Allocation) {
             return Err(Error::AllocationAlreadySet);
         }
         Ok(())
     }
 
-    fn can_lock(c: &Commitment) -> Result<(), Error> {
-        Self::require_status(c, Method::Lock)
+    fn can_lock(c: &Commitment, now: u64) -> Result<(), Error> {
+        Self::require_status(c, Method::Lock)?;
+        // #277: the delivery window starts at `initialize`, so a lock past
+        // its end would leave the cooperative no time to deliver and hand
+        // the buyer an immediate `reclaim_on_nondelivery`. The deadline
+        // second itself still belongs to the window, like every other
+        // deadline in this file.
+        if now > c.delivery_deadline {
+            return Err(Error::LockAfterDeliveryDeadline);
+        }
+        Ok(())
     }
 
     fn can_mark_checkpoint(c: &Commitment) -> Result<(), Error> {
@@ -2911,6 +3448,21 @@ impl EscrowContract {
         Self::require_status(c, Method::ReclaimOnNondelivery)?;
         if now <= c.delivery_deadline {
             return Err(Error::DeliveryDeadlineNotPassed);
+        }
+        Ok(())
+    }
+
+    fn can_extend_delivery_deadline(
+        c: &Commitment,
+        now: u64,
+        new_deadline: u64,
+    ) -> Result<(), Error> {
+        Self::require_status(c, Method::ExtendDeliveryDeadline)?;
+        if now > c.delivery_deadline {
+            return Err(Error::DeliveryDeadlinePassed);
+        }
+        if new_deadline <= c.delivery_deadline {
+            return Err(Error::DeliveryDeadlineNotExtended);
         }
         Ok(())
     }
@@ -3073,6 +3625,16 @@ impl EscrowContract {
         total * i128::from(bps) / 10_000
     }
 
+    fn checked_fx_conversion(ngn_owed: i128, price: i128, decimals: u32) -> Result<i128, Error> {
+        let numerator = ngn_owed
+            .checked_mul(price)
+            .ok_or(Error::OracleConversionOutOfRange)?;
+        let divisor = 10i128
+            .checked_pow(decimals)
+            .ok_or(Error::OracleConversionOutOfRange)?;
+        Ok(numerator / divisor)
+    }
+
     /// Calls `require_auth()` once per distinct address, in first-seen order.
     ///
     /// Soroban's auth manager rejects a *second* `require_auth()` for the same
@@ -3115,6 +3677,42 @@ impl EscrowContract {
             c.total_amount,
             c.advance1_bps.saturating_add(c.advance2_bps),
         )
+    }
+
+    /// What `fund_remainder` still has to escrow: `total_amount` minus the
+    /// deposit `lock` already took. Zero exactly when the two advances add up
+    /// to 10_000 bps on an amount large enough for the floor in
+    /// `deposit_amount` to be exact — the fully-prepaid case #275 is about,
+    /// where `ready_for_delivery` marks the remainder funded rather than
+    /// asking the buyer for a zero-value transfer.
+    fn remainder_amount(c: &Commitment) -> i128 {
+        c.total_amount - Self::deposit_amount(c)
+    }
+
+    /// Sum of advance tranches already claimed by the cooperative (#285).
+    fn claimed_by_coop(c: &Commitment) -> i128 {
+        (if c.advance1_claimed {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_claimed {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        })
+    }
+
+    /// Sum of advance tranches already reclaimed by the buyer after expiry (#285).
+    fn reclaimed_by_buyer(c: &Commitment) -> i128 {
+        (if c.advance1_expired {
+            Self::bps_amount(c.total_amount, c.advance1_bps)
+        } else {
+            0
+        }) + (if c.advance2_expired {
+            Self::bps_amount(c.total_amount, c.advance2_bps)
+        } else {
+            0
+        })
     }
 
     /// Field accessors for a given tranche, so `claim_tranche`/

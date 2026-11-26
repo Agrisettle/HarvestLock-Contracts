@@ -58,6 +58,7 @@ calls no `require_auth()` at all.
 | `fund_remainder` | **Buyer** | The second half of two-phase funding (Dep. 5) — buyer pays the balance of the escrow. |
 | `expire_remainder_window` | **Permissionless** | Buyer-default consequence: the deadline either passed unfunded or it didn't — who calls changes nothing. Sweeps to the cooperative per the terms fixed at lock-in. |
 | `reclaim_on_nondelivery` | **Buyer** | Seller-non-delivery: returns the current balance to the buyer once the delivery deadline passes unfulfilled. Pays the caller's own reclaim right, so gated on the caller. |
+| `extend_delivery_deadline` | **Buyer + cooperative** | Both parties may agree to move the delivery deadline later while the deal remains pre-delivery and the existing deadline has not passed. Shortening and dispute-state calls are rejected. |
 | `confirm_delivery` | **Warehouse operator** | §4.1/§4.5 — the operator is the independent delivery oracle; "release requires buyer plus warehouse-operator attestation". |
 | `settle` | **Permissionless** | §4.1 — conditional release executes pre-agreed math on already-recorded state; nobody (not even the buyer) can withhold it once conditions are met. This is what "no unilateral drain" actually buys. |
 | `resolve_fx_shortfall` | **Permissionless** | §4.2 option (b)/§16.3 — a one-time comparison of escrowed-vs-converted obligation; deterministic on the oracle read. |
@@ -84,6 +85,23 @@ For a runnable client-side walkthrough of collecting those signatures —
 including the shared-address case — see
 [`examples/ts/cancel-multiparty.ts`](../examples/ts/cancel-multiparty.ts) and
 its [README](../examples/ts/README.md).
+
+**Contract-account parties are supported.** Every gate is
+`Address::require_auth()`, and the host dispatches that to the address's
+`__check_auth` when the party is a deployed contract rather than a classic
+account — there is no allow-list of account types, no signature-count
+assumption and no change needed in this contract. A cooperative shared wallet
+or a buyer treasury can therefore be a multisig/custom account, including in
+the multi-party methods where `require_once_each` builds one auth tree across
+all three parties. [`tests/custom_account.rs`](../contracts/escrow/tests/custom_account.rs)
+pins this end to end with a test-only 2-of-3 ed25519 account: the full
+lifecycle with the account as cooperative and separately as buyer, plus
+below-threshold-rejected then accepted pairs for the single-party `lock` and
+`set_allocation` and the two-party `cancel`, the three-party
+`reassign_buyer`, the `flag_dispute`/`resolve_dispute` round-trip, and
+`settle`. The account also asserts it receives the complete context list —
+`lock` is the escrow call plus the nested `token.transfer`, not just the outer
+call.
 
 ### 1.1 What the buyer's wallet actually signs
 

@@ -22,6 +22,246 @@ compared without guessing at the SDK-version delta — see
 
 ---
 
+## Event emission by `data_format` (#220)
+
+`#[contractevent]` supports three wire encodings for an event's `data`
+payload. Event bytes are a billed resource (the network's
+`contract_events_size_bytes` limit is 16,384 bytes per transaction, and rent
+is charged per KB by `env.cost_estimate().fee()`'s `fee_per_contract_event_1kb:
+5000`), and the format is fixed at the type declaration, so every future
+emission of that event pays it. This section measures all three on the two
+shapes this contract actually has.
+
+These numbers are **in-process**, from `env.cost_estimate()` against the
+test host — not a submitted transaction. They are deterministic and useful
+for ranking and for catching a format regression; they are *not* comparable
+to the testnet tables above (no WASM instantiation, no rent, no envelope).
+Reproduce with:
+
+```bash
+cd contracts/escrow
+cargo test --test event_cost -- --nocapture
+```
+
+### Zero-data-field event (the `StatusChanged` shape)
+
+Two topics, no `data` fields. The only thing `data_format` changes is the
+empty container it carries.
+
+| `data_format` | Event bytes | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `map` (macro default) | 132 | 17,798 | 6,399 |
+| `vec` | 132 | 17,295 | 6,383 |
+| **`single-value`** | **128** | **16,733** | **6,306** |
+
+The two topics are `Status` values and are identical in all three rows; so
+is the event name. Only the payload tag differs. `single-value` is 4 bytes
+and ~1,065 CPU instructions cheaper than the default here.
+
+### Three-data-field event (the `DeliveryConfirmed` shape)
+
+One topic, three data fields.
+
+| `data_format` | Event bytes | CPU instructions | Memory bytes |
+| --- | ---: | ---: | ---: |
+| `map` (macro default) | 192 | 19,946 | 6,589 |
+| **`vec`** | **120** | **15,710** | **6,210** |
+| `single-value` | — | — | not legal: the macro requires at most one data field |
+
+`vec` is 72 bytes (37.5%) and ~4,236 CPU instructions smaller. The gap is
+the map's per-field name keys (`delivered_quantity`, `settlement_bps`, …),
+which `vec` replaces with position.
+
+### The rule this contract follows, and why
+
+- **`single-value` for events with 0 or 1 data field.** It is strictly the
+  smallest encoding, loses no information a consumer uses (there is no field
+  name to preserve), and is applied to the shipped `StatusChanged` and
+  `FxQuoteStaleChanged`. `StatusChanged` shipping at `single-value` measures
+  **120 bytes / 4,682 CPU / 503 memory bytes** when published by itself.
+- **`map` for events with two or more data fields.** `vec` is measurably
+  smaller, but at this scale the saving is not worth surrendering the field
+  names: 72 bytes is ~352 stroops per event at the SDK's 5,000-stroop/KB
+  snapshot rate, against a 16,384-byte transaction budget — while a
+  positional encoding makes every indexer depend on field order, and a
+  future field insertion silently reinterprets existing data. Named fields
+  keep the event stream self-describing, which is the property
+  `tests/event_sourcing.rs` relies on to rebuild state from events alone.
+  The default is therefore kept **deliberately**, not by inertia.
+- **`single-value` is not available for multi-field events at all** — the
+  macro rejects it at compile time, so it was never a candidate for
+  `DeliveryConfirmed`, `Payout`, `FxResolved`, or the other multi-field
+  events.
+
+The comment above each affected event in `contracts/escrow/src/lib.rs`
+points back to this section, so the next event author sees the measurement
+before choosing a format.
+
+## Offline regression baseline — `contracts/escrow/tests/budget.rs` (#222)
+
+Everything recorded in this document needs a live RPC and a deployed
+instance, so none of it runs in CI. The hermetic half is
+[`contracts/escrow/tests/budget.rs`](../contracts/escrow/tests/budget.rs),
+which runs inside the ordinary `cargo test` job with no network, no funded
+account and no deploy.
+
+It drives **all 34 exported methods** to a state where the call genuinely
+succeeds (a rejected call is a cheaper, different code path), then meters
+exactly one call per method, with `env.cost_estimate().budget()` reset
+immediately before it so scenario setup cannot leak into the figure:
+
+- `budget()` — CPU instructions and peak memory bytes;
+- `resources()` — read/write entry counts and byte counts.
+
+The oracle paths (`oracle_rate`, `resolve_fx_shortfall`,
+`refresh_fx_quote_status`, `fund_fx_shortfall`,
+`expire_fx_shortfall_window`, plus `replace_oracle_config`) run against an
+in-process fixed-quote oracle; the multi-party paths (`reassign_buyer`,
+`resolve_dispute`, `cancel`) are included too.
+
+The baseline is committed at
+[`contracts/escrow/budget.snapshot`](../contracts/escrow/budget.snapshot).
+A metric growing by more than **1%** fails the test with a per-method diff:
+
+```text
+per-method budget regressed beyond 1% against contracts/escrow/budget.snapshot:
+  cancel cpu: 574297 -> 584725 (+1.8%) exceeds 1%
+```
+
+The bound is tighter than the 5% the issue suggested on purpose: native host
+metering is deterministic (two bless runs are byte-identical), and the
+smallest meaningful behavioral regression — one extra read of the stored
+`Commitment` — is ~11k instructions, i.e. ~1.9% of the heaviest method. A 5%
+bound would let that through on `cancel`, `settle`, `claim_*` and friends.
+
+These are host-model figures for **native Rust** execution under the test
+env, not the testnet fees elsewhere in this document. The SDK notes they
+understate the WASM-equivalent cost (no VM instantiation, no Wasm reads/rent),
+which is fine for a relative guard: every run compares the same harness.
+
+### Re-blessing the baseline
+
+When a change intentionally moves a number, regenerate the snapshot with the
+change in hand and review the diff before committing it:
+
+```bash
+cd contracts/escrow
+BLESS_BUDGET=1 cargo test -p harvestlock-escrow --test budget
+```
+
+Then `git diff contracts/escrow/budget.snapshot` — the point is not that the
+number is frozen, but that it can no longer move unnoticed. Adding an exported
+method also fails the suite until it is added to `PUBLIC_METHODS` and measured;
+removing or renaming one leaves a snapshot entry that has no measurement, which
+fails too. The suite disables Soroban's `test_snapshots/*.json` capture for its
+envs, so this baseline does not add 34 footprint artifacts per run.
+
+---
+
+## Worst-case inputs vs per-transaction limits — `tests/resource_limits.rs` (#224)
+
+`MAX_ALLOCATION_MEMBERS` (200) and `MAX_GRADE_ENTRIES` (16) were chosen from
+the PRD's product scale, not from chain limits. This section answers the
+question those caps left open: **does a legal commitment at both maxima fit
+inside one Soroban transaction, with room to spare?**
+
+### Limits and source
+
+The limits below were read live from testnet's `ConfigSetting` ledger entries
+over JSON-RPC (`getLedgerEntries`, key `LedgerKey::ConfigSetting`) on
+**2026-11-24**, at latest ledger **5,901,514**. They agree with the SDK's
+default `InvocationResourceLimits::mainnet()` snapshot (`soroban-sdk` 29.0.1,
+`src/testutils/cost_estimate.rs`, taken 2026-07-10) and with
+[Stellar Lab's network limits](https://lab.stellar.org/network-limits). The
+test declares them as named constants with this source attached, so a future
+network change has to be adopted deliberately rather than silently inherited
+from a dependency update.
+
+| Resource | `ConfigSetting` field | Testnet value |
+| --- | --- | ---: |
+| Instructions | `ConfigSettingContractComputeV0.txMaxInstructions` | 400,000,000 |
+| Memory | `ConfigSettingContractComputeV0.txMemoryLimit` | 41,943,040 B (40 MiB) |
+| Read entries | `ConfigSettingContractLedgerCostV0.txMaxDiskReadEntries` | 200 |
+| Read bytes | `ConfigSettingContractLedgerCostV0.txMaxDiskReadBytes` | 200,000 B |
+| Write entries | `ConfigSettingContractLedgerCostV0.txMaxWriteLedgerEntries` | 200 |
+| Write bytes | `ConfigSettingContractLedgerCostV0.txMaxWriteBytes` | 132,096 B |
+| Transaction size | `ConfigSettingContractBandwidthV0.txMaxBytes` | 132,096 B |
+| Ledger entry size | `ConfigSettingContractDataEntrySizeBytes` | 65,536 B |
+| Footprint entries | `ConfigSettingContractLedgerCostExtV0.txMaxFootprintEntries` | 400 |
+
+### Measured worst cases
+
+The suite meters exactly one successful top-level call at a time. `initialize`
+is measured on an uninitialized instance; `set_allocation` is measured after a
+16-grade `initialize`, so the instance entry already carries the schedule; and
+`settle` is measured after a full lifecycle on a commitment holding the
+200-member allocation **and** the 16 grades. All three are the genuine success
+path, not a cheaper rejection.
+
+| Metric | `initialize` (16 grades) | `set_allocation` (200) | `settle` (both) | Limit | Worst used |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Instructions | 182,890 | 1,504,073 | 3,515,841 | 400,000,000 | 0.9% |
+| Memory bytes | 101,879 | 1,083,790 | 1,600,333 | 41,943,040 | 3.8% |
+| Read entries (host memory reads) | 4 | 4 | 5 | 200 | 2.5% |
+| Read bytes (restore floor) | 1,624 | 21,668 | 21,668 | 200,000 | 10.8% |
+| Write entries | 2 | 2 | 3 | 200 | 1.5% |
+| Write bytes | 1,696 | 21,740 | 22,116 | 132,096 | 16.7% |
+| Ledger entry bytes | 1,624 | 21,668 | 21,668 | 65,536 | **33.1%** |
+| Transaction bytes (modelled) | 1,676 | 21,096 | 1,076 | 132,096 | 16.0% |
+| Footprint entries (read + write) | 6 | 6 | 8 | 400 | 2.0% |
+
+The tightest resource is the **ledger entry**, at 21,668 bytes — 33.1% of the
+65,536-byte cap, leaving **43,868 bytes** (67% of the cap) of headroom. That
+is the same 200-member allocation the existing
+`instance_storage_layout_stays_well_below_the_entry_size_limit` test bounds at
+50%, so the two checks agree. Instructions and memory are far below their
+limits (under 1% and 4% respectively), and `set_allocation`'s transaction is
+16% of the size limit. **No cap change is proposed**: both maxima are
+deliverable, with more than 2× headroom on every resource measured.
+
+The test asserts every row at **50% of the limit**, not at the limit itself, so
+a future field does not merely avoid aborting today — it has to fit the same
+headroom the caps were accepted with.
+
+### What these numbers are, and are not
+
+- **Instructions and memory are host-model figures for native Rust execution**
+  under the test host. The SDK notes they understate the WASM-equivalent cost
+  (no VM instantiation, no Wasm reads/rent). A 0.9%-of-limit CPU figure is not
+  a promise that a deployed WASM call costs the same; it is a demonstration
+  that the *input size* the caps allow is nowhere near the instruction budget.
+  Absolute testnet fees stay in the sessions above.
+- **Read bytes need a stated substitution.** The test host keeps live Soroban
+  state in memory, and its own `InvocationResources::disk_read_bytes` doc says
+  disk reads are "most of the time 0 or almost 0" there. The suite therefore
+  uses the serialized instance entry — the entry a real host would have to
+  restore — as the restore-size floor. That is conservative for these calls,
+  whose only large read is that entry, and it is labelled as such in the test.
+  Read **entries** are the host's in-memory count, which is an upper bound on
+  the disk-read entries the network limit applies to.
+- **Transaction size is modelled, not simulated.** The host's
+  `CostEstimate::resources()` explicitly does not model transaction size. The
+  suite measures the XDR size of the `InvokeContractArgs` the transaction must
+  carry (the 200-member list dominates at 20,072 bytes) and adds a fixed 1 KiB
+  allowance for the envelope, footprint keys and one signature. The ledger
+  entry's *contents* are not part of the transaction envelope; they are
+  measured separately in the ledger-entry row.
+
+### Reproduce
+
+```bash
+cd contracts/escrow
+cargo test --test resource_limits -- --nocapture
+```
+
+The suite prints the full used/limit/margin table for each stage and fails if
+any row exceeds the stated 50% bound. It also asserts that the `settle` fixture
+really does hold both maxima in one instance entry, so a future storage-layout
+change that moved `Allocation` to its own key would fail loudly instead of
+making the `settle` figure look better than the commitment it claims to model.
+
+---
+
 ## Results — delivery group (`mark_checkpoint`, `confirm_delivery`)
 
 Session 2, measured against instance
@@ -453,6 +693,8 @@ C=$(stellar contract deploy --wasm-hash "$WASM_HASH" --source-account deployer -
 
 # 3. Initialize both (identical parameters), then lock.
 #    native XLM SAC, 100,000,000 stroops, 15%/20% advance split.
+#    Note: For issued assets (e.g. HLUSD/USDC), see scripts/test-asset.sh
+#    and docs/trustline-prerequisites.md for trustline prerequisites.
 for id in "$A" "$C"; do
   stellar contract invoke --id "$id" --source-account buyer --network testnet -- \
     initialize \
@@ -649,6 +891,28 @@ per-commitment budget above (by then the code entry's TTL is already at
 max), but it is a real deployment-day cost and it is why a single
 `initialize` measured in isolation can look alarming.
 
+### TTL extension rent tradeoff
+
+The fresh-instance `initialize` row above is the available measured
+max-TTL-extension baseline: **4,092,383 stroops gross rent** (618,696 refunded
+in that simulation). To put a deadline-sized extension in context, assuming
+linear rent, a five-second ledger, and the test host's 6,312,000-ledger maximum:
+
+| Extension target | TTL ledgers | Gross rent |
+| --- | ---: | ---: |
+| Max TTL (measured `initialize`) | 6,312,000 | 4,092,383 |
+| 120 days (pro-rata estimate) | 2,073,600 | ~1,344,000 |
+| Difference | 4,238,400 | ~2,748,000 |
+
+The 120-day row is a pro-rata estimate from the measured baseline, **not** a
+second transaction measurement. It excludes any safety margin and later
+remainder, FX, or dispute windows; network rent settings, ledger interval,
+entry size, and current TTL also affect the actual fee. The contract retains
+max-TTL because `Draft` can be locked later and successfully resolved disputes
+can be reopened without consuming the lapse cap, so the current state machine
+does not provide a finite latest reachable deadline to use as a safe cap. See
+[`storage-ttl.md`](./storage-ttl.md#ttl-target-decision) for the reasoning.
+
 ### Reproduce
 
 ```bash
@@ -676,6 +940,7 @@ ID=$(stellar contract deploy --wasm-hash "$WASM_HASH" \
 # 4. Initialize — once per instance, on a FRESH deploy for each variant below
 #    (initialize is one-shot; a second call is AlreadyInitialized).
 #    The native XLM SAC is used as `token`; the buyer is the source account.
+#    (For issued classic assets and trustline setup, see scripts/test-asset.sh & docs/trustline-prerequisites.md).
 TOKEN=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
 BT="--buyer $(stellar keys address deployer) --cooperative $(stellar keys address coop)"
 BT="$BT --warehouse-operator $(stellar keys address wh) --token $TOKEN"
@@ -723,6 +988,26 @@ reporting add-on.
 ## Reproducibility
 
 WASM builds are verified reproducible in CI (`.github/workflows/test.yml`, job "Verify WASM build reproducibility"). The SHA-256 hash of `target/wasm32v1-none/release/harvestlock_escrow.wasm` must match between two consecutive clean builds. Current hash: see latest CI run.
+
+## Offline WASM size budget
+
+The committed release artifact is **82,567 bytes** (the build measured on
+23 Nov 2026 above). To catch material size regressions without adding a live
+network or another tool dependency, run this after `stellar contract build
+--locked`:
+
+```bash
+bash .github/scripts/check_wasm_size.sh
+```
+
+The script compares
+`target/wasm32v1-none/release/harvestlock_escrow.wasm` with
+[`contracts/escrow/wasm_size.baseline`](../contracts/escrow/wasm_size.baseline),
+prints the baseline, current size, and delta, and fails when growth exceeds
+5 KiB (5,120 bytes). If a larger artifact is intentional, update the baseline
+in the same PR and explain the increase; the check does not alter workflows.
+Per the [PR template](../.github/PULL_REQUEST_TEMPLATE.md), a maintainer can
+wire this command into `.github/workflows/test.yml`.
 
 ## Supply-Chain Health
 

@@ -83,6 +83,10 @@ upgrade path, and no privileged entry point, so the authentication surface
 oracle arrow is the only one carrying untrusted external data**, and it is
 bounded by a caller-chosen freshness bound rather than trusted outright.
 
+[`architecture.md`](./architecture.md) draws these boundaries onto the full
+component picture (API deploy/sign/read paths, token issuer, observers), one
+linked section per arrow.
+
 ## Actors
 
 | Actor | What they control | What they can do to this contract | What they cannot do |
@@ -91,7 +95,7 @@ bounded by a caller-chosen freshness bound rather than trusted outright.
 | **Cooperative** | Their Stellar key; the member list authored pre-`lock` | `set_allocation` (once, pre-`lock`), `claim_advance_*`, `ready_for_delivery`; co-sign `cancel` / `reassign_buyer`; flag a dispute | Attest checkpoint or delivery; cancel alone; force `settle` early; change or amend the allocation after `lock`; receive the remainder before the buyer funds it |
 | **Warehouse operator** | Their Stellar key; their own off-chain grading/appeals process | `mark_checkpoint`, `confirm_delivery` (the attestation that unlocks settlement); flag a dispute | Move funds — the contract never pays the operator anything; adjudicate disputes on chain; alter `grade_price_bps` (fixed at `initialize`); be over-paid or directed anywhere by any call |
 | **Any third party** (stranger, indexer, griefer) | Nothing on chain | Call the 8 permissionless functions, which can only *complete a check the deal already fixed*; call any view | Flag a dispute (`NotAParty`); call any gated function; supply an outcome, destination, or amount to any call; read anything secret — no confidentiality is claimed, none exists |
-| **Reflector oracle** (external) | Its own published quotes | Supply the rate `oracle_rate` / `resolve_fx_shortfall` / `refresh_fx_quote_status` read | Choose the staleness bound, the asset symbol, or the oracle address — all fixed by the buyer at `initialize`; supply a stale quote as if fresh (`OracleStale`, a hard error) |
+| **Reflector oracle** (external) | Its own published quotes | Supply the rate `oracle_rate` / `resolve_fx_shortfall` / `refresh_fx_quote_status` read | Choose the staleness bound, the asset symbol, or the oracle address — all fixed by the buyer at `initialize`; supply a stale or future-dated quote as if fresh (`OracleStale` / `OracleTimestampInFuture`, hard errors) |
 | **HarvestLock / API maintainers** (off-chain) | Which transactions get built and submitted; the reputation store | Build, sign-request, and submit transactions on behalf of users; censor users *off chain*; enforce the default/forfeiture bars app-side | Sign *as* any party, pause, upgrade, drain, or redirect the contract — no HarvestLock address exists anywhere in the contract (PRD §4.5) |
 | **Member farmers** (record subjects) | Their off-chain identity | Nothing — no member key is ever a contract principal | Read or alter their on-chain `member_hash` row; be paid by the contract (v1 `settle` pays the cooperative a lump sum) |
 | **Deployers / maintainers** | Source code, CI, the WASM hash | Ship a new contract version; review PRs | Change a deployed instance — there is no upgrade entrypoint, by design |
@@ -468,12 +472,17 @@ scheme, which is the API's to keep — out of this contract's control.
 ### Keys, admin surface, and the token layer
 
 #### 26. Admin, upgrade, pause, or owner takeover
-**Verdict: defended by absence, and the absence is checked against the
-compiled artifact.** There is no admin key, no owner, no pause, and no
-upgrade function — nothing exists to steal or extend, which is the
-strongest form of PRD §4.5's "no unilateral drain, pause, or redirect" and
-§16.3's "no upgrade key" answer. Any PR adding one violates
-authorization-matrix §4 and PRD §4.5 explicitly.
+**Verdict: defended by absence, and the absence is checked against both the exported interface and the compiled artifact.** There is no admin key, no owner, no
+pause, and no upgrade function — nothing exists to steal or extend, which
+is the strongest form of PRD §4.5's "no unilateral drain, pause, or
+redirect" and §16.3's "no upgrade key" answer. Any PR adding
+one violates authorization-matrix §4 and PRD §4.5 explicitly.
+
+Since #244 that guard is mechanical on the exported surface:
+`contracts/escrow/interface.snapshot` pins every exported function, and
+`.github/scripts/check_interface_snapshot.sh` fails on any new entry point
+and names it, so an `upgrade`/`set_admin`/`pause` can't be added without a
+visible diff to that file (docs/versioning.md §6).
 
 Source review alone is not enough for this claim: a dependency, macro
 expansion, or stray `extern` declaration could link an upgrade or deployer
