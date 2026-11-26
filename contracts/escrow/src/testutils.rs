@@ -229,6 +229,8 @@ pub struct World {
     pub env: Env,
     pub contract: EscrowContractClient<'static>,
     pub token: token::Client<'static>,
+    /// Mints the settlement token, for tests that fund extra parties.
+    pub token_admin: token::StellarAssetClient<'static>,
     pub buyer: Address,
     pub cooperative: Address,
     pub warehouse: Address,
@@ -338,6 +340,7 @@ pub fn world_in_with_terms(
         env: env.clone(),
         contract,
         token,
+        token_admin: token_admin_client,
         buyer,
         cooperative,
         warehouse,
