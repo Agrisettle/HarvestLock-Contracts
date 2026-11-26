@@ -47,8 +47,9 @@ does not even need a flag).
   remaining escrow (§3.1).
 - The strongest buyer incentive is **delaying its own permanent bar**:
   while `Disputed`, the status is not `Defaulted`, so the off-chain
-  consequence never fires. Re-flagging every window postpones the bar
-  indefinitely (§3.2).
+  consequence never fires. Re-flagging every window postpones the bar,
+  but only up to `MAX_DISPUTE_FLAGS = 3` lapsals before `DisputeCapReached`
+  blocks further flags (§3.2).
 - The warehouse operator can flag, has no funds at stake, and has no
   reputation consequence. It is the only party that can freeze a deal
   forever at zero cost to itself (§3.4).
@@ -64,7 +65,7 @@ does not even need a flag).
 | Not affected | `claim_advance_*`, `reclaim_advance_*`, all deadlines | tranche money can still move; the clock never stops |
 | Ends by | unanimous `resolve_dispute` (all three, **including the flagger**) or permissionless `expire_dispute_window` after the window | the flagger can always force the timeout path |
 | Window length | `remainder_window_secs` | 1 hour to 30 days via the API; unbounded in the contract |
-| Re-flag after expiry | allowed immediately — status is restored, and `flag_dispute` has no cooldown or counter | indefinite serial stalling |
+| Re-flag after expiry | allowed immediately after each expiry, **up to `MAX_DISPUTE_FLAGS = 3` lapsals** — after that `flag_dispute` returns `DisputeCapReached` | bounded serial stalling (at most 3 × `remainder_window_secs`) |
 | Off-chain consequence | **none** — `api/src/reputation.ts` only records `Defaulted` and `Forfeited` | flagging is invisible to reputation |
 
 The decisive asymmetry is in the "ends by" row. `resolve_dispute` needs
@@ -102,6 +103,15 @@ dispute actually freezes is the set of calls that change `status` or move
 the *undisbursed* balance. For a full list, see
 [`dispute-scope.md`](./dispute-scope.md) §2; the correction that
 claim/reclaim are not blocked was added in this review.
+
+Four tests pin all four directions from both `Advance1Released` and
+`Advance2Released` pre-statuses, so a future refactor cannot add a status
+guard to claim/reclaim without failing them:
+`claim_advance_1_while_disputed_still_pays`,
+`reclaim_advance_1_while_disputed_still_refunds`,
+`claim_advance_2_while_disputed_still_pays`, and
+`reclaim_advance_2_while_disputed_still_refunds`
+(`contracts/escrow/src/test.rs`).
 
 ## 3. Who actually gains, with concrete scenarios
 
@@ -226,8 +236,11 @@ No, and the reason is structural rather than a matter of degree:
    permissionless and restores the pre-dispute status exactly. It costs
    the flagger nothing; it costs the victim a window. The victim cannot
    recover the delay or charge for it.
-3. **Re-flagging is unconstrained.** No counter, cooldown, bond, or
-   escalating window exists. The strategy is "pay gas, repeat".
+3. **Re-flagging is bounded.** `MAX_DISPUTE_FLAGS = 3` caps how many
+   times `flag_dispute` may lapse per commitment (only
+   `expire_dispute_window` lapsals count; unanimous `resolve_dispute`
+   does not). After three lapsals, `flag_dispute` returns
+   `DisputeCapReached`. The strategy "pay gas, repeat" terminates.
 4. **The reputation layer cannot see it.** Only `Defaulted` and
    `Forfeited` produce standing events, so a party that weaponizes
    disputes but never defaults is invisible. If anything, the mechanism

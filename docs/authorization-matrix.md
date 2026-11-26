@@ -18,10 +18,10 @@ full matrix.
 
 ## TL;DR
 
-- 31 public functions, 5 authorization shapes, **zero un-gated
+- 32 public functions, 5 authorization shapes, **zero un-gated
   fund-moving paths**: 13 single-party gates, 8 permissionless state
   changes, 3 multi-party mutual actions, 1 caller-authenticated flag,
-  6 no-auth views.
+  7 no-auth views.
 - **Permissionless is deliberate, and safe by construction** — a
   permissionless call can only complete a check the deal already fixed at
   lock-in (a deadline lapsed, both tranches resolved, FX comparison
@@ -58,6 +58,7 @@ calls no `require_auth()` at all.
 | `fund_remainder` | **Buyer** | The second half of two-phase funding (Dep. 5) — buyer pays the balance of the escrow. |
 | `expire_remainder_window` | **Permissionless** | Buyer-default consequence: the deadline either passed unfunded or it didn't — who calls changes nothing. Sweeps to the cooperative per the terms fixed at lock-in. |
 | `reclaim_on_nondelivery` | **Buyer** | Seller-non-delivery: returns the current balance to the buyer once the delivery deadline passes unfulfilled. Pays the caller's own reclaim right, so gated on the caller. |
+| `extend_delivery_deadline` | **Buyer + cooperative** | Both parties may agree to move the delivery deadline later while the deal remains pre-delivery and the existing deadline has not passed. Shortening and dispute-state calls are rejected. |
 | `confirm_delivery` | **Warehouse operator** | §4.1/§4.5 — the operator is the independent delivery oracle; "release requires buyer plus warehouse-operator attestation". |
 | `settle` | **Permissionless** | §4.1 — conditional release executes pre-agreed math on already-recorded state; nobody (not even the buyer) can withhold it once conditions are met. This is what "no unilateral drain" actually buys. |
 | `resolve_fx_shortfall` | **Permissionless** | §4.2 option (b)/§16.3 — a one-time comparison of escrowed-vs-converted obligation; deterministic on the oracle read. |
@@ -69,7 +70,7 @@ calls no `require_auth()` at all.
 | `flag_dispute` | **The flagger**, who must be one of the three named parties (own auth; strangers rejected `NotAParty`) | §4.8 must-have "dispute flagging with defined escalation". See `dispute-scope.md`. |
 | `resolve_dispute` | **All three parties** | Unanimous resume — `dispute-scope.md` §2. |
 | `expire_dispute_window` | **Permissionless** | Timeout resume so one refuser can't freeze a commitment forever. |
-| `get_oracle_config`, `oracle_rate`, `get_allocation`, `get_status`, `get_commitment`, `available_actions` | **None (views)** | Read-only; no state change, no funds. `available_actions` reports each currently legal state-changing call's function name, `AuthParty` and `ActionDeadline`; it is derived from the same private `can_*` predicates the real guards call. |
+| `get_oracle_config`, `oracle_rate`, `get_allocation`, `get_status`, `get_commitment`, `get_commitment_view`, `available_actions` | **None (views)** | Read-only; no state change, no funds. `get_commitment_view` is the versioned read model (#256); `get_commitment` stays for backward compatibility. `available_actions` reports each currently legal state-changing call's function name, `AuthParty` and `ActionDeadline`; it is derived from the same private `can_*` predicates the real guards call. |
 
 Auth internals worth knowing when reading the code: `claim_advance_1/2`
 route through the private `claim_tranche` (cooperative auth) and
@@ -80,6 +81,27 @@ that address signs once (tests: `cancel_succeeds_when_buyer_and_cooperative_shar
 `reassign_buyer_succeeds_when_buyer_and_cooperative_share_one_address`,
 `all_three_identical_parties_accept_only_that_principals_signature`,
 `two_of_three_identical_parties_still_require_the_distinct_partys_auth`).
+For a runnable client-side walkthrough of collecting those signatures —
+including the shared-address case — see
+[`examples/ts/cancel-multiparty.ts`](../examples/ts/cancel-multiparty.ts) and
+its [README](../examples/ts/README.md).
+
+**Contract-account parties are supported.** Every gate is
+`Address::require_auth()`, and the host dispatches that to the address's
+`__check_auth` when the party is a deployed contract rather than a classic
+account — there is no allow-list of account types, no signature-count
+assumption and no change needed in this contract. A cooperative shared wallet
+or a buyer treasury can therefore be a multisig/custom account, including in
+the multi-party methods where `require_once_each` builds one auth tree across
+all three parties. [`tests/custom_account.rs`](../contracts/escrow/tests/custom_account.rs)
+pins this end to end with a test-only 2-of-3 ed25519 account: the full
+lifecycle with the account as cooperative and separately as buyer, plus
+below-threshold-rejected then accepted pairs for the single-party `lock` and
+`set_allocation` and the two-party `cancel`, the three-party
+`reassign_buyer`, the `flag_dispute`/`resolve_dispute` round-trip, and
+`settle`. The account also asserts it receives the complete context list —
+`lock` is the escrow call plus the nested `token.transfer`, not just the outer
+call.
 
 ### 1.1 What the buyer's wallet actually signs
 

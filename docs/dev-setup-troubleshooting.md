@@ -10,6 +10,20 @@ places: [`HANDOFF.md`](../HANDOFF.md)'s toolchain section and
 comments. This page consolidates them; those two stay the originals, and
 neither should drift from what's here.
 
+## Fastest path — open it in the devcontainer
+
+The recommended setup for new contributors is the checked-in
+[`.devcontainer/`](../.devcontainer/devcontainer.json): it pins the Rust
+toolchain, adds the `wasm32v1-none` target, installs a prebuilt `stellar`
+binary (so neither Gotcha 1 nor Gotcha 2 can apply), adds Node for the
+bindings and examples, and installs `just` for the CI-mirroring recipes in
+the [justfile](../justfile). In VS Code use "Reopen in Container"; in Codespaces
+use "Create Codespace on …". The container's shell can run `cargo test` and
+`stellar contract build` immediately, with no extra steps.
+
+The rest of this page is for working outside the container, or for when the
+container itself breaks.
+
 ## What you actually need
 
 | Working on | Needs |
@@ -20,6 +34,28 @@ neither should drift from what's here.
 
 `cargo test` does **not** need `stellar-cli`, and doesn't wait on it. If all
 you're doing is verifying contract logic, that's the faster path.
+
+## First-time testnet setup
+
+On a fresh checkout there are no funded identities yet — HANDOFF.md notes
+they were "already generated on this machine," which is machine-specific.
+Before anything on testnet works, bootstrap the four test roles
+(`deployer`, `buyer`, `cooperative`, `warehouse`):
+
+```bash
+./scripts/bootstrap-identities.sh --network testnet
+```
+
+This configures the testnet network entry, creates each identity if it is
+missing and funds it via the testnet friendbot, then prints each address.
+It is idempotent: run it again and it exits zero without changing anything,
+so it is safe to re-run on the same machine.
+
+The addresses it prints are what `scripts/deploy.sh` and the walkthroughs
+refer to as the `buyer`, `cooperative`, and `warehouse` signers. For
+`futurenet` or a `local` node, swap `--network testnet` for
+`--network futurenet` or `--network local` (local needs a node with
+friendbot running on `http://localhost:8000`).
 
 ## The pinned toolchain — `rust-toolchain.toml`
 

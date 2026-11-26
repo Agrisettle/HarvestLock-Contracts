@@ -1,0 +1,21 @@
+{
+  "name": "harvestlock-cancel-multiparty-example",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runnable example: collect multi-party Soroban auth for HarvestLock cancel",
+  "scripts": {
+    "build:bindings": "npm --prefix bindings install && npm --prefix bindings run build",
+    "start": "npm run build:bindings && tsx cancel-multiparty.ts",
+    "typecheck": "npm run build:bindings && tsc --noEmit"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.0.1",
+    "buffer": "6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.2"
+  }
+}

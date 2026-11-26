@@ -27,9 +27,9 @@ name: Auto-merge bot
 #     CodeRabbit's review check-run before merging.
 #   - When a required check fails it posts the failing check names once per
 #     head commit.
-#   - Scope check before merging: a PR that is BOTH large (> 40 files or
-#     > 1 000 added lines) and changes files outside its declared scope is
-#     left for a maintainer with a one-line note. Anything smaller merges.
+#   - Scope check before merging: out-of-scope files are logged only.
+#     Diff size never holds a PR; files too large for GitHub to diff are
+#     fetched whole and run through the malware scan instead.
 #   - Waits for CodeRabbit's review check-run to complete before merging, so
 #     problems are caught before the merge, not after.
 #   - Auto-merges once CI is green AND CodeRabbit has reviewed: normal merge
@@ -314,35 +314,45 @@ jobs:
             # after a maintainer assigns the issue is welcome: the bot
             # re-evaluates on reopened/synchronize events and the hourly
             # sweep, and a properly assigned PR proceeds normally.
+            # The rules live in .github/scripts/check_assignment.sh (shared
+            # with require-assignment.yml): every linked issue is checked,
+            # case-insensitively; a link to an issue that does not exist
+            # falls back to "is the author assigned to any open issue"; and
+            # an API failure never closes a PR.
             if [ "${SELF}" != "true" ]; then
-              LINKED_ISSUE="$(printf '%s' "${PR_BODY}" \
-                | grep -oE '(Closes|Fixes|close[s]?|fixes) #?[0-9]+' \
-                | head -1 | grep -oE '[0-9]+' || true)"
-              if [ -n "${LINKED_ISSUE}" ]; then
-                IS_ASSIGNED="$(gh issue view "${LINKED_ISSUE}" --repo "${REPO}" \
-                  --json assignees \
-                  --jq '[.assignees[] | select(.login == "'"${AUTHOR}"'")] | length' \
-                  2>/dev/null || echo 0)"
-                if [ "${IS_ASSIGNED}" -eq 0 ]; then
-                  echo "  🚫 ${AUTHOR} is not assigned to #${LINKED_ISSUE} — closing"
+              read -r VERDICT LINKED_ISSUE < <(printf '%s' "${PR_BODY}" \
+                | bash .github/scripts/check_assignment.sh "${REPO}" "${AUTHOR}") \
+                || { VERDICT=unknown; LINKED_ISSUE=-; }
+              case "${VERDICT}" in
+                assigned) echo "  ✅ ${AUTHOR} is assigned to #${LINKED_ISSUE}" ;;
+                fallback) echo "  ✅ linked issue not found; ${AUTHOR} is assigned to #${LINKED_ISSUE}" ;;
+                exempt)   echo "  ℹ️ ${AUTHOR} is exempt from the assignment check" ;;
+                unknown)  echo "  ⚠️ assignment lookup failed — will retry"; continue ;;
+              esac
+              if [ "${VERDICT}" = "unassigned" ] || [ "${VERDICT}" = "none" ]; then
+                {
+                  if [ "${VERDICT}" = "none" ]; then
+                    echo "  🚫 ${AUTHOR} links no issue here and holds no assignment — closing"
+                    ASSIGN_ON="the issue you are working on"
+                  else
+                    echo "  🚫 ${AUTHOR} is not assigned to #${LINKED_ISSUE} — closing"
+                    ASSIGN_ON="#${LINKED_ISSUE}"
+                  fi
                   MARKER_ASSIGN="<!-- BOT-ASSIGN-CLOSE sha=${SHA} -->"
                   ALREADY_ASSIGN="$(gh pr view "${PR}" --repo "${REPO}" \
-                    --json reviews \
-                    --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
+                    --json comments \
+                    --jq "[.comments[] | select(.author.login == \"${BOT_LOGIN}\")
                       | select(.body | contains(\"${MARKER_ASSIGN}\"))] | length" \
                     2>/dev/null || echo 0)"
                   if [ "${ALREADY_ASSIGN}" -eq 0 ]; then
-                    ASSIGN_MSG="Closing for now — please ask to be assigned on #${LINKED_ISSUE} first. Once you're assigned, reopen this PR and it will be picked up again."
+                    ASSIGN_MSG="Closing for now — please ask to be assigned on ${ASSIGN_ON} first and link it with \"Closes #N\". Once you're assigned, reopen this PR and it will be picked up again."
                     ASSIGN_MSG+=$'\n\n'
                     ASSIGN_MSG+="${MARKER_ASSIGN}"
                     gh pr comment "${PR}" --repo "${REPO}" --body "${ASSIGN_MSG}" 2>/dev/null || true
                   fi
                   gh pr close "${PR}" --repo "${REPO}" 2>/dev/null || true
-                  continue
-                fi
-                echo "  ✅ ${AUTHOR} is assigned to #${LINKED_ISSUE}"
-              else
-                echo "  ℹ️ No linked issue found in PR body — skipping assignment check"
+                }
+                continue
               fi
             fi
 
@@ -487,37 +497,25 @@ jobs:
 
             # ── all required checks passed → diff review, then merge ──
             echo "  all required checks passed"
+            # Merging one PR moves main, and GitHub then reports every other
+            # PR as UNKNOWN until it recomputes. Wait for the real answer
+            # (up to ~2 min) instead of skipping the PR until the next sweep.
+            for _ in $(seq 1 12); do
+              [ "${MERGEABLE}" = "UNKNOWN" ] || break
+              sleep 10
+              MERGEABLE="$(gh pr view "${PR}" --repo "${REPO}" \
+                --json mergeable --jq .mergeable 2>/dev/null || echo UNKNOWN)"
+            done
             [ "${MERGEABLE}" = "MERGEABLE" ] || {
               echo "  not mergeable (${MERGEABLE}) — will retry"; continue; }
 
-            # Scope check: findings go to the log. Only a PR that is BOTH
-            # large and out of its declared scope is left for a maintainer,
-            # with a one-line note (once per head commit).
+            # Scope check: findings go to the log only. Size never holds
+            # a PR: once every required check (including the malware
+            # scan) passes, it merges however large the diff is.
             DREV="$(diff_review "${PR}" "${PR_TITLE}" "${PR_BODY}")"
             if [ -n "${DREV}" ]; then
               echo "  scope findings:"
               printf '%s\n' "${DREV}" | sed 's/^/    /'
-            fi
-            read -r NFILES NADD < <(gh pr view "${PR}" --repo "${REPO}" \
-              --json changedFiles,additions \
-              --jq '"\(.changedFiles) \(.additions)"' 2>/dev/null \
-              || echo "0 0")
-            if [ -n "${DREV}" ] && [ "${SELF}" != "true" ] \
-               && { [ "${NFILES:-0}" -gt 40 ] || [ "${NADD:-0}" -gt 1000 ]; }; then
-              echo "  large and out of scope — leaving for a maintainer"
-              MARKER4="<!-- BOT-SCOPE-HOLD sha=${SHA} -->"
-              ALREADY4="$(gh pr view "${PR}" --repo "${REPO}" \
-                --json reviews \
-                --jq "[.reviews[] | select(.author.login == \"${BOT_LOGIN}\")
-                  | select(.body | contains(\"${MARKER4}\"))] | length" \
-                2>/dev/null || echo 0)"
-              if [ "${ALREADY4}" -eq 0 ]; then
-                BODY4="This PR is large (${NFILES} files, +${NADD} lines) and changes files outside its stated scope, so a maintainer needs to review it before merging."
-                BODY4+=$'\n'"${MARKER4}"
-                gh pr review "${PR}" --repo "${REPO}" --comment \
-                  --body "${BODY4}" 2>/dev/null || true
-              fi
-              continue
             fi
 
             # ── CodeRabbit review: trigger, then wait (if installed) ──
