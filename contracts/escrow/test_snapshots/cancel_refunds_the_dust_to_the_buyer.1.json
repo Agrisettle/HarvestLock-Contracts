@@ -709,6 +709,22 @@
                           },
                           {
                             "key": {
+                              "symbol": "fx_recorded_price"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_recorded_timestamp"
+                            },
+                            "val": {
+                              "u64": "0"
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "fx_resolved"
                             },
                             "val": {

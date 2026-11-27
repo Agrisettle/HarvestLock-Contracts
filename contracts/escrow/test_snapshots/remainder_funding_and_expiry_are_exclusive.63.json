@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "87859"
+                        "u64": "93381"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "95148"
+                        "u64": "53250"
                       }
                     },
                     {
@@ -264,7 +264,7 @@
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 163521651881,
+    "timestamp": 578726325955,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -478,7 +478,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "163521574828"
+                              "u64": "578726306123"
                             }
                           },
                           {
@@ -510,7 +510,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "163521574828"
+                              "u64": "578726306123"
                             }
                           },
                           {
@@ -534,7 +534,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "87859"
+                              "u64": "93381"
                             }
                           },
                           {
@@ -558,7 +558,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "163521486969"
+                              "u64": "578726212742"
                             }
                           },
                           {
@@ -574,7 +574,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "163521686969"
+                              "u64": "578726412742"
                             }
                           },
                           {
@@ -619,6 +619,22 @@
                             },
                             "val": {
                               "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_recorded_price"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_recorded_timestamp"
+                            },
+                            "val": {
+                              "u64": "0"
                             }
                           },
                           {
@@ -684,7 +700,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "163521651881"
+                              "u64": "578726325955"
                             }
                           },
                           {
@@ -700,7 +716,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "95148"
+                              "u64": "53250"
                             }
                           },
                           {

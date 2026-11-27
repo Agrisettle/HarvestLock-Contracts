@@ -143,6 +143,8 @@ test("Commitment mid-lifecycle round-trip byte equality", () => {
     settlement_bps: 9000,
     fx_resolved: true,
     fx_adjusted_total: 90000000n,
+    fx_recorded_price: 0n,
+    fx_recorded_timestamp: 0n,
     fx_shortfall_amount: 5000000n,
     fx_shortfall_funded: true,
     fx_shortfall_deadline: 1700002400n,

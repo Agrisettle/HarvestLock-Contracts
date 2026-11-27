@@ -347,22 +347,6 @@
                           },
                           {
                             "key": {
-                              "symbol": "buyer_payout"
-                            },
-                            "val": {
-                              "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "buyer_payout_reason"
-                            },
-                            "val": {
-                              "symbol": "none"
-                            }
-                          },
-                          {
-                            "key": {
                               "symbol": "claim_window_secs"
                             },
                             "val": {
@@ -383,22 +367,6 @@
                             },
                             "val": {
                               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "cooperative_payout"
-                            },
-                            "val": {
-                              "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "cooperative_payout_reason"
-                            },
-                            "val": {
-                              "symbol": "none"
                             }
                           },
                           {
@@ -467,6 +435,22 @@
                             },
                             "val": {
                               "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_recorded_price"
+                            },
+                            "val": {
+                              "i128": "0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "fx_recorded_timestamp"
+                            },
+                            "val": {
+                              "u64": "0"
                             }
                           },
                           {

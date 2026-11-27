@@ -363,12 +363,8 @@ fn resolve_dispute_fails_when_only_buyer_and_cooperative_sign() {
     let warehouse = Address::generate(&env);
     let w = {
         env.mock_all_auths();
-        let w = drive_to_locked_world_in(
-            &env,
-            buyer.clone(),
-            cooperative.clone(),
-            warehouse.clone(),
-        );
+        let w =
+            drive_to_locked_world_in(&env, buyer.clone(), cooperative.clone(), warehouse.clone());
         w.contract.flag_dispute(&buyer);
         w
     };
@@ -403,12 +399,8 @@ fn resolve_dispute_fails_when_only_buyer_and_warehouse_sign() {
     let warehouse = Address::generate(&env);
     let w = {
         env.mock_all_auths();
-        let w = drive_to_locked_world_in(
-            &env,
-            buyer.clone(),
-            cooperative.clone(),
-            warehouse.clone(),
-        );
+        let w =
+            drive_to_locked_world_in(&env, buyer.clone(), cooperative.clone(), warehouse.clone());
         w.contract.flag_dispute(&buyer);
         w
     };
@@ -443,12 +435,8 @@ fn resolve_dispute_fails_when_only_cooperative_and_warehouse_sign() {
     let warehouse = Address::generate(&env);
     let w = {
         env.mock_all_auths();
-        let w = drive_to_locked_world_in(
-            &env,
-            buyer.clone(),
-            cooperative.clone(),
-            warehouse.clone(),
-        );
+        let w =
+            drive_to_locked_world_in(&env, buyer.clone(), cooperative.clone(), warehouse.clone());
         w.contract.flag_dispute(&buyer);
         w
     };
@@ -487,12 +475,8 @@ fn auth_entry_for_cancel_cannot_authorize_resolve_dispute() {
     let warehouse = Address::generate(&env);
     let w = {
         env.mock_all_auths();
-        let w = drive_to_locked_world_in(
-            &env,
-            buyer.clone(),
-            cooperative.clone(),
-            warehouse.clone(),
-        );
+        let w =
+            drive_to_locked_world_in(&env, buyer.clone(), cooperative.clone(), warehouse.clone());
         w.contract.flag_dispute(&buyer);
         w
     };
@@ -573,12 +557,7 @@ fn two_of_three_identical_parties_still_require_the_distinct_partys_auth() {
     let cooperative = Address::generate(&env);
     let w = {
         env.mock_all_auths();
-        let w = drive_to_locked_world_in(
-            &env,
-            shared.clone(),
-            cooperative.clone(),
-            shared.clone(),
-        );
+        let w = drive_to_locked_world_in(&env, shared.clone(), cooperative.clone(), shared.clone());
         w.contract.flag_dispute(&shared);
         w
     };
@@ -684,12 +663,8 @@ fn resolve_dispute_with_buyer_cooperative_warehouse_distinct_all_must_sign() {
     let warehouse = Address::generate(&env);
     let w = {
         env.mock_all_auths();
-        let w = drive_to_locked_world_in(
-            &env,
-            buyer.clone(),
-            cooperative.clone(),
-            warehouse.clone(),
-        );
+        let w =
+            drive_to_locked_world_in(&env, buyer.clone(), cooperative.clone(), warehouse.clone());
         w.contract.flag_dispute(&buyer);
         w
     };
@@ -732,7 +707,9 @@ fn source_uses_require_once_each_for_all_multi_party_methods() {
         "pub fn reassign_buyer(",
         "pub fn resolve_dispute(",
     ] {
-        let pos = SRC.find(fn_sig).unwrap_or_else(|| panic!("function `{fn_sig}` not found in src/lib.rs"));
+        let pos = SRC
+            .find(fn_sig)
+            .unwrap_or_else(|| panic!("function `{fn_sig}` not found in src/lib.rs"));
         // Within the next 500 chars (the function body) there must be a
         // require_once_each call.
         let window = &SRC[pos..(pos + 500).min(SRC.len())];

@@ -197,6 +197,8 @@ fn test_generate_xdr_fixtures() {
         settlement_bps: 9000,
         fx_resolved: true,
         fx_adjusted_total: 90_000_000,
+        fx_recorded_price: 0,
+        fx_recorded_timestamp: 0,
         fx_shortfall_amount: 5_000_000,
         fx_shortfall_funded: true,
         fx_shortfall_deadline: 1700002400,
