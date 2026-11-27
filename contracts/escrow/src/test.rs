@@ -1020,6 +1020,7 @@ fn setup_with_oracle_denomination(
     (
         Setup {
             token_admin: token::StellarAssetClient::new(&env, &token_address),
+            issuer: None,
             env,
             contract,
             token,
@@ -1410,6 +1411,7 @@ fn resolve_fx_with_token_decimals(token_decimals: u32, total_amount: i128) -> Se
 
     Setup {
         token_admin: token::StellarAssetClient::new(&env, &token_id),
+        issuer: None,
         env,
         contract,
         token,
@@ -6958,6 +6960,7 @@ mod oracle_identity_rate_differential {
 
         Setup {
             token_admin: token::StellarAssetClient::new(&env, &token_address),
+            issuer: None,
             env,
             contract,
             token,

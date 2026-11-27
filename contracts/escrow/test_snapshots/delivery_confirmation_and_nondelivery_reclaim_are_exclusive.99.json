@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "10643"
+                        "u64": "78695"
                       }
                     },
                     {
@@ -108,7 +108,7 @@
                         "symbol": "delivery_window_secs"
                       },
                       "val": {
-                        "u64": "880099"
+                        "u64": "947607"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "11716"
+                        "u64": "3919"
                       }
                     },
                     {
@@ -265,7 +265,7 @@
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 710278869618,
+    "timestamp": 965013224921,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -479,7 +479,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "710278000161"
+                              "u64": "965012356008"
                             }
                           },
                           {
@@ -511,7 +511,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "710278000161"
+                              "u64": "965012356008"
                             }
                           },
                           {
@@ -535,7 +535,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "10643"
+                              "u64": "78695"
                             }
                           },
                           {
@@ -559,7 +559,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "710277989518"
+                              "u64": "965012277313"
                             }
                           },
                           {
@@ -575,7 +575,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "710278869617"
+                              "u64": "965013224920"
                             }
                           },
                           {
@@ -685,7 +685,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "710278015205"
+                              "u64": "965012326904"
                             }
                           },
                           {
@@ -701,7 +701,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "11716"
+                              "u64": "3919"
                             }
                           },
                           {

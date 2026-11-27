@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "2772"
+                        "u64": "28906"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "53103"
+                        "u64": "44149"
                       }
                     },
                     {
@@ -258,7 +258,7 @@
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 348700202167,
+    "timestamp": 392665651687,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -492,7 +492,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "348700056013"
+                              "u64": "392665594228"
                             }
                           },
                           {
@@ -524,7 +524,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "348700056013"
+                              "u64": "392665594228"
                             }
                           },
                           {
@@ -548,7 +548,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "2772"
+                              "u64": "28906"
                             }
                           },
                           {
@@ -572,7 +572,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "348700053241"
+                              "u64": "392665565322"
                             }
                           },
                           {
@@ -588,7 +588,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "348700253241"
+                              "u64": "392665765322"
                             }
                           },
                           {
@@ -698,7 +698,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "348700202167"
+                              "u64": "392665651686"
                             }
                           },
                           {
@@ -714,7 +714,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "53103"
+                              "u64": "44149"
                             }
                           },
                           {
@@ -732,7 +732,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "ReadyForDelivery"
+                                  "symbol": "Defaulted"
                                 }
                               ]
                             }
@@ -1048,5 +1048,38 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "status_changed"
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "ReadyForDelivery"
+                  }
+                ]
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Defaulted"
+                  }
+                ]
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }

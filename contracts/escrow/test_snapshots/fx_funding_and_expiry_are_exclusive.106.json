@@ -93,7 +93,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "75339"
+                        "u64": "62473"
                       }
                     },
                     {
@@ -135,7 +135,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "19624"
+                        "u64": "355"
                       }
                     },
                     {
@@ -353,7 +353,7 @@
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 122848178229,
+    "timestamp": 701412975526,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -650,7 +650,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "122848181995"
+                              "u64": "701412987872"
                             }
                           },
                           {
@@ -682,7 +682,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "122848181995"
+                              "u64": "701412987872"
                             }
                           },
                           {
@@ -706,7 +706,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "75339"
+                              "u64": "62473"
                             }
                           },
                           {
@@ -730,7 +730,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "122848106656"
+                              "u64": "701412925399"
                             }
                           },
                           {
@@ -746,7 +746,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "122848306656"
+                              "u64": "701413125399"
                             }
                           },
                           {
@@ -814,7 +814,7 @@
                               "symbol": "fx_shortfall_deadline"
                             },
                             "val": {
-                              "u64": "122848178230"
+                              "u64": "701412975526"
                             }
                           },
                           {
@@ -856,7 +856,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "122848178230"
+                              "u64": "701412975526"
                             }
                           },
                           {
@@ -872,7 +872,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "19624"
+                              "u64": "355"
                             }
                           },
                           {
