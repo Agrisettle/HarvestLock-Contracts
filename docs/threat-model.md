@@ -703,7 +703,13 @@ events on the escrow address, and treat the issuer as a trust assumption
 7. **Observability works**: `status_changed` events and the view functions
    are how anyone detects a transition; `every_transition_publishes_status_changed`
    holds that every mutation is announced (and `initialize` deliberately
-   announces nothing — creation is not a transition).
+   announces nothing — creation is not a transition). Value-movement calls
+   additionally emit typed events: `TrancheClaimed` (cooperative claims an
+   advance), `TrancheReclaimed` (buyer reclaims an unclaimed advance),
+   `RemainderFunded` (buyer deposits the remainder), and `FxShortfallFunded`
+   (buyer tops up the FX shortfall) — giving indexers a machine-readable
+   record of every token flow without requiring them to decode raw transfer
+   calls (#202).
 8. **The settlement asset's issuer does not freeze or claw back the escrow**
    (entry 31). An issued stablecoin's issuer can deauthorize the escrow
    address or the cooperative, or burn part of the escrowed balance, and no
