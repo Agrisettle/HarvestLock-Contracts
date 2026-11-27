@@ -618,6 +618,12 @@ enum Tranche {
     Two,
 }
 
+struct TrancheRef<'a> {
+    deadline: &'a mut u64,
+    claimed: &'a mut bool,
+    expired: &'a mut bool,
+}
+
 /// On-chain state for a single escrow commitment instance.
 ///
 /// **Footprint Audit & Storage Necessity Finding**:
@@ -2896,7 +2902,7 @@ impl EscrowContract {
     /// `resolve_fx_shortfall` can still return `Error::OracleStale` until
     /// Reflector publishes one.
     pub fn available_actions(env: Env) -> Vec<Action> {
-        let Ok(c) = Self::load(&env) else {
+        let Ok(mut c) = Self::load(&env) else {
             // No commitment yet: there is no state-derived action to name.
             return Vec::new(&env);
         };
@@ -2934,7 +2940,7 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_claim_tranche(&c, Tranche::One, now),
+            Self::can_claim_tranche(&mut c, Tranche::One, now),
             "claim_advance_1",
             AuthParty::Cooperative,
             ActionDeadline::Inclusive(c.advance1_deadline),
@@ -2942,7 +2948,7 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_reclaim_tranche(&c, Tranche::One, now),
+            Self::can_reclaim_tranche(&mut c, Tranche::One, now),
             "reclaim_advance_1",
             AuthParty::Buyer,
             ActionDeadline::Exclusive(c.advance1_deadline),
@@ -2966,7 +2972,7 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_claim_tranche(&c, Tranche::Two, now),
+            Self::can_claim_tranche(&mut c, Tranche::Two, now),
             "claim_advance_2",
             AuthParty::Cooperative,
             ActionDeadline::Inclusive(c.advance2_deadline),
@@ -2974,7 +2980,7 @@ impl EscrowContract {
         Self::push_action(
             &env,
             &mut actions,
-            Self::can_reclaim_tranche(&c, Tranche::Two, now),
+            Self::can_reclaim_tranche(&mut c, Tranche::Two, now),
             "reclaim_advance_2",
             AuthParty::Buyer,
             ActionDeadline::Exclusive(c.advance2_deadline),
@@ -3590,52 +3596,25 @@ impl EscrowContract {
     /// `reclaim_tranche`/`open_tranche` have one implementation shared by
     /// both `_1` and `_2` entry points instead of two copies that could
     /// silently drift apart.
-    fn tranche_bps(c: &Commitment, t: Tranche) -> u32 {
+    fn tranche_bps(c: &Commitment, t: Tranche) -> &u32 {
         match t {
-            Tranche::One => c.advance1_bps,
-            Tranche::Two => c.advance2_bps,
+            Tranche::One => &c.advance1_bps,
+            Tranche::Two => &c.advance2_bps,
         }
     }
 
-    fn tranche_deadline(c: &Commitment, t: Tranche) -> u64 {
+    fn tranche_mut(c: &mut Commitment, t: Tranche) -> TrancheRef<'_> {
         match t {
-            Tranche::One => c.advance1_deadline,
-            Tranche::Two => c.advance2_deadline,
-        }
-    }
-
-    fn tranche_claimed(c: &Commitment, t: Tranche) -> bool {
-        match t {
-            Tranche::One => c.advance1_claimed,
-            Tranche::Two => c.advance2_claimed,
-        }
-    }
-
-    fn tranche_expired(c: &Commitment, t: Tranche) -> bool {
-        match t {
-            Tranche::One => c.advance1_expired,
-            Tranche::Two => c.advance2_expired,
-        }
-    }
-
-    fn set_tranche_deadline(c: &mut Commitment, t: Tranche, deadline: u64) {
-        match t {
-            Tranche::One => c.advance1_deadline = deadline,
-            Tranche::Two => c.advance2_deadline = deadline,
-        }
-    }
-
-    fn set_tranche_claimed(c: &mut Commitment, t: Tranche) {
-        match t {
-            Tranche::One => c.advance1_claimed = true,
-            Tranche::Two => c.advance2_claimed = true,
-        }
-    }
-
-    fn set_tranche_expired(c: &mut Commitment, t: Tranche) {
-        match t {
-            Tranche::One => c.advance1_expired = true,
-            Tranche::Two => c.advance2_expired = true,
+            Tranche::One => TrancheRef {
+                deadline: &mut c.advance1_deadline,
+                claimed: &mut c.advance1_claimed,
+                expired: &mut c.advance1_expired,
+            },
+            Tranche::Two => TrancheRef {
+                deadline: &mut c.advance2_deadline,
+                claimed: &mut c.advance2_claimed,
+                expired: &mut c.advance2_expired,
+            },
         }
     }
 
@@ -3679,39 +3658,41 @@ impl EscrowContract {
         Self::require_status(c, Self::open_tranche_method(t))
     }
 
-    fn can_claim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+    fn can_claim_tranche(c: &mut Commitment, t: Tranche, now: u64) -> Result<(), Error> {
         // Asks the table for this method's status rule (which is `None`:
         // an opened window stays claimable whatever the status has since
         // become) so every public method's rule is consulted in one place.
         Self::require_status(c, Self::claim_tranche_method(t))?;
-        if Self::tranche_deadline(c, t) == 0 {
+        let tranche = Self::tranche_mut(c, t);
+        if *tranche.deadline == 0 {
             return Err(Error::NotYetOpened);
         }
-        if Self::tranche_claimed(c, t) {
+        if *tranche.claimed {
             return Err(Error::AlreadyClaimed);
         }
-        if Self::tranche_expired(c, t) {
+        if *tranche.expired {
             return Err(Error::AlreadyExpired);
         }
-        if now > Self::tranche_deadline(c, t) {
+        if now > *tranche.deadline {
             return Err(Error::ClaimWindowPassed);
         }
         Ok(())
     }
 
-    fn can_reclaim_tranche(c: &Commitment, t: Tranche, now: u64) -> Result<(), Error> {
+    fn can_reclaim_tranche(c: &mut Commitment, t: Tranche, now: u64) -> Result<(), Error> {
         // Ungated row, same reasoning as `can_claim_tranche` above.
         Self::require_status(c, Self::reclaim_tranche_method(t))?;
-        if Self::tranche_deadline(c, t) == 0 {
+        let tranche = Self::tranche_mut(c, t);
+        if *tranche.deadline == 0 {
             return Err(Error::NotYetOpened);
         }
-        if Self::tranche_claimed(c, t) {
+        if *tranche.claimed {
             return Err(Error::AlreadyClaimed);
         }
-        if Self::tranche_expired(c, t) {
+        if *tranche.expired {
             return Err(Error::AlreadyExpired);
         }
-        if now <= Self::tranche_deadline(c, t) {
+        if now <= *tranche.deadline {
             return Err(Error::ClaimWindowNotPassed);
         }
         Ok(())
@@ -3721,7 +3702,7 @@ impl EscrowContract {
         let mut c = Self::load(env)?;
         Self::can_open_tranche(&c, t)?;
         let deadline = env.ledger().timestamp() + c.claim_window_secs;
-        Self::set_tranche_deadline(&mut c, t, deadline);
+        *Self::tranche_mut(&mut c, t).deadline = deadline;
         Self::set_status(env, &mut c, Self::tranche_next_status(t));
         Self::save(env, &c);
         Ok(())
@@ -3730,15 +3711,15 @@ impl EscrowContract {
     fn claim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
         c.cooperative.require_auth();
-        Self::can_claim_tranche(&c, t, env.ledger().timestamp())?;
+        Self::can_claim_tranche(&mut c, t, env.ledger().timestamp())?;
 
         let tranche_num = match t {
             Tranche::One => 1u32,
             Tranche::Two => 2u32,
         };
-        let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
+        let amount = Self::bps_amount(c.total_amount, *Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
-        Self::set_tranche_claimed(&mut c, t);
+        *Self::tranche_mut(&mut c, t).claimed = true;
         Self::save(env, &c);
         if amount > 0 {
             token::Client::new(env, &c.token).transfer(
@@ -3759,15 +3740,15 @@ impl EscrowContract {
     fn reclaim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
         c.buyer.require_auth();
-        Self::can_reclaim_tranche(&c, t, env.ledger().timestamp())?;
+        Self::can_reclaim_tranche(&mut c, t, env.ledger().timestamp())?;
 
         let tranche_num = match t {
             Tranche::One => 1u32,
             Tranche::Two => 2u32,
         };
-        let amount = Self::bps_amount(c.total_amount, Self::tranche_bps(&c, t));
+        let amount = Self::bps_amount(c.total_amount, *Self::tranche_bps(&c, t));
         // Effects before interaction — see `lock`'s comment for why.
-        Self::set_tranche_expired(&mut c, t);
+        *Self::tranche_mut(&mut c, t).expired = true;
         Self::save(env, &c);
         if amount > 0 {
             token::Client::new(env, &c.token).transfer(

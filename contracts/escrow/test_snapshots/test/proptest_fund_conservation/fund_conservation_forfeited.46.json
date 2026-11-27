@@ -73,10 +73,10 @@
                   "i128": "1000000"
                 },
                 {
-                  "u32": 3133
+                  "u32": 945
                 },
                 {
-                  "u32": 108
+                  "u32": 258
                 },
                 {
                   "u64": "604800"
@@ -136,7 +136,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                     },
                     {
-                      "i128": "324100"
+                      "i128": "120300"
                     }
                   ]
                 }
@@ -328,7 +328,7 @@
                               "symbol": "advance1_bps"
                             },
                             "val": {
-                              "u32": 3133
+                              "u32": 945
                             }
                           },
                           {
@@ -360,7 +360,7 @@
                               "symbol": "advance2_bps"
                             },
                             "val": {
-                              "u32": 108
+                              "u32": 258
                             }
                           },
                           {

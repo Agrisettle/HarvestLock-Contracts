@@ -1135,6 +1135,46 @@
         }
       },
       "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "delivery_confirmed"
+              },
+              {
+                "u32": 0
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "delivered_quantity"
+                  },
+                  "val": {
+                    "u32": 1000
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "settlement_bps"
+                  },
+                  "val": {
+                    "u32": 10000
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
     }
   ]
 }

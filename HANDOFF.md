@@ -1407,6 +1407,12 @@ tracked files that a local re-run re-recorded (the new `fx_quote_stale`
 field, `live_until` drift) were restored to HEAD rather than committed,
 same reasoning as the prior entries below.
 
+Follow-up for issue #304: this record-only convention is superseded.
+Allocation-member test hashes are now deterministic, and
+`.github/scripts/check_test_snapshots.sh` runs the Rust tests and rejects
+changed, removed, or newly generated snapshots. The script is deliberately
+not wired into CI; workflow changes remain maintainer-managed.
+
 Prior entry: 17 Oct 2026 — #63, the Reflector `decimals()` question:
 documented finding plus one test, no contract behavior changed. `oracle_rate()`
 performs *no* conversion math — it returns the raw `price` from `lastprice`

@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "3bcc7bae47ab86f06399ce2844a4d44aea946dc217fa54451ea40138819dfba8"
+                            "bytes": "0000271000000000000000000000000000000000000000000000000000000000"
                           }
                         },
                         {
@@ -295,7 +295,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "3bcc7bae47ab86f06399ce2844a4d44aea946dc217fa54451ea40138819dfba8"
+                                  "bytes": "0000271000000000000000000000000000000000000000000000000000000000"
                                 }
                               },
                               {
@@ -794,5 +794,43 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "allocation_recorded"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "member_count"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "total_share_bps"
+                  },
+                  "val": {
+                    "u32": 10000
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }

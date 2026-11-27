@@ -111,8 +111,9 @@ fn oracle_world(denominated_amount: i128) -> World {
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     let token_address = sac.address();
     let token = token::Client::new(&env, &token_address);
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
     // FX scenarios need a third payment beyond deposit + remainder.
-    token::StellarAssetClient::new(&env, &token_address).mint(&buyer, &(TOTAL_AMOUNT * 3));
+    token_admin_client.mint(&buyer, &(TOTAL_AMOUNT * 3));
 
     let oracle_id = env.register(mock_oracle::MockOracle, ());
     let oracle = mock_oracle::MockOracleClient::new(&env, &oracle_id);
@@ -147,6 +148,7 @@ fn oracle_world(denominated_amount: i128) -> World {
         env,
         contract,
         token,
+        token_admin: token_admin_client,
         buyer,
         cooperative,
         warehouse,

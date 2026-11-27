@@ -7,6 +7,45 @@ companion to [`cost-estimation.md`](./cost-estimation.md), which covers the
 separate question of *which tool* to standardize on — this doc doesn't
 re-argue that, it just reports what the estimator actually returned.
 
+## Fee-bump sponsorship
+
+[`scripts/fee-bump-submit.mjs`](../scripts/fee-bump-submit.mjs) demonstrates
+submitting `claim_advance_1` or `cancel` on Testnet with a separate fee payer.
+Install its pinned SDK dependency with `npm ci --prefix scripts` (Node.js
+22.12 or newer), then set `INNER_SOURCE_SECRET` and `SPONSOR_SECRET` in the
+environment. The inner source must be funded and have a sequence number; for
+`claim_advance_1` it must be the cooperative. For `cancel`, use the buyer as
+the inner source and set `OTHER_PARTY_SECRET` to the cooperative's secret.
+The script signs
+non-source Soroban authorization entries with the matching party key, signs
+the inner transaction with its source, and only then wraps it in a fee-bump
+transaction signed by the sponsor. The sponsor must be a distinct, funded
+account. Secrets are read from the environment and are never printed.
+
+Run, for example:
+
+```sh
+node scripts/fee-bump-submit.mjs <contract-id> claim_advance_1
+node scripts/fee-bump-submit.mjs <contract-id> cancel
+```
+
+The fee-bump sponsor pays the transaction inclusion fee and Soroban resource
+fee (including the resource fee's rent component). Sponsorship does not pay
+for tokens moved by the contract, remove any account funding or sequence
+requirements, alter `require_auth`, or make future storage TTL extensions
+free. `claim_advance_1` still requires cooperative authorization; `cancel`
+still requires both the buyer and cooperative. The contract must already be
+in a state where the selected method succeeds, and the party keys must match
+its stored addresses.
+
+Both methods were submitted successfully on Testnet against a freshly deployed,
+disposable contract using generated test accounts:
+
+| Method | Fee-bump transaction |
+| --- | --- |
+| `claim_advance_1` | [d00508ba1eda47077dafb7740a27dcf2e4bc760e0e2d3851ac22b75b4889f390](https://stellar.expert/explorer/testnet/tx/d00508ba1eda47077dafb7740a27dcf2e4bc760e0e2d3851ac22b75b4889f390) |
+| `cancel` | [6a1001e06fcec20c2667bfeca0afbfb9b31051cf9718cd344b68d5a9b8d90a7f](https://stellar.expert/explorer/testnet/tx/6a1001e06fcec20c2667bfeca0afbfb9b31051cf9718cd344b68d5a9b8d90a7f) |
+
 Two measurement sessions are recorded here, kept deliberately separate
 because they were taken against **different builds**:
 
