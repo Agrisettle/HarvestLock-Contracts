@@ -7,8 +7,18 @@
 //
 // Everything else stays strict: header format/type-enum, subject case,
 // empty-commit checks, etc. A PR with a non-conventional message still fails.
+// `ignores` lists contributor commits that reached main inside an already
+// reviewed PR (#314). Rewriting them would change their hashes and un-merge
+// that PR, so they are exempted by exact header. Do not add new entries for
+// open PRs; ask the author to reword instead.
+const MERGED_HISTORY = new Set([
+  'Merge upstream/main and finalize issues #303-#306',
+  'Address upstream issues #303-#306',
+]);
+
 module.exports = {
   extends: ['@commitlint/config-conventional'],
+  ignores: [(message) => MERGED_HISTORY.has(message.split('\n')[0].trim())],
   rules: {
     'body-max-line-length': [0], // body lines may exceed 100 chars
     'footer-max-line-length': [0], // footer lines (BREAKING CHANGE, refs) too
