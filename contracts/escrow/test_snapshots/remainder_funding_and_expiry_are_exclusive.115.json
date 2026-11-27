@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "16461"
+                        "u64": "84774"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "74850"
+                        "u64": "12723"
                       }
                     },
                     {
@@ -254,47 +254,12 @@
       ]
     ],
     [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-              "function_name": "fund_remainder",
-              "args": []
-            }
-          },
-          "sub_invocations": [
-            {
-              "function": {
-                "contract_fn": {
-                  "contract_address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
-                  "function_name": "transfer",
-                  "args": [
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
-                    },
-                    {
-                      "i128": "700000"
-                    }
-                  ]
-                }
-              },
-              "sub_invocations": []
-            }
-          ]
-        }
-      ]
-    ]
+    []
   ],
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 691286552478,
+    "timestamp": 645371398874,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -372,26 +337,6 @@
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "4837995959683129791"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "5806905060045992000"
                 }
               },
               "durability": "temporary",
@@ -548,7 +493,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "691286431299"
+                              "u64": "645371444407"
                             }
                           },
                           {
@@ -580,7 +525,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "691286431299"
+                              "u64": "645371444407"
                             }
                           },
                           {
@@ -604,7 +549,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "16461"
+                              "u64": "84774"
                             }
                           },
                           {
@@ -628,7 +573,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "691286414838"
+                              "u64": "645371359633"
                             }
                           },
                           {
@@ -644,7 +589,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "691286614838"
+                              "u64": "645371559633"
                             }
                           },
                           {
@@ -770,7 +715,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "691286552479"
+                              "u64": "645371398873"
                             }
                           },
                           {
@@ -778,7 +723,7 @@
                               "symbol": "remainder_funded"
                             },
                             "val": {
-                              "bool": true
+                              "bool": false
                             }
                           },
                           {
@@ -786,7 +731,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "74850"
+                              "u64": "12723"
                             }
                           },
                           {
@@ -870,7 +815,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "2000000"
+                      "i128": "2700000"
                     }
                   },
                   {
@@ -974,7 +919,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "700000"
+                      "i128": "0"
                     }
                   },
                   {
@@ -1120,72 +1065,5 @@
       }
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
-        "type": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "transfer"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
-              },
-              {
-                "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV"
-              }
-            ],
-            "data": {
-              "i128": "700000"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-        "type": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "remainder_funded"
-              }
-            ],
-            "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "amount"
-                  },
-                  "val": {
-                    "i128": "700000"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "from"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-                  }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

@@ -239,6 +239,14 @@ pub const MAX_DENOMINATED_AMOUNT: i128 = i128::MAX / 10_000;
 /// call site overflow-free by construction. See `Error::AmountTooLarge`.
 pub const MAX_TOTAL_AMOUNT: i128 = i128::MAX / 10_000;
 
+/// Maximum number of times `flag_dispute` may be called per commitment.
+/// Only a lapsed dispute window (resolved by `expire_dispute_window`) counts
+/// against the cap; a unanimous `resolve_dispute` does not.
+/// Three covers any realistic round of parallel good-faith attempts and
+/// closes the stalling attack documented in `docs/dispute-stalling.md`.
+/// See `Error::DisputeCapReached`.
+pub const MAX_DISPUTE_FLAGS: u32 = 3;
+
 /// The lifecycle state of a commitment. Advances monotonically through the
 /// main sequence; `Disputed` is a re-entrant pause; `Settled`, `Cancelled`,
 /// `Defaulted`, and `Forfeited` are terminal states from which no further
@@ -1554,9 +1562,7 @@ impl Method {
             | Method::ReplaceOracleConfig
             | Method::FundFxShortfall
             | Method::ExpireFxShortfallWindow => Some(&[Status::Delivered]),
-            Method::Cancel | Method::ReassignBuyer | Method::ReassignOperator => {
-                Some(PRE_DELIVERY)
-            }
+            Method::Cancel | Method::ReassignBuyer | Method::ReassignOperator => Some(PRE_DELIVERY),
             Method::FlagDispute => Some(LOCKED_THROUGH_DELIVERED),
             Method::ResolveDispute | Method::ExpireDisputeWindow => Some(&[Status::Disputed]),
         }

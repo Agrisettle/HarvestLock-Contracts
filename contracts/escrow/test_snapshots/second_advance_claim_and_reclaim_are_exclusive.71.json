@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "14897"
+                        "u64": "31076"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "7271"
+                        "u64": "71895"
                       }
                     },
                     {
@@ -224,12 +224,26 @@
     ],
     [],
     [],
-    []
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+              "function_name": "claim_advance_2",
+              "args": []
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ]
   ],
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 921290296562,
+    "timestamp": 251658242977,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -343,6 +357,26 @@
           "data": {
             "contract_data": {
               "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+              "key": {
+                "ledger_key_nonce": {
+                  "nonce": "8370022561469687789"
+                }
+              },
+              "durability": "temporary",
+              "val": "void"
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6311999
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
               "key": {
                 "ledger_key_nonce": {
@@ -423,7 +457,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "921290296561"
+                              "u64": "251658242978"
                             }
                           },
                           {
@@ -447,7 +481,7 @@
                               "symbol": "advance2_claimed"
                             },
                             "val": {
-                              "bool": false
+                              "bool": true
                             }
                           },
                           {
@@ -455,7 +489,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "921290296561"
+                              "u64": "251658242978"
                             }
                           },
                           {
@@ -479,7 +513,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "14897"
+                              "u64": "31076"
                             }
                           },
                           {
@@ -503,7 +537,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "921290210857"
+                              "u64": "251658189485"
                             }
                           },
                           {
@@ -519,7 +553,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "921290410857"
+                              "u64": "251658389485"
                             }
                           },
                           {
@@ -661,7 +695,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "7271"
+                              "u64": "71895"
                             }
                           },
                           {
@@ -797,7 +831,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "150000"
+                      "i128": "300000"
                     }
                   },
                   {
@@ -849,7 +883,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "150000"
+                      "i128": "0"
                     }
                   },
                   {
@@ -995,5 +1029,75 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "transfer"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV"
+              }
+            ],
+            "data": {
+              "i128": "150000"
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "tranche_claimed"
+              },
+              {
+                "u32": 2
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "amount"
+                  },
+                  "val": {
+                    "i128": "150000"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "to"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }

@@ -47,5 +47,5 @@ resolve_dispute cpu=375973 mem=155673 read_entries=9 write_entries=4 read_bytes=
 expire_dispute_window cpu=309696 mem=126378 read_entries=3 write_entries=1 read_bytes=0 write_bytes=1612
 get_status cpu=191656 mem=100389 read_entries=3 write_entries=0 read_bytes=0 write_bytes=0
 get_commitment cpu=243286 mem=105146 read_entries=3 write_entries=0 read_bytes=0 write_bytes=0
-available_actions cpu=220712 mem=103766 read_entries=3 write_entries=0 read_bytes=0 write_bytes=0
+available_actions cpu=227158 mem=104525 read_entries=3 write_entries=0 read_bytes=0 write_bytes=0
 get_commitment_view cpu=243899 mem=105378 read_entries=3 write_entries=0 read_bytes=0 write_bytes=0
