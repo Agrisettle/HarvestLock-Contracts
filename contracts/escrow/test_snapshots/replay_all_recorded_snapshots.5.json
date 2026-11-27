@@ -70,80 +70,36 @@
                   "address": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN"
                 },
                 {
-                  "map": [
+                  "i128": "1000000000"
+                },
+                {
+                  "u32": 1500
+                },
+                {
+                  "u32": 1500
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "15"
+                },
+                {
+                  "u32": 1000
+                },
+                {
+                  "vec": [
                     {
-                      "key": {
-                        "symbol": "advance1_bps"
-                      },
-                      "val": {
-                        "u32": 1500
-                      }
+                      "u32": 10000
                     },
                     {
-                      "key": {
-                        "symbol": "advance2_bps"
-                      },
-                      "val": {
-                        "u32": 2000
-                      }
+                      "u32": 9000
                     },
                     {
-                      "key": {
-                        "symbol": "claim_window_secs"
-                      },
-                      "val": {
-                        "u64": "20"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "contracted_quantity"
-                      },
-                      "val": {
-                        "u32": 1000
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "delivery_window_secs"
-                      },
-                      "val": {
-                        "u64": "1036800"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "grade_price_bps"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "u32": 10000
-                          },
-                          {
-                            "u32": 9000
-                          },
-                          {
-                            "u32": 7500
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "remainder_window_secs"
-                      },
-                      "val": {
-                        "u64": "604800"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "total_amount"
-                      },
-                      "val": {
-                        "i128": "1000000000"
-                      }
+                      "u32": 7500
                     }
                   ]
                 },
@@ -180,7 +136,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                     },
                     {
-                      "i128": "350000000"
+                      "i128": "300000000"
                     }
                   ]
                 }
@@ -193,44 +149,6 @@
     ],
     [],
     [],
-    [],
-    [],
-    [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
-              "function_name": "claim_advance_1",
-              "args": []
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
-    [],
-    [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
-              "function_name": "mark_checkpoint",
-              "args": []
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ],
-    [],
-    [],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
@@ -238,7 +156,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
-              "function_name": "reclaim_advance_2",
+              "function_name": "reclaim_on_nondelivery",
               "args": []
             }
           },
@@ -246,8 +164,6 @@
         }
       ]
     ],
-    [],
-    [],
     [],
     [],
     [],
@@ -257,9 +173,9 @@
     []
   ],
   "ledger": {
-    "protocol_version": 29,
+    "protocol_version": 28,
     "sequence_number": 0,
-    "timestamp": 21,
+    "timestamp": 16,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -336,7 +252,7 @@
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
               "key": {
                 "ledger_key_nonce": {
-                  "nonce": "4837995959683129791"
+                  "nonce": "2032731177588607455"
                 }
               },
               "durability": "temporary",
@@ -356,47 +272,7 @@
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
               "key": {
                 "ledger_key_nonce": {
-                  "nonce": "8370022561469687789"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "2032731177588607455"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "key": {
-                "ledger_key_nonce": {
-                  "nonce": "4270020994084947596"
+                  "nonce": "4837995959683129791"
                 }
               },
               "durability": "temporary",
@@ -465,7 +341,7 @@
                               "symbol": "advance1_claimed"
                             },
                             "val": {
-                              "bool": true
+                              "bool": false
                             }
                           },
                           {
@@ -473,7 +349,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "20"
+                              "u64": "0"
                             }
                           },
                           {
@@ -489,7 +365,7 @@
                               "symbol": "advance2_bps"
                             },
                             "val": {
-                              "u32": 2000
+                              "u32": 1500
                             }
                           },
                           {
@@ -505,7 +381,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "20"
+                              "u64": "0"
                             }
                           },
                           {
@@ -513,7 +389,7 @@
                               "symbol": "advance2_expired"
                             },
                             "val": {
-                              "bool": true
+                              "bool": false
                             }
                           },
                           {
@@ -529,7 +405,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "20"
+                              "u64": "604800"
                             }
                           },
                           {
@@ -569,15 +445,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "1036800"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "dispute_count"
-                            },
-                            "val": {
-                              "u32": 0
+                              "u64": "15"
                             }
                           },
                           {
@@ -606,14 +474,6 @@
                             },
                             "val": {
                               "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "fx_quote_stale"
-                            },
-                            "val": {
-                              "bool": false
                             }
                           },
                           {
@@ -713,7 +573,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "Advance2Released"
+                                  "symbol": "Forfeited"
                                 }
                               ]
                             }
@@ -752,7 +612,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       },
       {
         "entry": {
@@ -779,59 +639,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "850000000"
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "authorized"
-                    },
-                    "val": {
-                      "bool": true
-                    }
-                  },
-                  {
-                    "key": {
-                      "symbol": "clawback"
-                    },
-                    "val": {
-                      "bool": false
-                    }
-                  }
-                ]
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 518400
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CACMVW2KK4H5FZDFF2AUCAKQTEJMZZWJUIZF23XMRVYQBSXYLHZ6BKWN",
-              "key": {
-                "vec": [
-                  {
-                    "symbol": "Balance"
-                  },
-                  {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "map": [
-                  {
-                    "key": {
-                      "symbol": "amount"
-                    },
-                    "val": {
-                      "i128": "150000000"
+                      "i128": "1000000000"
                     }
                   },
                   {
@@ -1025,7 +833,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       }
     ]
   },

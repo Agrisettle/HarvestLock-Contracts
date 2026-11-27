@@ -70,80 +70,36 @@
                   "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
                 },
                 {
-                  "map": [
+                  "i128": "1000000"
+                },
+                {
+                  "u32": 1500
+                },
+                {
+                  "u32": 2000
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "10368000"
+                },
+                {
+                  "u32": 1000
+                },
+                {
+                  "vec": [
                     {
-                      "key": {
-                        "symbol": "advance1_bps"
-                      },
-                      "val": {
-                        "u32": 1500
-                      }
+                      "u32": 10000
                     },
                     {
-                      "key": {
-                        "symbol": "advance2_bps"
-                      },
-                      "val": {
-                        "u32": 2000
-                      }
+                      "u32": 9000
                     },
                     {
-                      "key": {
-                        "symbol": "claim_window_secs"
-                      },
-                      "val": {
-                        "u64": "604800"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "contracted_quantity"
-                      },
-                      "val": {
-                        "u32": 1000
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "delivery_window_secs"
-                      },
-                      "val": {
-                        "u64": "10368000"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "grade_price_bps"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "u32": 10000
-                          },
-                          {
-                            "u32": 9000
-                          },
-                          {
-                            "u32": 7500
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "remainder_window_secs"
-                      },
-                      "val": {
-                        "u64": "604800"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "total_amount"
-                      },
-                      "val": {
-                        "i128": "1000000"
-                      }
+                      "u32": 7500
                     }
                   ]
                 },
@@ -314,7 +270,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 29,
+    "protocol_version": 28,
     "sequence_number": 0,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -691,14 +647,6 @@
                           },
                           {
                             "key": {
-                              "symbol": "dispute_count"
-                            },
-                            "val": {
-                              "u32": 0
-                            }
-                          },
-                          {
-                            "key": {
                               "symbol": "dispute_deadline"
                             },
                             "val": {
@@ -723,14 +671,6 @@
                             },
                             "val": {
                               "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "fx_quote_stale"
-                            },
-                            "val": {
-                              "bool": false
                             }
                           },
                           {
@@ -869,7 +809,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       },
       {
         "entry": {
@@ -1142,7 +1082,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       }
     ]
   },
@@ -1173,7 +1113,9 @@
                 ]
               }
             ],
-            "data": "void"
+            "data": {
+              "map": []
+            }
           }
         }
       },
@@ -1202,46 +1144,6 @@
             ],
             "data": {
               "i128": "650000"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-        "type": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "payout"
-              },
-              {
-                "symbol": "coop_pay"
-              }
-            ],
-            "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "amount"
-                  },
-                  "val": {
-                    "i128": "650000"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "to"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                }
-              ]
             }
           }
         }

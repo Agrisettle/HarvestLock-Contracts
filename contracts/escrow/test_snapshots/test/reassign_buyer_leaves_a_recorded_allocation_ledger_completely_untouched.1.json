@@ -70,80 +70,36 @@
                   "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
                 },
                 {
-                  "map": [
+                  "i128": "1000000"
+                },
+                {
+                  "u32": 1500
+                },
+                {
+                  "u32": 1500
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "604800"
+                },
+                {
+                  "u64": "10368000"
+                },
+                {
+                  "u32": 1000
+                },
+                {
+                  "vec": [
                     {
-                      "key": {
-                        "symbol": "advance1_bps"
-                      },
-                      "val": {
-                        "u32": 1500
-                      }
+                      "u32": 10000
                     },
                     {
-                      "key": {
-                        "symbol": "advance2_bps"
-                      },
-                      "val": {
-                        "u32": 1500
-                      }
+                      "u32": 9000
                     },
                     {
-                      "key": {
-                        "symbol": "claim_window_secs"
-                      },
-                      "val": {
-                        "u64": "604800"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "contracted_quantity"
-                      },
-                      "val": {
-                        "u32": 1000
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "delivery_window_secs"
-                      },
-                      "val": {
-                        "u64": "10368000"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "grade_price_bps"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "u32": 10000
-                          },
-                          {
-                            "u32": 9000
-                          },
-                          {
-                            "u32": 7500
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "remainder_window_secs"
-                      },
-                      "val": {
-                        "u64": "604800"
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "total_amount"
-                      },
-                      "val": {
-                        "i128": "1000000"
-                      }
+                      "u32": 7500
                     }
                   ]
                 },
@@ -173,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "0000177000000000000000000000000000000000000000000000000000000000"
+                            "bytes": "1086f76bca9c8bcda595d379b585107a8c66260b46a8382579b413107c9b906e"
                           }
                         },
                         {
@@ -193,7 +149,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "00000fa000000000000000000000000000000000000000000000000000000000"
+                            "bytes": "921a39e3b41cd45d982c69f27bd18ea27070a87a4093798ef2f86c75ce285d05"
                           }
                         },
                         {
@@ -327,7 +283,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 29,
+    "protocol_version": 28,
     "sequence_number": 0,
     "timestamp": 604801,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -504,71 +460,6 @@
             "contract_data": {
               "ext": "v0",
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-              "key": {
-                "vec": [
-                  {
-                    "symbol": "Allocation"
-                  }
-                ]
-              },
-              "durability": "persistent",
-              "val": {
-                "vec": [
-                  {
-                    "map": [
-                      {
-                        "key": {
-                          "symbol": "member_hash"
-                        },
-                        "val": {
-                          "bytes": "0000177000000000000000000000000000000000000000000000000000000000"
-                        }
-                      },
-                      {
-                        "key": {
-                          "symbol": "share_bps"
-                        },
-                        "val": {
-                          "u32": 6000
-                        }
-                      }
-                    ]
-                  },
-                  {
-                    "map": [
-                      {
-                        "key": {
-                          "symbol": "member_hash"
-                        },
-                        "val": {
-                          "bytes": "00000fa000000000000000000000000000000000000000000000000000000000"
-                        }
-                      },
-                      {
-                        "key": {
-                          "symbol": "share_bps"
-                        },
-                        "val": {
-                          "u32": 4000
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
               "key": "ledger_key_contract_instance",
               "durability": "persistent",
               "val": {
@@ -577,6 +468,59 @@
                     "wasm": "95616f137b71f2524c5c1a9911d7c51abf81930f93f7a6cae2fa8967c03d14fb"
                   },
                   "storage": [
+                    {
+                      "key": {
+                        "vec": [
+                          {
+                            "symbol": "Allocation"
+                          }
+                        ]
+                      },
+                      "val": {
+                        "vec": [
+                          {
+                            "map": [
+                              {
+                                "key": {
+                                  "symbol": "member_hash"
+                                },
+                                "val": {
+                                  "bytes": "1086f76bca9c8bcda595d379b585107a8c66260b46a8382579b413107c9b906e"
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "share_bps"
+                                },
+                                "val": {
+                                  "u32": 6000
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "map": [
+                              {
+                                "key": {
+                                  "symbol": "member_hash"
+                                },
+                                "val": {
+                                  "bytes": "921a39e3b41cd45d982c69f27bd18ea27070a87a4093798ef2f86c75ce285d05"
+                                }
+                              },
+                              {
+                                "key": {
+                                  "symbol": "share_bps"
+                                },
+                                "val": {
+                                  "u32": 4000
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
                     {
                       "key": {
                         "vec": [
@@ -709,14 +653,6 @@
                           },
                           {
                             "key": {
-                              "symbol": "dispute_count"
-                            },
-                            "val": {
-                              "u32": 0
-                            }
-                          },
-                          {
-                            "key": {
                               "symbol": "dispute_deadline"
                             },
                             "val": {
@@ -741,14 +677,6 @@
                             },
                             "val": {
                               "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "fx_quote_stale"
-                            },
-                            "val": {
-                              "bool": false
                             }
                           },
                           {
@@ -887,7 +815,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       },
       {
         "entry": {
@@ -1200,7 +1128,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       }
     ]
   },

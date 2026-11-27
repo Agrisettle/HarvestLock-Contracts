@@ -155,7 +155,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 29,
+    "protocol_version": 28,
     "sequence_number": 0,
     "timestamp": 3613601,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -431,14 +431,6 @@
                           },
                           {
                             "key": {
-                              "symbol": "dispute_count"
-                            },
-                            "val": {
-                              "u32": 0
-                            }
-                          },
-                          {
-                            "key": {
                               "symbol": "dispute_deadline"
                             },
                             "val": {
@@ -463,14 +455,6 @@
                             },
                             "val": {
                               "i128": "0"
-                            }
-                          },
-                          {
-                            "key": {
-                              "symbol": "fx_quote_stale"
-                            },
-                            "val": {
-                              "bool": false
                             }
                           },
                           {
@@ -654,7 +638,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       },
       {
         "entry": {
@@ -823,7 +807,7 @@
           },
           "ext": "v0"
         },
-        "live_until": 6311999
+        "live_until": 4095
       },
       {
         "entry": {
