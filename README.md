@@ -75,7 +75,7 @@ top-up on real testnet (see HANDOFF.md's Deployment 9). PRD's must-have
 let any one of the three named parties freeze a commitment and either
 unanimous consent or a timeout resume it — still not arbitration of
 who's at fault, a bounded pause only, by explicit design (see
-HANDOFF.md). 213 tests passing, deployed and exercised on Stellar
+HANDOFF.md). 301 tests passing, deployed and exercised on Stellar
 testnet eleven times. Reflector's real testnet oracle doesn't quote NGN
 yet (confirmed live, not assumed — GBP proves the mechanism instead) —
 tracked in HANDOFF.md's "next steps," matching
@@ -129,6 +129,42 @@ Setting this up for the first time and something won't build?
 collects the toolchain failures this repo has already hit and how they were
 fixed — including why `cargo install stellar-cli` fails on Windows and which
 libraries a fresh Linux runner is missing.
+
+## Fuzzing the XDR boundary
+
+[`fuzz/`](./fuzz/) holds a cargo-fuzz target that calls every public entry
+point with arbitrary `Val` arguments (wrong types and arity, oversized
+`grade_price_bps`/`members` vectors, malformed `OracleConfig`/`Option`
+shapes) through `Env::try_invoke_contract`. A contract `Error`, a
+conversion/host error, and a success that still satisfies the commitment
+invariants are all accepted; an escaping panic or an impossible state is a
+crash. See [`fuzz/src/lib.rs`](./fuzz/src/lib.rs) for the harness.
+
+```bash
+# One-time setup: libFuzzer needs a nightly toolchain.
+rustup toolchain install nightly
+cargo install cargo-fuzz
+
+cd fuzz
+cargo +nightly fuzz run entry_points -- \
+  -max_total_time=300 corpus/entry_points  # 5-minute campaign
+cargo +nightly fuzz run entry_points -- corpus/entry_points  # replay corpus only
+```
+
+The harness is a plain library, so it also builds and smoke-tests on the
+pinned stable toolchain without fuzzing tooling:
+
+```bash
+cd fuzz && cargo test --lib   # 250 deterministic inputs through the harness
+```
+
+Seeds live in [`fuzz/corpus/entry_points/`](./fuzz/corpus/entry_points/);
+libFuzzer grows the corpus in place, and `fuzz/artifacts/` receives any
+crashing input. **Findings so far:** the deterministic 250-input smoke run
+is clean — no panic, no bad success, no invariant violation. A full
+libFuzzer campaign has not been run in CI (it needs nightly and a time
+budget); run the command above locally after touching argument decoding or
+the `MAX_*` bounds, and record anything it finds here.
 
 ## Reference
 

@@ -1171,7 +1171,17 @@ impl CommitmentView {
 /// trade-off — everything else that would consume these events is
 /// deliberately deferred app-side work, not a reason to withhold the
 /// event surface itself.
-#[contractevent]
+// `data_format = "single-value"` measured as the smallest encoding for a
+// zero-data-field event: 128 bytes on the wire vs 132 for both the default
+// map and vec, plus ~1k fewer CPU instructions per publish (16,733 vs
+// 17,798 map / 17,295 vec). With no data fields the alternative formats all
+// carry an empty container, so this changes no consumer-visible field — only
+// the empty-payload tag. Measured with `env.cost_estimate()`; see
+// `docs/gas-costs.md` §"Event emission by data_format". Multi-field events
+// stay on the map default on purpose: for them the map's field names buy
+// indexer robustness for a measured +72 bytes (192 vs 120, see
+// `DeliveryConfirmed`).
+#[contractevent(data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StatusChanged {
     #[topic]
@@ -1282,7 +1292,10 @@ pub struct FxResolved {
 }
 
 /// Emitted by `refresh_fx_quote_status` when `fx_quote_stale` changes (#210).
-#[contractevent]
+/// `single-value` is the measured-cheapest encoding for a one-field event
+/// (no field-name keys to carry); see `docs/gas-costs.md` §"Event emission by
+/// data_format".
+#[contractevent(data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FxQuoteStaleChanged {
     pub stale: bool,
