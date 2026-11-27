@@ -419,14 +419,15 @@ jobs:
 
       - name: Update soroban-sdk version
         run: |
-          cd contracts/escrow
-          # Update both dependencies and dev-dependencies. Each sed expression
+          # Update both dependencies and dev-dependencies, in every contract
+          # crate: the factory depends on soroban-sdk too, and cargo cannot
+          # resolve two different soroban-sdk majors in one workspace. Each sed expression
           # is a single-quoted shell string, so it must not contain a stray
           # quote: an earlier version of the dev-dependency pattern ended with
           # `"',` which closed the shell string early and killed the step with
           # "unexpected EOF while looking for matching `'`" before any test ran.
-          sed -i 's/soroban-sdk = "[^"]*"/soroban-sdk = "${{ matrix.soroban-version }}"/' Cargo.toml
-          sed -i 's/soroban-sdk = { version = "[^"]*"/soroban-sdk = { version = "${{ matrix.soroban-version }}"/' Cargo.toml
+          sed -i 's/soroban-sdk = "[^"]*"/soroban-sdk = "${{ matrix.soroban-version }}"/' contracts/*/Cargo.toml
+          sed -i 's/soroban-sdk = { version = "[^"]*"/soroban-sdk = { version = "${{ matrix.soroban-version }}"/' contracts/*/Cargo.toml
 
       - name: Verify updated version
         working-directory: contracts/escrow
@@ -442,9 +443,7 @@ jobs:
       # (this job runs on a copy, so technically not needed, but good practice)
       - name: Revert Cargo.toml changes
         if: always()
-        run: |
-          cd contracts/escrow
-          git checkout Cargo.toml
+        run: git checkout contracts/*/Cargo.toml
 
   # Dependency vulnerability scan (#58): `cargo test` proves the contract
   # behaves; this proves the pinned dependency set itself carries no crate

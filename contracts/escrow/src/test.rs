@@ -7119,3 +7119,34 @@ mod oracle_identity_rate_differential {
         }
     }
 }
+
+// ---------- #318: no tranche claim or reclaim after a terminal status ----------
+
+/// `cancel` refunds the whole balance, so a still-open advance window must
+/// answer with a clean `InvalidState` instead of reaching a token transfer
+/// that has nothing left to move.
+#[test]
+fn claim_advance_1_after_cancel_is_invalid_state() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.cancel();
+    assert_eq!(s.contract.get_status(), Status::Cancelled);
+    assert_eq!(
+        s.contract.try_claim_advance_1(),
+        Err(Ok(Error::InvalidState))
+    );
+}
+
+#[test]
+fn reclaim_advance_1_after_cancel_is_invalid_state() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.cancel();
+    advance_time(&s, WINDOW + 1);
+    assert_eq!(
+        s.contract.try_reclaim_advance_1(),
+        Err(Ok(Error::InvalidState))
+    );
+}
