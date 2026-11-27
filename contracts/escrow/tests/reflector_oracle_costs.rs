@@ -62,7 +62,7 @@
 //! also grow; see the doc section for that caveat.
 
 use harvestlock_escrow::testutils::{commitment_terms, mock_oracle, Terms, CONTRACTED_QUANTITY};
-use harvestlock_escrow::{EscrowContract, EscrowContractClient, Error, OracleConfig};
+use harvestlock_escrow::{Error, EscrowContract, EscrowContractClient, OracleConfig};
 use soroban_sdk::testutils::{Address as _, EnvTestConfig, Ledger as _};
 use soroban_sdk::{token, Address, Bytes, Env, Symbol, Vec as OnChainVec};
 
@@ -77,7 +77,9 @@ mod reflector {
 
 // ---------- the live testnet configuration ----------
 
-const QUOTED: [&str; 9] = ["EUR", "GBP", "CHF", "CAD", "MXN", "ARS", "BRL", "THB", "XAU"];
+const QUOTED: [&str; 9] = [
+    "EUR", "GBP", "CHF", "CAD", "MXN", "ARS", "BRL", "THB", "XAU",
+];
 const DECIMALS: u32 = 14;
 const RESOLUTION_MS: u32 = 300_000;
 const RESOLUTION_SECS: u64 = (RESOLUTION_MS / 1_000) as u64;
@@ -211,7 +213,12 @@ fn publish_round(env: &Env, oracle: &reflector::Client, asset_indexes: &[u32], t
 /// `ROUNDS` identical rounds ending at `NOW`; leaves the ledger clock at `NOW`.
 fn publish_history(env: &Env, oracle: &reflector::Client, asset_indexes: &[u32]) {
     for i in 0..ROUNDS {
-        publish_round(env, oracle, asset_indexes, NOW - (ROUNDS - 1 - i) * RESOLUTION_SECS);
+        publish_round(
+            env,
+            oracle,
+            asset_indexes,
+            NOW - (ROUNDS - 1 - i) * RESOLUTION_SECS,
+        );
     }
     env.ledger().set_timestamp(NOW);
 }
@@ -229,14 +236,20 @@ fn mock(env: &Env) -> OracleUnderTest {
     env.ledger().set_timestamp(NOW);
     let id = env.register(mock_oracle::MockOracle, ());
     mock_oracle::MockOracleClient::new(env, &id).set_price(&PRICE, &NOW);
-    OracleUnderTest { id, price_asset: "EUR" }
+    OracleUnderTest {
+        id,
+        price_asset: "EUR",
+    }
 }
 
 /// What testnet is doing today: single-asset EUR rounds.
 fn reflector_live(env: &Env) -> OracleUnderTest {
     let (id, client) = deploy_reflector(env);
     publish_history(env, &client, &[0]);
-    OracleUnderTest { id, price_asset: "EUR" }
+    OracleUnderTest {
+        id,
+        price_asset: "EUR",
+    }
 }
 
 /// The most expensive successful read: all nine assets in every round, and
@@ -244,7 +257,10 @@ fn reflector_live(env: &Env) -> OracleUnderTest {
 fn reflector_full_round(env: &Env) -> OracleUnderTest {
     let (id, client) = deploy_reflector(env);
     publish_history(env, &client, &ALL_ASSETS);
-    OracleUnderTest { id, price_asset: "XAU" }
+    OracleUnderTest {
+        id,
+        price_asset: "XAU",
+    }
 }
 
 // ---------- the escrow ----------
@@ -260,7 +276,11 @@ enum EscrowBuild {
 
 /// An initialized commitment pointed at `oracle`, driven to `Delivered` (the
 /// earliest state `resolve_fx_shortfall` succeeds in).
-fn escrow_at_delivered(env: &Env, oracle: &OracleUnderTest, build: EscrowBuild) -> EscrowContractClient<'static> {
+fn escrow_at_delivered(
+    env: &Env,
+    oracle: &OracleUnderTest,
+    build: EscrowBuild,
+) -> EscrowContractClient<'static> {
     let buyer = Address::generate(env);
     let terms = Terms::default();
 
@@ -311,27 +331,47 @@ fn fx_path(name: &str, escrow_build: EscrowBuild, build: fn(&Env) -> OracleUnder
     let env = fresh_env();
     let escrow = escrow_at_delivered(&env, &build(&env), escrow_build);
     let (rate, rate_sample) = measure(&env, || escrow.oracle_rate());
-    assert_eq!((rate.price, rate.timestamp), (PRICE, NOW), "{name}: wrong quote");
+    assert_eq!(
+        (rate.price, rate.timestamp),
+        (PRICE, NOW),
+        "{name}: wrong quote"
+    );
 
     let env = fresh_env();
     let escrow = escrow_at_delivered(&env, &build(&env), escrow_build);
     let ((), resolve_sample) = measure(&env, || escrow.resolve_fx_shortfall());
     let c = escrow.get_commitment();
-    assert!(c.fx_resolved && c.fx_shortfall_amount > 0, "{name}: not on the shortfall path");
+    assert!(
+        c.fx_resolved && c.fx_shortfall_amount > 0,
+        "{name}: not on the shortfall path"
+    );
 
     [
-        Row { label: format!("oracle_rate          / {name}"), sample: rate_sample },
-        Row { label: format!("resolve_fx_shortfall / {name}"), sample: resolve_sample },
+        Row {
+            label: format!("oracle_rate          / {name}"),
+            sample: rate_sample,
+        },
+        Row {
+            label: format!("resolve_fx_shortfall / {name}"),
+            sample: resolve_sample,
+        },
     ]
 }
 
 /// One direct call to the oracle, no escrow in between.
-fn direct<R>(name: &str, build: fn(&Env) -> OracleUnderTest, call: fn(&Env, &reflector::Client, &str) -> R) -> Row {
+fn direct<R>(
+    name: &str,
+    build: fn(&Env) -> OracleUnderTest,
+    call: fn(&Env, &reflector::Client, &str) -> R,
+) -> Row {
     let env = fresh_env();
     let oracle = build(&env);
     let client = reflector::Client::new(&env, &oracle.id);
     let (_, sample) = measure(&env, || call(&env, &client, oracle.price_asset));
-    Row { label: name.to_string(), sample }
+    Row {
+        label: name.to_string(),
+        sample,
+    }
 }
 
 fn print_table(rows: &[Row]) {
@@ -384,7 +424,10 @@ fn reflector_wasm_answers_like_the_live_oracle() {
     // escrow's staleness check compares against the ledger clock.
     assert_eq!(
         oracle.lastprice(&asset(&env, "EUR")),
-        Some(reflector::PriceData { price: PRICE, timestamp: NOW })
+        Some(reflector::PriceData {
+            price: PRICE,
+            timestamp: NOW
+        })
     );
     // The escrow's documented real target is not quoted at all.
     assert_eq!(oracle.lastprice(&asset(&env, "NGN")), None);
@@ -414,17 +457,29 @@ fn lastprice_sees_only_the_latest_round() {
     assert_eq!(oracle.lastprice(&eur), None);
     assert_eq!(
         oracle.price(&eur, &NOW),
-        Some(reflector::PriceData { price: PRICE, timestamp: NOW }),
+        Some(reflector::PriceData {
+            price: PRICE,
+            timestamp: NOW
+        }),
         "the five-minute-old EUR round is still on chain"
     );
 
     let escrow = escrow_at_delivered(
         &env,
-        &OracleUnderTest { id, price_asset: "EUR" },
+        &OracleUnderTest {
+            id,
+            price_asset: "EUR",
+        },
         EscrowBuild::Native,
     );
-    assert_eq!(escrow.try_oracle_rate(), Err(Ok(Error::OraclePriceUnavailable)));
-    assert_eq!(escrow.try_resolve_fx_shortfall(), Err(Ok(Error::OraclePriceUnavailable)));
+    assert_eq!(
+        escrow.try_oracle_rate(),
+        Err(Ok(Error::OraclePriceUnavailable))
+    );
+    assert_eq!(
+        escrow.try_resolve_fx_shortfall(),
+        Err(Ok(Error::OraclePriceUnavailable))
+    );
 }
 
 /// The measurement: printed with `--nocapture`, recorded in
@@ -434,18 +489,38 @@ fn lastprice_sees_only_the_latest_round() {
 fn fx_path_cost_real_reflector_vs_mock() {
     let mut rows = std::vec::Vec::new();
     rows.extend(fx_path("MockOracle (native)", EscrowBuild::Native, mock));
-    rows.extend(fx_path("Reflector, live", EscrowBuild::Native, reflector_live));
-    rows.extend(fx_path("Reflector, full round", EscrowBuild::Native, reflector_full_round));
+    rows.extend(fx_path(
+        "Reflector, live",
+        EscrowBuild::Native,
+        reflector_live,
+    ));
+    rows.extend(fx_path(
+        "Reflector, full round",
+        EscrowBuild::Native,
+        reflector_full_round,
+    ));
 
-    rows.push(direct("Reflector.lastprice  / live", reflector_live, |env, c, a| {
-        assert_eq!(c.lastprice(&asset(env, a)).map(|q| q.price), Some(PRICE));
-    }));
-    rows.push(direct("Reflector.lastprice  / full round", reflector_full_round, |env, c, a| {
-        assert_eq!(c.lastprice(&asset(env, a)).map(|q| q.price), Some(PRICE));
-    }));
-    rows.push(direct("Reflector.decimals   / live", reflector_live, |_, c, _| {
-        assert_eq!(c.decimals(), DECIMALS);
-    }));
+    rows.push(direct(
+        "Reflector.lastprice  / live",
+        reflector_live,
+        |env, c, a| {
+            assert_eq!(c.lastprice(&asset(env, a)).map(|q| q.price), Some(PRICE));
+        },
+    ));
+    rows.push(direct(
+        "Reflector.lastprice  / full round",
+        reflector_full_round,
+        |env, c, a| {
+            assert_eq!(c.lastprice(&asset(env, a)).map(|q| q.price), Some(PRICE));
+        },
+    ));
+    rows.push(direct(
+        "Reflector.decimals   / live",
+        reflector_live,
+        |_, c, _| {
+            assert_eq!(c.decimals(), DECIMALS);
+        },
+    ));
 
     print_table(&rows);
     assert_headroom(&rows);
@@ -473,8 +548,16 @@ fn fx_path_cost_with_escrow_as_wasm() {
 
     let mut rows = std::vec::Vec::new();
     rows.extend(fx_path("escrow WASM + MockOracle", escrow, mock));
-    rows.extend(fx_path("escrow WASM + Reflector, live", escrow, reflector_live));
-    rows.extend(fx_path("escrow WASM + Reflector, full", escrow, reflector_full_round));
+    rows.extend(fx_path(
+        "escrow WASM + Reflector, live",
+        escrow,
+        reflector_live,
+    ));
+    rows.extend(fx_path(
+        "escrow WASM + Reflector, full",
+        escrow,
+        reflector_full_round,
+    ));
 
     print_table(&rows);
     assert_headroom(&rows);

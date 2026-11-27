@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "48318"
+                        "u64": "7974"
                       }
                     },
                     {
@@ -108,7 +108,7 @@
                         "symbol": "delivery_window_secs"
                       },
                       "val": {
-                        "u64": "497055"
+                        "u64": "516716"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "71989"
+                        "u64": "22975"
                       }
                     },
                     {
@@ -289,12 +289,26 @@
         }
       ]
     ],
-    []
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+              "function_name": "reclaim_on_nondelivery",
+              "args": []
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ]
   ],
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 25661660906,
+    "timestamp": 264587092847,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -352,6 +366,26 @@
               "key": {
                 "ledger_key_nonce": {
                   "nonce": "1033654523790656264"
+                }
+              },
+              "durability": "temporary",
+              "val": "void"
+            }
+          },
+          "ext": "v0"
+        },
+        "live_until": 6311999
+      },
+      {
+        "entry": {
+          "last_modified_ledger_seq": 0,
+          "data": {
+            "contract_data": {
+              "ext": "v0",
+              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "key": {
+                "ledger_key_nonce": {
+                  "nonce": "1194852393571756375"
                 }
               },
               "durability": "temporary",
@@ -548,7 +582,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "25661212169"
+                              "u64": "264586584104"
                             }
                           },
                           {
@@ -580,7 +614,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "25661212169"
+                              "u64": "264586584104"
                             }
                           },
                           {
@@ -604,7 +638,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "48318"
+                              "u64": "7974"
                             }
                           },
                           {
@@ -628,7 +662,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "25661163851"
+                              "u64": "264586576130"
                             }
                           },
                           {
@@ -644,7 +678,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "25661660906"
+                              "u64": "264587092846"
                             }
                           },
                           {
@@ -754,7 +788,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "25661281135"
+                              "u64": "264586617063"
                             }
                           },
                           {
@@ -770,7 +804,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "71989"
+                              "u64": "22975"
                             }
                           },
                           {
@@ -788,7 +822,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "ReadyForDelivery"
+                                  "symbol": "Forfeited"
                                 }
                               ]
                             }
@@ -854,7 +888,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "2000000"
+                      "i128": "2700000"
                     }
                   },
                   {
@@ -958,7 +992,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "700000"
+                      "i128": "0"
                     }
                   },
                   {
@@ -1104,5 +1138,107 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "status_changed"
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "ReadyForDelivery"
+                  }
+                ]
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Forfeited"
+                  }
+                ]
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "transfer"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+              },
+              {
+                "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV"
+              }
+            ],
+            "data": {
+              "i128": "700000"
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "payout"
+              },
+              {
+                "symbol": "forfeit"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "amount"
+                  },
+                  "val": {
+                    "i128": "700000"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "to"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }
