@@ -26,3 +26,23 @@ mirror, not a second source of truth: when a job changes, update it too.)
 
 Security issues go through [`SECURITY.md`](./SECURITY.md), not a
 public issue.
+
+## Checking Markdown links
+
+If you add or rename a Markdown document or change a heading, verify that
+all relative links and `#anchors` still resolve:
+
+```sh
+python3 .github/scripts/check_doc_links.py
+```
+
+The script walks every `*.md` file, resolves relative links against the
+filesystem, and checks anchors against GitHub's heading-slug rules. It
+exits 0 when all links resolve and 1 when any are broken, printing each
+broken link as `file:line: reason`. Its own tests live at
+`.github/scripts/test_check_doc_links.py` and can be run with
+`python3 .github/scripts/test_check_doc_links.py`.
+
+A maintainer wires this into the CI workflow; contributors ship only the
+script and its tests (per `.github/PULL_REQUEST_TEMPLATE.md`, contributors
+don't edit workflows directly).
