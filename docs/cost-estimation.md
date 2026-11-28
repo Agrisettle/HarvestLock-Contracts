@@ -97,6 +97,14 @@ snapshots).
    auth-heavy) rather than a single function. This is free — it's the tool the
    build and CI already run.
 2. **Keep offline regression coverage in `cargo test`.** The committed
+   `contracts/escrow/test_snapshots/**` capture each call's ledger read/write
+   footprint against the in-process test ledger. Run
+   `.github/scripts/check_test_snapshots.sh` to execute the tests and fail if
+   they rewrite, remove, or add snapshots. These are deterministic, reviewed
+   regression baselines; update them deliberately when a footprint change is
+   intended. The script is not wired into CI because workflow changes are
+   maintainer-managed. Neither external tool nor CLI `--cost` can match the
+   snapshots' hermeticity because both require live RPC.
    `contracts/escrow/test_snapshots/**` already capture each call's ledger
    read/write footprint deterministically against the in-process test ledger,
    with no network, no funded account and no deployed instance. That is the

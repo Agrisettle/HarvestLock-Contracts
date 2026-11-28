@@ -73,10 +73,10 @@
                   "i128": "1000000"
                 },
                 {
-                  "u32": 3327
+                  "u32": 2222
                 },
                 {
-                  "u32": 1024
+                  "u32": 2359
                 },
                 {
                   "u64": "604800"
@@ -136,7 +136,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                     },
                     {
-                      "i128": "435100"
+                      "i128": "458100"
                     }
                   ]
                 }
@@ -234,7 +234,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                     },
                     {
-                      "i128": "564900"
+                      "i128": "541900"
                     }
                   ]
                 }
@@ -258,7 +258,7 @@
                   "u32": 1000
                 },
                 {
-                  "u32": 2
+                  "u32": 1
                 }
               ]
             }
@@ -535,7 +535,7 @@
                               "symbol": "advance1_bps"
                             },
                             "val": {
-                              "u32": 3327
+                              "u32": 2222
                             }
                           },
                           {
@@ -567,7 +567,7 @@
                               "symbol": "advance2_bps"
                             },
                             "val": {
-                              "u32": 1024
+                              "u32": 2359
                             }
                           },
                           {
@@ -731,7 +731,7 @@
                               "symbol": "grade_index"
                             },
                             "val": {
-                              "u32": 2
+                              "u32": 1
                             }
                           },
                           {
@@ -781,7 +781,7 @@
                               "symbol": "settlement_bps"
                             },
                             "val": {
-                              "u32": 7500
+                              "u32": 9000
                             }
                           },
                           {
@@ -857,7 +857,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "250000"
+                      "i128": "100000"
                     }
                   },
                   {
@@ -909,7 +909,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "750000"
+                      "i128": "900000"
                     }
                   },
                   {
