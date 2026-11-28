@@ -1,0 +1,4 @@
+node_modules/
+bindings/node_modules/
+bindings/dist/
+.env

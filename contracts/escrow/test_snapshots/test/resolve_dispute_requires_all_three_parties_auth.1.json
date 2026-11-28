@@ -546,6 +546,14 @@
                           },
                           {
                             "key": {
+                              "symbol": "dispute_count"
+                            },
+                            "val": {
+                              "u32": 0
+                            }
+                          },
+                          {
+                            "key": {
                               "symbol": "dispute_deadline"
                             },
                             "val": {
@@ -970,6 +978,46 @@
             ],
             "data": {
               "map": []
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "dispute_ended"
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Resolved"
+                  }
+                ]
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "restored"
+                  },
+                  "val": {
+                    "vec": [
+                      {
+                        "symbol": "Locked"
+                      }
+                    ]
+                  }
+                }
+              ]
             }
           }
         }

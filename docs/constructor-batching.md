@@ -43,8 +43,9 @@ Three transactions create a commitment today:
    and only the fee-paying deployer signs it (`api/src/stellar/deploy.ts`).
    No `constructorArgs` are passed; no party auth is involved.
 2. **initialize** — a separate call, signed by the **buyer**
-   (`buyer.require_auth()` in `lib.rs`). Fourteen parameters, including the
-   `grade_price_bps` schedule and the optional `OracleConfig`.
+   (`buyer.require_auth()` in `lib.rs`). One `CommitmentTerms` struct
+   (fourteen positional parameters before #270), including the
+   `grade_price_bps` schedule, plus the optional `OracleConfig`.
 3. **lock** — also buyer-signed (`c.buyer.require_auth()`), escrows the
    deposit, and is the point of no return.
 
@@ -76,7 +77,8 @@ Mechanics, against `soroban-env-host` 28.x and `@stellar/stellar-sdk` 16:
 - The client-side capability exists: the JS SDK's `createCustomContract`
   passes `constructorArgs` through to `CreateContractArgsV2`. Using it is
   a payload change, not a platform limitation.
-- The payload would be initialize's full surface: 14 arguments plus the
+- The payload would be initialize's full surface — the four party/token
+  addresses, the `CommitmentTerms` struct, and `OracleConfig` — plus the
   buyer's signed auth entry traveling on the deploy op. The contract-side
   code for that already exists — it is `initialize`, moved — but the
   public surface changes either way:
@@ -123,8 +125,8 @@ Adopt the constructor if/when one of these becomes true:
 
 Scope if it flips, so the next reader doesn't have to re-derive it:
 
-- **contracts**: `__constructor` mirroring `initialize`'s 14 args +
-  buyer auth; `initialize` deleted or reduced to a guard; every test's
+- **contracts**: `__constructor` mirroring `initialize`'s argument list
+  (parties, `CommitmentTerms`, `OracleConfig`) + buyer auth; `initialize` deleted or reduced to a guard; every test's
   `env.register(EscrowContract, ())` becomes
   `env.register(EscrowContract, (args...))`; initialization-failure tests
   become deploy-failure tests (including the fx/zero-window validation

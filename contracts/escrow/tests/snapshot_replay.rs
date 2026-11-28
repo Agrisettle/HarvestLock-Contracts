@@ -57,7 +57,8 @@
 //! ```
 
 use harvestlock_escrow::{
-    AllocationMember, Error, EscrowContract, EscrowContractClient, OracleConfig, Status,
+    AllocationMember, CommitmentTerms, Error, EscrowContract, EscrowContractClient, OracleConfig,
+    Status,
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{token, Address, BytesN, Env, Symbol, Vec as OnChainVec};
@@ -241,6 +242,7 @@ fn err_name(name: &str) -> Error {
         ("OracleNotConfigured", Error::OracleNotConfigured),
         ("OraclePriceUnavailable", Error::OraclePriceUnavailable),
         ("OracleStale", Error::OracleStale),
+        ("OracleTimestampInFuture", Error::OracleTimestampInFuture),
         ("FxAlreadyResolved", Error::FxAlreadyResolved),
         ("FxNotResolved", Error::FxNotResolved),
         ("FxShortfallUnfunded", Error::FxShortfallUnfunded),
@@ -631,14 +633,16 @@ fn build(snap: &Snapshot) -> Scene {
         &cooperative,
         &warehouse,
         &token_address,
-        &snap.terms.total_amount,
-        &snap.terms.advance1_bps,
-        &snap.terms.advance2_bps,
-        &snap.terms.claim_window_secs,
-        &snap.terms.remainder_window_secs,
-        &snap.terms.delivery_window_secs,
-        &snap.terms.contracted_quantity,
-        &grade_schedule,
+        &CommitmentTerms {
+            total_amount: snap.terms.total_amount,
+            advance1_bps: snap.terms.advance1_bps,
+            advance2_bps: snap.terms.advance2_bps,
+            claim_window_secs: snap.terms.claim_window_secs,
+            remainder_window_secs: snap.terms.remainder_window_secs,
+            delivery_window_secs: snap.terms.delivery_window_secs,
+            contracted_quantity: snap.terms.contracted_quantity,
+            grade_price_bps: grade_schedule,
+        },
         &oracle_config,
     );
 

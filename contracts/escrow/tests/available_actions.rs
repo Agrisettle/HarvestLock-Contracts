@@ -17,10 +17,10 @@ mod common;
 
 use common::*;
 use harvestlock_escrow::{
-    Action, ActionDeadline, AllocationMember, AuthParty, Error, EscrowContract,
+    Action, ActionDeadline, AllocationMember, AuthParty, CommitmentTerms, Error, EscrowContract,
     EscrowContractClient, OracleConfig, Status,
 };
-use soroban_sdk::testutils::{Address as _, EnvTestConfig};
+use soroban_sdk::testutils::{Address as _, EnvTestConfig, Ledger as _};
 use soroban_sdk::{token, Address, BytesN, ConversionError, Env, InvokeError, Symbol, Vec};
 
 const DENOMINATED_NO_SHORTFALL: i128 = 500_000;
@@ -112,8 +112,9 @@ fn oracle_world(denominated_amount: i128) -> World {
     let issuer = sac.issuer();
     let token_address = sac.address();
     let token = token::Client::new(&env, &token_address);
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_address);
     // FX scenarios need a third payment beyond deposit + remainder.
-    token::StellarAssetClient::new(&env, &token_address).mint(&buyer, &(TOTAL_AMOUNT * 3));
+    token_admin_client.mint(&buyer, &(TOTAL_AMOUNT * 3));
 
     let oracle_id = env.register(mock_oracle::MockOracle, ());
     let oracle = mock_oracle::MockOracleClient::new(&env, &oracle_id);
@@ -126,14 +127,16 @@ fn oracle_world(denominated_amount: i128) -> World {
         &cooperative,
         &warehouse,
         &token_address,
-        &TOTAL_AMOUNT,
-        &1_500,
-        &1_500,
-        &WINDOW,
-        &REMAINDER_WINDOW,
-        &DELIVERY_WINDOW,
-        &CONTRACTED_QUANTITY,
-        &Vec::from_array(&env, GRADE_PRICE_BPS),
+        &CommitmentTerms {
+            total_amount: TOTAL_AMOUNT,
+            advance1_bps: 1_500,
+            advance2_bps: 1_500,
+            claim_window_secs: WINDOW,
+            remainder_window_secs: REMAINDER_WINDOW,
+            delivery_window_secs: DELIVERY_WINDOW,
+            contracted_quantity: CONTRACTED_QUANTITY,
+            grade_price_bps: Vec::from_array(&env, GRADE_PRICE_BPS),
+        },
         &Some(OracleConfig {
             oracle_contract: oracle_id,
             price_asset: Symbol::new(&env, "NGN"),
@@ -146,6 +149,7 @@ fn oracle_world(denominated_amount: i128) -> World {
         env,
         contract,
         token,
+        token_admin: token_admin_client,
         buyer,
         cooperative,
         warehouse,
@@ -159,6 +163,15 @@ fn oracle_world(denominated_amount: i128) -> World {
 fn draft_with_allocation() -> World {
     let w = plain_world();
     invoke(Call::SetAllocation, &w).unwrap();
+    w
+}
+
+/// The other side of #277's boundary: still `Draft`, but the delivery window
+/// `initialize` started has strictly passed, so `lock` is no longer possible.
+fn draft_after_delivery_deadline() -> World {
+    let w = plain_world();
+    let deadline = w.contract.get_commitment().delivery_deadline;
+    w.set_time(deadline + 1);
     w
 }
 
@@ -418,6 +431,15 @@ fn after(t: u64) -> ActionDeadline {
 /// `cancel` and `reassign_buyer` are advertised in every pre-delivery state,
 /// with the same auth and no deadline, so the table doesn't repeat them.
 fn push_pre_delivery_common(w: &World, v: &mut Vec<Action>) {
+    let c = w.contract.get_commitment();
+    if c.status != Status::Draft && w.env.ledger().timestamp() <= c.delivery_deadline {
+        v.push_back(act(
+            &w.env,
+            "extend_delivery_deadline",
+            AuthParty::BuyerAndCooperative,
+            at(c.delivery_deadline),
+        ));
+    }
     v.push_back(act(
         &w.env,
         "cancel",
@@ -585,7 +607,15 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                     AuthParty::Cooperative,
                     none(),
                 ));
-                v.push_back(act(&w.env, "lock", AuthParty::Buyer, none()));
+                // #277: `lock` stops being legal once the delivery window
+                // that `initialize` started is over, so the advertised bound
+                // is that window's end, not "no deadline".
+                v.push_back(act(
+                    &w.env,
+                    "lock",
+                    AuthParty::Buyer,
+                    at(w.contract.get_commitment().delivery_deadline),
+                ));
                 push_pre_delivery_common(w, &mut v);
                 v
             },
@@ -608,7 +638,12 @@ fn scenarios() -> std::vec::Vec<Scenario> {
             setup: draft_with_allocation,
             expected: |w| {
                 let mut v = Vec::new(&w.env);
-                v.push_back(act(&w.env, "lock", AuthParty::Buyer, none()));
+                v.push_back(act(
+                    &w.env,
+                    "lock",
+                    AuthParty::Buyer,
+                    at(w.contract.get_commitment().delivery_deadline),
+                ));
                 push_pre_delivery_common(w, &mut v);
                 v
             },
@@ -617,6 +652,26 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                 absent(Call::SetAllocation, Error::AllocationAlreadySet),
                 absent(Call::Release1, Error::InvalidState),
                 absent(Call::FlagDispute, Error::InvalidState),
+            ],
+        },
+        Scenario {
+            name: "Draft, after the overall delivery deadline",
+            setup: draft_after_delivery_deadline,
+            expected: |w| {
+                let mut v = Vec::new(&w.env);
+                v.push_back(act(
+                    &w.env,
+                    "set_allocation",
+                    AuthParty::Cooperative,
+                    none(),
+                ));
+                push_pre_delivery_common(w, &mut v);
+                v
+            },
+            advertised: vec![Call::SetAllocation, Call::Cancel, Call::Reassign],
+            absent: vec![
+                absent(Call::Lock, Error::LockAfterDeliveryDeadline),
+                absent(Call::ReclaimNondelivery, Error::InvalidState),
             ],
         },
         Scenario {
@@ -1319,6 +1374,12 @@ fn scenarios() -> std::vec::Vec<Scenario> {
                     w,
                     &[
                         act(&w.env, "resolve_fx_shortfall", AuthParty::Anyone, none()),
+                        act(
+                            &w.env,
+                            "replace_oracle_config",
+                            AuthParty::BuyerAndCooperative,
+                            none(),
+                        ),
                         act(&w.env, "refresh_fx_quote_status", AuthParty::Anyone, none()),
                         act(&w.env, "flag_dispute", AuthParty::AnyNamedParty, none()),
                     ],

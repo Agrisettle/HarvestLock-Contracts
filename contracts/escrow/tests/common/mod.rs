@@ -1,9 +1,12 @@
-//! Shared fixtures/helpers for the issue-specific regression suites under
-//! `contracts/escrow/tests/`.
+//! Re-export shim, nothing more (#274).
 //!
-//! Deliberately kept in a subdirectory (`tests/common/mod.rs`) rather than
-//! `tests/common.rs` so cargo does not treat it as its own test target, and
-//! each suite pulls it in with `#[path = "common/mod.rs"] mod common;`.
+//! The fixtures every suite here uses — the default windows, the grade
+//! schedule, the token minting, the clock helpers, and the `World`
+//! constructors/drive methods — now live in one place, in the crate itself,
+//! as `harvestlock_escrow::testutils`. This module used to be a parallel copy
+//! of `src/test.rs`'s harness, documented as "mirroring the conventions" of
+//! it, with the same constants stored twice; the two copies could drift, and
+//! every new suite was one more chance to pick one or add a third.
 //!
 //! It mirrors the conventions of the in-crate `src/test.rs` harness (same
 //! token minting, same default windows, same "advance the simulated clock"
@@ -28,6 +31,7 @@ pub struct World {
     pub env: Env,
     pub contract: EscrowContractClient<'static>,
     pub token: token::Client<'static>,
+    pub token_admin: token::StellarAssetClient<'static>,
     pub buyer: Address,
     pub cooperative: Address,
     pub warehouse: Address,
@@ -102,6 +106,7 @@ pub fn world_in(
         env: env.clone(),
         contract,
         token,
+        token_admin: token_admin_client,
         buyer,
         cooperative,
         warehouse,
@@ -173,9 +178,13 @@ impl World {
         self.contract.confirm_delivery(&CONTRACTED_QUANTITY, &0);
     }
 }
+//! Why the shim at all: keeping the `tests/common/mod.rs` path (rather than
+//! rewriting every suite's `#[path = "common/mod.rs"] mod common;` to import
+//! the crate module directly) means the suites' own code is unchanged by the
+//! refactor, which is what makes "no test asserts anything different" easy to
+//! check — the diff for this issue is the harness moving, not the tests.
+//!
+//! The module stays in a subdirectory (`tests/common/mod.rs`) rather than
+//! `tests/common.rs` so cargo does not treat it as its own test target.
 
-// Assertions on a `try_*` client call in these suites are written plainly as
-// `assert_eq!(call, Err(Ok(Error::X)))` — the shape the generated client
-// returns for a contract function whose own return type is a `Result` (outer
-// `Err` carrying `Ok(contract Error)`, exactly as `src/test.rs` asserts),
-// which keeps a failing assertion readable without a helper in between.
+pub use harvestlock_escrow::testutils::*;
