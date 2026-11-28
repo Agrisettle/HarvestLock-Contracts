@@ -301,6 +301,120 @@ making the `settle` figure look better than the commitment it claims to model.
 
 ---
 
+## Oracle group — `oracle_rate`, `resolve_fx_shortfall` against the real Reflector — `tests/reflector_oracle_costs.rs`
+
+Every other oracle measurement in this repo, including the `budget.rs` rows
+above, uses a hand-written mock whose `lastprice` is one instance-storage
+read. This group runs the FX path against the **deployed testnet Reflector
+"Fiat exchange rates" binary** and compares the two.
+
+**The binary.** `contracts/escrow/tests/wasm/reflector_fiat_testnet.wasm`,
+fetched from `CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W` on
+2026-11-25, sha256
+`25fc306065cbb9b05461db78ec259802cb916053ba5b3ab911b0a72dd1a81439` (20,417
+bytes). The test imports it with `contractimport!(…, sha256 = …)`, so a
+changed file is a build error. Provenance and the re-fetch procedure are in
+[`tests/wasm/README.md`](../contracts/escrow/tests/wasm/README.md).
+
+**Configured like testnet, through Reflector's own entry points.** The
+test registers the WASM and calls its admin `config` with the values read
+from the live instance's storage the same day: base `USD`, 14 decimals, 9
+assets (EUR, GBP, CHF, CAD, MXN, ARS, BRL, THB, XAU), 5-minute resolution,
+1-day history retention, cache size 2, and a fee config. It then publishes
+an hour of rounds (12) with admin `set_price`. Two shapes:
+
+- **live**: single-asset EUR rounds, with the escrow quoting EUR. This is
+  exactly what testnet publishes today; the other eight feeds have expired.
+- **full round**: all 9 assets in every round, with the escrow quoting XAU
+  (the last index). This gives the largest cached round and the longest
+  mask walk, so it is the most expensive successful read.
+
+### Results (host model, `env.cost_estimate()`, measured 2026-11-25)
+
+| Call | Oracle | CPU insns | Mem bytes | Read entries | Write entries | Write bytes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `oracle_rate` | MockOracle (native) | 237,472 | 121,194 | 4 | 0 | 0 |
+| `oracle_rate` | Reflector, live | **843,484** | 398,917 | 5 | 0 | 0 |
+| `oracle_rate` | Reflector, full round | **872,012** | 413,157 | 5 | 0 | 0 |
+| `resolve_fx_shortfall` | MockOracle (native) | 472,322 | 201,858 | 6 | 1 | 1,744 |
+| `resolve_fx_shortfall` | Reflector, live | **1,532,007** | 626,974 | 7 | 1 | 1,744 |
+| `resolve_fx_shortfall` | Reflector, full round | **1,560,951** | 642,878 | 7 | 1 | 1,744 |
+| `Reflector.lastprice` (direct) | live | 626,213 | 350,854 | 2 | 0 | 0 |
+| `Reflector.lastprice` (direct) | full round | 654,741 | 365,094 | 2 | 0 | 0 |
+| `Reflector.decimals` (direct) | live | 535,586 | 349,430 | 2 | 0 | 0 |
+
+### Reading it
+
+- **The real oracle makes the FX path ~3.2–3.7× as expensive in CPU as the
+  mock**: `oracle_rate` gains about 606k instructions and
+  `resolve_fx_shortfall` about 1.06M. Memory grows by about the same factor.
+  Each call also reads one more entry (Reflector's contract code). Write
+  figures don't change, because the oracle writes nothing.
+- **Almost all of the gap is running a WASM contract at all, not
+  Reflector's price lookup.** A bare `decimals()` call, which only loads the
+  instance and returns a constant, already costs 536k. `lastprice` adds just
+  ~91k on top (~119k for the full round). The escrow runs as native Rust in
+  this harness and the mock is native too, so the mock rows contain no VM
+  cost at all.
+- **`resolve_fx_shortfall` pays that VM cost twice.** Its extra ~1.06M is
+  roughly one `lastprice` (~606k) plus one `decimals` (~454k), because each
+  cross-contract call instantiates Reflector again. Removing the `decimals()`
+  call (e.g. by pinning the oracle's decimals in `OracleConfig`) would save
+  about 30% of the call's CPU. That would conflict with the decision recorded
+  in [`reflector-decimals-assumption.md`](./reflector-decimals-assumption.md),
+  so it is noted here, not proposed.
+- **The full-round worst case adds only ~2–3%.** Reflector's per-asset work
+  is small next to its fixed cost.
+
+### Against the per-transaction limits: not close
+
+Measured against the same testnet limits `tests/resource_limits.rs` uses,
+the heaviest row (`resolve_fx_shortfall`, full round) is at **0.39% of CPU**
+(1.56M / 400M), **1.5% of memory** (0.64 MB / 40 MiB), **3.5% of read
+entries** (7 / 200) and **1.3% of write bytes**. The test asserts every row
+stays under 50% of each limit. **No flag:** the FX path is a few times more
+expensive than the mock suggested, but it is nowhere near a limit.
+
+### A behaviour the mock does not model (pinned by `lastprice_sees_only_the_latest_round`)
+
+This binary's `lastprice(asset)` only looks at the **latest round**. If that
+round does not quote the asset, it returns `None`, even though a round
+5 minutes earlier still holds a valid price (`price(asset, t)` returns it).
+The public `reflector-contract` source later added a fallback to the history
+bitmask (commit `fa1b9ac`); the deployed binary behaves as if it predates
+that. For the escrow, one round that skips the configured asset makes
+`oracle_rate` and `resolve_fx_shortfall` fail with
+`OraclePriceUnavailable` until the next round quotes it. That is a liveness
+gap, not a safety one: nothing is written, and a retry succeeds. It also
+means a cache-miss (temporary-storage) read can't be reached through
+`lastprice` with a cache size of 2, so there is no such scenario to measure.
+
+### Caveats
+
+- These are **host-model** figures, the same kind as `budget.rs`, not
+  testnet fees. The escrow runs as native Rust, so its own share is
+  understated. In production it would be WASM as well, and every call it
+  makes would also carry its own VM cost. The opt-in
+  `fx_path_cost_with_escrow_as_wasm` test measures that shape when given a
+  release build (below); its figures are not recorded here yet.
+- The mock rows differ slightly from `budget.snapshot` (237,472 vs 236,796
+  for `oracle_rate`) because this suite uses different terms and a real
+  quoted asset; the mock is otherwise the same shape.
+
+### Reproduce
+
+```sh
+cargo test -p harvestlock-escrow --test reflector_oracle_costs -- --nocapture
+
+# Opt-in: the escrow as WASM too (needs stellar-cli for the build).
+stellar contract build --locked
+ESCROW_WASM=$PWD/target/wasm32v1-none/release/harvestlock_escrow.wasm \
+  cargo test -p harvestlock-escrow --test reflector_oracle_costs \
+  fx_path_cost_with_escrow_as_wasm -- --nocapture
+```
+
+---
+
 ## Results — delivery group (`mark_checkpoint`, `confirm_delivery`)
 
 Session 2, measured against instance
