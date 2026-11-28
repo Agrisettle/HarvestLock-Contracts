@@ -40,14 +40,16 @@ initialize(
     cooperative,            // any Address; signs claim_advance_* later
     warehouse_operator,     // any Address; signs mark_checkpoint/confirm_delivery
     token,                  // any SEP-41 token contract address
-    total_amount = 1_000,   // smallest readable number for the 7-decimal convention (i128 > 0)
-    advance1_bps = 6_000,   // 60% first advance — any 0..=10_000 value works; zero would trivialize the tranche steps
-    advance2_bps = 2_000,   // 20% second advance; 6_000 + 2_000 <= 10_000 (the `initialize` ceiling)
-    claim_window_secs = 1,  // minimum legal: must be > 0 (`InvalidWindow` rejects 0)
-    remainder_window_secs = 1,  // minimum legal: must be > 0
-    delivery_window_secs = 1,   // minimum legal: must be > 0
-    contracted_quantity = 1,    // minimum legal: must be > 0 (`InvalidQuantity` rejects 0)
-    grade_price_bps = vec![10_000],  // ONE entry, full price — the schedule must be non-empty, each entry <= 10_000
+    terms = CommitmentTerms {   // the eight agreed terms, as one named struct (#270)
+        total_amount: 1_000,            // smallest readable number for the 7-decimal convention (i128 > 0)
+        advance1_bps: 6_000,            // 60% first advance — any 0..=10_000 value works; zero would trivialize the tranche steps
+        advance2_bps: 2_000,            // 20% second advance; 6_000 + 2_000 <= 10_000 (the `initialize` ceiling)
+        claim_window_secs: 1,           // minimum legal: must be > 0 (`InvalidWindow` rejects 0)
+        remainder_window_secs: 1,       // minimum legal: must be > 0
+        delivery_window_secs: 1,        // minimum legal: must be > 0
+        contracted_quantity: 1,         // minimum legal: must be > 0 (`InvalidQuantity` rejects 0)
+        grade_price_bps: vec![10_000],  // ONE entry, full price — the schedule must be non-empty, each entry <= 10_000
+    },
     oracle_config = None,   // the only "fully optional" field: no FX conversion for this deal
 )
 ```
@@ -161,18 +163,49 @@ should know exactly what stays mandatory even here:
 
 ## Deploying this for real (not done in this walkthrough)
 
-For a real testnet run, the same sequence through `soroban-cli` is:
+For a real testnet run, use [`scripts/deploy.sh`](../scripts/deploy.sh),
+which builds the WASM, uploads it only when its hash is not already
+installed on the target network, deploys an instance, and calls
+`initialize` with the terms as the `buyer` identity:
 
-```bash
-stellar contract deploy --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm \
-  --network testnet --source buyer
-stellar contract invoke --id <contract> --network testnet --source buyer -- \
-  initialize <buyer> <cooperative> <warehouse> <token_address> \
-  1000 6000 2000 1 1 1 1 '[10000]' null
-# ...then the steps 2–11 of the table, in order.
-```
+1. Fund the four test identities (one-time, idempotent):
 
-Every argument above maps one-to-one to the test's `initialize` call;
-`null` in the CLI positional encoding is the `None` oracle_config. This
-was **not executed against testnet** — no funded network key was
-assumed — the local Rust test is the verification of record.
+   ```bash
+   ./scripts/bootstrap-identities.sh --network testnet
+   ```
+
+   This prints each role's address — `buyer`, `cooperative`, and
+   `warehouse_operator` are the signers the lifecycle below routes through.
+
+2. Fill in an example terms file (addresses and the settlement token printed
+   by step 1) and deploy:
+
+   ```bash
+   # plain deal, no oracle
+   ./scripts/deploy.sh --network testnet scripts/terms/plain-deal.json
+   # oracle-configured deal (denominated_amount == total_amount)
+   ./scripts/deploy.sh --network testnet scripts/terms/oracle-deal.json
+   ```
+
+   `scripts/deploy.sh --network testnet|futurenet|local <terms.json>` prints
+   the deployed contract ID and WASM hash as JSON. Re-running with the same
+   WASM skips the upload (the hash is already installed).
+
+   The two example terms files live in [`scripts/terms/`](../scripts/terms/):
+   `plain-deal.json` (`oracle_config: null`) and `oracle-deal.json` (an
+   `OracleConfig` whose `denominated_amount` equals `total_amount`, the
+   identity-rate shape from issue #281). Replace every `GDREPLACE…` /
+   `CDREPLACE…` placeholder with a real address before running.
+
+3. Then run the steps 2–11 of the walkthrough table against the printed
+   contract ID, in order, substituting the testnet addresses and token from
+   step 1 for the `initialize` arguments above.
+
+Each field of the `CommitmentTerms` struct maps one-to-one to the test's
+`initialize` call; `null` for `oracle_config` is the `None` case, and
+`scripts/deploy.sh` sends the same eight values as one `--terms '{…}'` JSON
+argument (#270 replaced the positional form). This
+walkthrough is verified locally by the Rust test (run `cargo test
+minimal_commitment_walkthrough_settles_end_to_end`); a testnet run adds only
+network latency, not new behavior — no funded network key was assumed here
+either.

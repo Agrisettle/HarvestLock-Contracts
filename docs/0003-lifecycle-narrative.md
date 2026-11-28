@@ -33,14 +33,16 @@ initialize(
   cooperative=0xCoop456,
   warehouse_operator=0xWare789,
   token=USDC_contract,
-  total_amount=100_000_000,
-  advance1_bps=30_000,
-  advance2_bps=20_000,
-  claim_window_secs=604_800,
-  remainder_window_secs=259_200,
-  delivery_window_secs=5_184_000,
-  contracted_quantity=5_000,
-  grade_price_bps=[8_000, 6_500, 5_000],
+  terms=CommitmentTerms {
+    total_amount: 100_000_000,
+    advance1_bps: 30_000,
+    advance2_bps: 20_000,
+    claim_window_secs: 604_800,
+    remainder_window_secs: 259_200,
+    delivery_window_secs: 5_184_000,
+    contracted_quantity: 5_000,
+    grade_price_bps: [8_000, 6_500, 5_000],
+  },
   oracle_config=Some({price_asset: "GBP", oracle_contract:..., max_age_secs: 86_400}),
   denominated_amount=80_000_000_000_000
 )
@@ -61,6 +63,7 @@ lock()
 **What happens:**
 
 - Buyer authorizes the call.
+- `now <= delivery_deadline` — the window is `created_at + delivery_window_secs` and starts at `initialize`, so a lock after it fails with `LockAfterDeliveryDeadline` (#277). Failing here is what stops a late lock from being followed by an immediate `reclaim_on_nondelivery`.
 - Deposit computed: `bps_amount(100_000_000, 30_000 + 20_000) = bps_amount(100_000_000, 50_000) = 100_000_000 * 50_000 / 10_000 = 500_000 units`
 - 500,000 units of USDC transferred from buyer to contract.
 - Status transitions `Draft` → `Locked`.

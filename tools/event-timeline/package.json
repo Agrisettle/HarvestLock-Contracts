@@ -1,0 +1,14 @@
+{
+  "name": "harvestlock-event-timeline",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx event-timeline.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.4.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  }
+}

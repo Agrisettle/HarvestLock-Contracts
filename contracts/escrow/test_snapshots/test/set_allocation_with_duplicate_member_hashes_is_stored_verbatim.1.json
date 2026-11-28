@@ -129,7 +129,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "6e879ddb8c4fa77a7fb9fc67cb4de81d7de2625e27887504c7e05f9f142ee780"
+                            "bytes": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
                           }
                         },
                         {
@@ -149,7 +149,7 @@
                             "symbol": "member_hash"
                           },
                           "val": {
-                            "bytes": "6e879ddb8c4fa77a7fb9fc67cb4de81d7de2625e27887504c7e05f9f142ee780"
+                            "bytes": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
                           }
                         },
                         {
@@ -316,7 +316,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "6e879ddb8c4fa77a7fb9fc67cb4de81d7de2625e27887504c7e05f9f142ee780"
+                                  "bytes": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
                                 }
                               },
                               {
@@ -336,7 +336,7 @@
                                   "symbol": "member_hash"
                                 },
                                 "val": {
-                                  "bytes": "6e879ddb8c4fa77a7fb9fc67cb4de81d7de2625e27887504c7e05f9f142ee780"
+                                  "bytes": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
                                 }
                               },
                               {
@@ -480,6 +480,14 @@
                             },
                             "val": {
                               "u64": "10368000"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "dispute_count"
+                            },
+                            "val": {
+                              "u32": 0
                             }
                           },
                           {

@@ -97,11 +97,23 @@ snapshots).
    auth-heavy) rather than a single function. This is free — it's the tool the
    build and CI already run.
 2. **Keep offline regression coverage in `cargo test`.** The committed
+   `contracts/escrow/test_snapshots/**` capture each call's ledger read/write
+   footprint against the in-process test ledger. Run
+   `.github/scripts/check_test_snapshots.sh` to execute the tests and fail if
+   they rewrite, remove, or add snapshots. These are deterministic, reviewed
+   regression baselines; update them deliberately when a footprint change is
+   intended. The script is not wired into CI because workflow changes are
+   maintainer-managed. Neither external tool nor CLI `--cost` can match the
+   snapshots' hermeticity because both require live RPC.
    `contracts/escrow/test_snapshots/**` already capture each call's ledger
    read/write footprint deterministically against the in-process test ledger,
    with no network, no funded account and no deployed instance. That is the
    right place for cheap, reproducible footprint regression; neither external
    tool nor CLI `--cost` can match its hermeticity because both require live RPC.
+   **Implemented in #222:** `contracts/escrow/tests/budget.rs` now meters every
+   exported method with `env.cost_estimate()` and compares it against
+   `contracts/escrow/budget.snapshot`, failing on growth beyond a 1% tolerance;
+   see [`gas-costs.md`'s bless workflow](./gas-costs.md#re-blessing-the-baseline).
 3. **Adopt the estimator opportunistically, not as a dependency.** Reach for it
    when you specifically want (a) an XLM/stroops fee figure to hand the `api/`
    team for pre-transaction `resourceConfig`/fee bidding, or (b) `config snapshot`
@@ -130,14 +142,19 @@ cases.
 
 ## 5. Caveats on this comparison
 
-- **CLI version.** Verified against the `stellar-cli` present in this
-  environment (**22.0.0**). [HANDOFF.md](../HANDOFF.md)'s toolchain section
-  records the project having used **v28.0.0**. `invoke --cost` and `tx simulate`
-  exist in both; re-confirm their exact output shape against the version your CI
-  pins before finalizing anything that scripts on them.
-- **No live cost run is quoted here.** Producing actual numbers needs a funded
-  source account and a deployed instance on a reachable network; none was run
-  from this environment. The capability claims come from `--help` output (CLI)
-  and the tool's README (estimator), not from fresh executions.
+- **CLI version.** This comparison was originally verified against the
+  `stellar-cli` present in this environment (**22.0.0**);
+  [HANDOFF.md](../HANDOFF.md)'s toolchain section records the project having
+  used **v28.0.0**, and the upload/deploy/`initialize` measurements in
+  [`gas-costs.md`](./gas-costs.md#wasm-upload-vs-instantiation) were taken on
+  **30.0.1**. `invoke --cost` and `tx simulate` exist in all three;
+  re-confirm their exact output shape against the version your CI pins before
+  finalizing anything that scripts on them.
+- **No live cost run is quoted *in this document*.** Producing actual numbers
+  needs a funded source account and a deployed instance on a reachable
+  network; the §1–§4 capability claims come from `--help` output (CLI) and the
+  tool's README (estimator). The per-operation numbers, measured for real from
+  submitted testnet transactions, live in
+  [`gas-costs.md`](./gas-costs.md#wasm-upload-vs-instantiation).
 
 [#92]: https://github.com/Agrisettle/HarvestLock-Contracts/issues/92

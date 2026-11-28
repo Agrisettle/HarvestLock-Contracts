@@ -1,0 +1,225 @@
+# Exported interface of the HarvestLock escrow contract (#244).
+#
+# Generated from the built WASM's `contractspecv0` section by
+# .github/scripts/check_interface_snapshot.sh; do not edit by hand. That
+# script fails CI-style on any difference and prints a PATCH / MINOR /
+# MINOR **BREAKING** hint per docs/versioning.md §2.
+#
+# A diff here is an ABI change. In particular, any new `fn` line is a new
+# entry point, and docs/threat-model.md entry 26 ("Admin, upgrade, pause, or
+# owner takeover": defended by absence) relies on reviewers noticing a new
+# admin/upgrade/pause function. This file is how that gets noticed.
+#
+# To accept an intended change, run:
+#   bash .github/scripts/check_interface_snapshot.sh --update
+# and commit the result with the change that caused it.
+
+error Error::AllocationAlreadySet = 21
+error Error::AllocationNotSet = 23
+error Error::AllocationTooLarge = 38
+error Error::AlreadyClaimed = 8
+error Error::AlreadyExpired = 9
+error Error::AlreadyInitialized = 1
+error Error::AmountTooLarge = 39
+error Error::ClaimWindowNotPassed = 11
+error Error::ClaimWindowPassed = 10
+error Error::DeliveryDeadlineNotExtended = 48
+error Error::DeliveryDeadlineNotPassed = 17
+error Error::DeliveryDeadlinePassed = 43
+error Error::DeliveryGraceWindowNotPassed = 41
+error Error::DisputeCapReached = 42
+error Error::DisputeWindowNotPassed = 36
+error Error::FxAlreadyResolved = 28
+error Error::FxNotResolved = 29
+error Error::FxShortfallAlreadyFunded = 32
+error Error::FxShortfallUnfunded = 30
+error Error::FxShortfallWindowNotPassed = 34
+error Error::FxShortfallWindowPassed = 33
+error Error::GradeScheduleTooLong = 37
+error Error::InvalidAllocation = 22
+error Error::InvalidBps = 4
+error Error::InvalidGradeIndex = 20
+error Error::InvalidGradeSchedule = 19
+error Error::InvalidOracleConfig = 24
+error Error::InvalidQuantity = 18
+error Error::InvalidState = 3
+error Error::InvalidWindow = 6
+error Error::LockAfterDeliveryDeadline = 47
+error Error::NoFxShortfall = 31
+error Error::NotAParty = 35
+error Error::NotInitialized = 2
+error Error::NotYetOpened = 7
+error Error::OracleConversionOutOfRange = 44
+error Error::OracleNotConfigured = 25
+error Error::OraclePriceInvalid = 40
+error Error::OraclePriceUnavailable = 26
+error Error::OracleStale = 27
+error Error::OracleTimestampInFuture = 45
+error Error::OracleUnavailable = 46
+error Error::RemainderAlreadyFunded = 13
+error Error::RemainderNotFunded = 16
+error Error::RemainderWindowNotPassed = 15
+error Error::RemainderWindowPassed = 14
+error Error::TrancheUnresolved = 12
+error Error::ZeroAmount = 5
+event AllocationRecorded(topics: [allocation_recorded]; member_count: u32 @data, total_share_bps: u32 @data; data: map)
+event BuyerReassigned(topics: [buyer_reassigned]; previous: Address @topic, new_buyer: Address @topic; data: map)
+event DeliveryConfirmed(topics: [delivery_confirmed]; grade_index: u32 @topic, delivered_quantity: u32 @data, settlement_bps: u32 @data; data: map)
+event DisputeEnded(topics: [dispute_ended]; outcome: DisputeOutcome @topic, restored: Status @data; data: map)
+event DisputeFlagged(topics: [dispute_flagged]; flagger: Address @topic, pre_status: Status @data, deadline: u64 @data; data: map)
+event FxQuoteStaleChanged(topics: [fx_quote_stale_changed]; stale: bool @data; data: map)
+event FxResolved(topics: [fx_resolved]; rate: i128 @data, rate_timestamp: u64 @data, fx_adjusted_total: i128 @data, shortfall: i128 @data, deadline: u64 @data; data: map)
+event FxShortfallFunded(topics: [fx_shortfall_funded]; from: Address @data, amount: i128 @data; data: map)
+event OracleConfigReplaced(topics: [oracle_config_replaced]; new_oracle_contract: Address @data; data: map)
+event Payout(topics: [payout]; reason: Symbol @topic, to: Address @data, amount: i128 @data; data: map)
+event RemainderFunded(topics: [remainder_funded]; from: Address @data, amount: i128 @data; data: map)
+event StatusChanged(topics: [status_changed]; from: Status @topic, to: Status @topic; data: map)
+event TrancheClaimed(topics: [tranche_claimed]; tranche: u32 @topic, to: Address @data, amount: i128 @data; data: map)
+event TrancheReclaimed(topics: [tranche_reclaimed]; tranche: u32 @topic, to: Address @data, amount: i128 @data; data: map)
+fn available_actions() -> Vec<Action>
+fn cancel() -> Result<(), Error>
+fn claim_advance_1() -> Result<(), Error>
+fn claim_advance_2() -> Result<(), Error>
+fn confirm_delivery(delivered_quantity: u32, grade_index: u32) -> Result<(), Error>
+fn expire_delivery_window() -> Result<(), Error>
+fn expire_dispute_window() -> Result<(), Error>
+fn expire_fx_shortfall_window() -> Result<(), Error>
+fn expire_remainder_window() -> Result<(), Error>
+fn extend_delivery_deadline(new_deadline: u64) -> Result<(), Error>
+fn flag_dispute(flagger: Address) -> Result<(), Error>
+fn fund_fx_shortfall() -> Result<(), Error>
+fn fund_remainder() -> Result<(), Error>
+fn get_allocation() -> Result<Vec<AllocationMember>, Error>
+fn get_commitment() -> Result<Commitment, Error>
+fn get_commitment_view() -> Result<CommitmentView, Error>
+fn get_oracle_config() -> Result<Option<OracleConfig>, Error>
+fn get_status() -> Result<Status, Error>
+fn initialize(buyer: Address, cooperative: Address, warehouse_operator: Address, token: Address, terms: CommitmentTerms, oracle_config: Option<OracleConfig>) -> Result<(), Error>
+fn lock() -> Result<(), Error>
+fn mark_checkpoint() -> Result<(), Error>
+fn oracle_rate() -> Result<OracleRate, Error>
+fn ready_for_delivery() -> Result<(), Error>
+fn reassign_buyer(new_buyer: Address) -> Result<(), Error>
+fn reclaim_advance_1() -> Result<(), Error>
+fn reclaim_advance_2() -> Result<(), Error>
+fn reclaim_on_nondelivery() -> Result<(), Error>
+fn refresh_fx_quote_status() -> Result<(), Error>
+fn release_advance_1() -> Result<(), Error>
+fn release_advance_2() -> Result<(), Error>
+fn replace_oracle_config(new_config: OracleConfig) -> Result<(), Error>
+fn resolve_dispute() -> Result<(), Error>
+fn resolve_fx_shortfall() -> Result<(), Error>
+fn set_allocation(members: Vec<AllocationMember>) -> Result<(), Error>
+fn settle() -> Result<(), Error>
+struct Action.auth: AuthParty
+struct Action.deadline: ActionDeadline
+struct Action.function: Symbol
+struct AllocationMember.member_hash: BytesN<32>
+struct AllocationMember.share_bps: u32
+struct Commitment.advance1_bps: u32
+struct Commitment.advance1_claimed: bool
+struct Commitment.advance1_deadline: u64
+struct Commitment.advance1_expired: bool
+struct Commitment.advance2_bps: u32
+struct Commitment.advance2_claimed: bool
+struct Commitment.advance2_deadline: u64
+struct Commitment.advance2_expired: bool
+struct Commitment.buyer: Address
+struct Commitment.claim_window_secs: u64
+struct Commitment.contracted_quantity: u32
+struct Commitment.cooperative: Address
+struct Commitment.created_at: u64
+struct Commitment.delivered_quantity: u32
+struct Commitment.delivery_deadline: u64
+struct Commitment.dispute_count: u32
+struct Commitment.dispute_deadline: u64
+struct Commitment.dispute_pre_status: Status
+struct Commitment.fx_adjusted_total: i128
+struct Commitment.fx_quote_stale: bool
+struct Commitment.fx_resolved: bool
+struct Commitment.fx_shortfall_amount: i128
+struct Commitment.fx_shortfall_deadline: u64
+struct Commitment.fx_shortfall_funded: bool
+struct Commitment.grade_index: u32
+struct Commitment.grade_price_bps: Vec<u32>
+struct Commitment.remainder_deadline: u64
+struct Commitment.remainder_funded: bool
+struct Commitment.remainder_window_secs: u64
+struct Commitment.settlement_bps: u32
+struct Commitment.status: Status
+struct Commitment.token: Address
+struct Commitment.total_amount: i128
+struct Commitment.warehouse_operator: Address
+struct CommitmentDelivery.delivered_quantity: u32
+struct CommitmentDelivery.grade_index: u32
+struct CommitmentDelivery.settlement_bps: u32
+struct CommitmentDispute.deadline: u64
+struct CommitmentDispute.pre_status: Status
+struct CommitmentFunding.remainder_deadline: u64
+struct CommitmentFunding.remainder_funded: bool
+struct CommitmentFx.adjusted_total: i128
+struct CommitmentFx.configured: bool
+struct CommitmentFx.quote_stale: bool
+struct CommitmentFx.resolved: bool
+struct CommitmentFx.shortfall_amount: i128
+struct CommitmentFx.shortfall_deadline: u64
+struct CommitmentFx.shortfall_funded: bool
+struct CommitmentParties.buyer: Address
+struct CommitmentParties.cooperative: Address
+struct CommitmentParties.token: Address
+struct CommitmentParties.warehouse_operator: Address
+struct CommitmentTerms.advance1_bps: u32
+struct CommitmentTerms.advance2_bps: u32
+struct CommitmentTerms.claim_window_secs: u64
+struct CommitmentTerms.contracted_quantity: u32
+struct CommitmentTerms.delivery_window_secs: u64
+struct CommitmentTerms.grade_price_bps: Vec<u32>
+struct CommitmentTerms.remainder_window_secs: u64
+struct CommitmentTerms.total_amount: i128
+struct CommitmentTranches.advance1: TrancheView
+struct CommitmentTranches.advance2: TrancheView
+struct CommitmentView.created_at: u64
+struct CommitmentView.delivery: CommitmentDelivery
+struct CommitmentView.dispute: CommitmentDispute
+struct CommitmentView.funding: CommitmentFunding
+struct CommitmentView.fx: CommitmentFx
+struct CommitmentView.parties: CommitmentParties
+struct CommitmentView.schema_version: u32
+struct CommitmentView.status: Status
+struct CommitmentView.terms: CommitmentTerms
+struct CommitmentView.tranches: CommitmentTranches
+struct OracleConfig.denominated_amount: i128
+struct OracleConfig.max_age_secs: u64
+struct OracleConfig.oracle_contract: Address
+struct OracleConfig.price_asset: Symbol
+struct OracleRate.price: i128
+struct OracleRate.timestamp: u64
+struct TrancheView.claimed: bool
+struct TrancheView.deadline: u64
+struct TrancheView.expired: bool
+union ActionDeadline::Exclusive(u64)
+union ActionDeadline::Inclusive(u64)
+union ActionDeadline::None
+union AuthParty::AllParties
+union AuthParty::AnyNamedParty
+union AuthParty::Anyone
+union AuthParty::Buyer
+union AuthParty::BuyerAndCooperative
+union AuthParty::BuyerCooperativeAndNewBuyer
+union AuthParty::BuyerCooperativeAndNewOperator
+union AuthParty::Cooperative
+union AuthParty::WarehouseOperator
+union DisputeOutcome::Expired
+union DisputeOutcome::Resolved
+union Status::Advance1Released
+union Status::Advance2Released
+union Status::Cancelled
+union Status::CheckpointPassed
+union Status::Defaulted
+union Status::Delivered
+union Status::Disputed
+union Status::Draft
+union Status::Forfeited
+union Status::Locked
+union Status::ReadyForDelivery
+union Status::Settled

@@ -619,7 +619,52 @@ verified to leave every measured value byte-identical on the zero-argument
 path. **Worth reporting upstream** — it blocks the tool for any contract
 with a `u32`/`i32`/`u64` parameter, which is most of them.
 
-**All eleven deployments' instances are validation artifacts, not
+**Deployment 12** (this session, 23 Nov 2026, Issue #284) — WASM hash
+`c0e1146c70bf192b9ed5ed19290e70ae22c6bbc6c531a6f3853a2a69ce6845ca` (82,917 bytes
+optimized, 34 exported functions). Deployed instance
+`CAB6NIVIIGZ47WM3Y3DFMFJCDAXPRMWBTNJBL74JC2LMC4CDBPBR4TI2`. This deployment
+closed the trustline visibility gap identified in #284: prior live walkthroughs
+relied on the native XLM SAC, which hides the trustline requirement. Added
+`scripts/test-asset.sh` to issue a 7-decimal classic asset (`HLUSD:GDHWDMKSONZUJP74QOLDGLXCW2RJLEDNB6JJOHNOEFGZVZRTKYFSPOZH`),
+configure issuer flags (`AUTH_REVOCABLE`, `AUTH_CLAWBACK_ENABLED`), deploy its
+Soroban Asset Contract (SAC `CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL`),
+establish trustlines for the buyer (`GDOIZBN5SS7QBB2AVJHYMVY47CJK63NB6NHIAN43EZYRU2DSCMI7LFKU`)
+and cooperative (`GD7MTFWUYJA3G7PTRRPH6PWHNEBUGBUFDZGWM2W4UXEQ75YQBNP7DSVI`),
+and mint 100,000,000 stroops to the buyer. Walked through live on testnet:
+instance initialized with the SAC as token, locked by buyer (35,000,000 stroop deposit
+transferred into escrow), tranche 1 released, and successfully claimed by cooperative
+(15,000,000 stroops transferred to cooperative), proving issued-asset settlement and
+trustline mechanics. Documented per-role trustline prerequisites in
+`docs/trustline-prerequisites.md`.
+
+**Deployment 13** (this session, 24 Nov 2026, Issue #286) — Scripted full lifecycle
+e2e verification on testnet with real transaction hashes recorded for every step
+across three distinct scenarios: happy path, buyer default (`expire_remainder_window`),
+and seller non-delivery (`reclaim_on_nondelivery`). Orchestrated via `scripts/e2e.sh`
+using `scripts/deploy.sh` and issued test asset `HLUSD` (`CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL`)
+from `scripts/test-asset.sh`. Each call was submitted on testnet with retry resilience,
+asserting `get_status` and on-chain token balances after every step, producing complete
+structured JSON transcripts (`transcripts/e2e-testnet-latest.json` and timestamped run logs)
+and corresponding snapshot replay fixtures (`contracts/escrow/tests/fixtures/deployment-13-real-hashes-*.snap`).
+1. **Happy path** — Contract `CBF4LWV2NHI5I64OVKAVLEF6O3D2SEFV4NZ4MS74QQTUF2R5S7F4CI3N`.
+   Walked through `initialize` (tx `d1ab5438...`), `lock` (tx `9406d21a...`, 30,000,000 deposit),
+   `release_advance_1` (tx `1a93b653...`), `claim_advance_1` (tx `e2ebe205...`, 15,000,000 to coop),
+   `mark_checkpoint` (tx `73cd806a...`, by warehouse), `release_advance_2` (tx `a4959d69...`),
+   `claim_advance_2` (tx `6743d4ec...`, 15,000,000 to coop), `ready_for_delivery` (tx `2d19c474...`),
+   `fund_remainder` (tx `abf6f582...`, 70,000,000 from buyer), `confirm_delivery` (tx `bec984fa...`, full delivery),
+   and `settle` (tx `3263103d...`, remaining 70,000,000 to coop). Final status: `Settled`.
+2. **Buyer default** — Contract `CCCLSWRWCEYI27XZCOZXCRN4DQ7RJR666WU7GWELLQ5JUEPVWRRY2RWA`.
+   Walked through `initialize` (tx `33b96efc...`), `lock` (tx `e404a8b3...`, 30,000,000 deposit),
+   `release_advance_1` (tx `871881c0...`), `claim_advance_1` (tx `ebc1b9c2...`, 15,000,000 to coop),
+   `mark_checkpoint` (tx `f8e0b97f...`), `release_advance_2` (tx `e38df061...`), `ready_for_delivery`
+   (tx `c1cdb73a...`, opening remainder window). Waited out 60s remainder window, then executed
+   `expire_remainder_window` (tx `4bd99379...`), sweeping remaining deposit (15,000,000) to coop. Final status: `Defaulted`.
+3. **Seller non-delivery** — Contract `CDUSNWRP4VTFTIRU6RK3YOXBVUIFDAIK5CMJ42TCHQS4Z4PYEERLIJG7`.
+   Walked through `initialize` (tx `f8453055...`), `lock` (tx `c1705f7e...`, 30,000,000 deposit).
+   Waited out 60s delivery window, then executed `reclaim_on_nondelivery` (tx `eea43d19...`),
+   refunding full deposit (30,000,000) to buyer. Final status: `Forfeited`.
+
+**All thirteen deployments' instances are validation artifacts, not
 infrastructure.** Redeploy fresh for future testing; don't build anything
 that depends on any of these addresses continuing to exist or hold correct
 state.
@@ -968,7 +1013,222 @@ if it doesn't, trust the code and the test output over this file, and fix
 this file to match before doing anything else.
 
 ---
-*Last updated: 20 Nov 2026 — pinned the toolchain: new root
+*Last updated: 24 Nov 2026 — #222, offline per-method CPU/memory budget
+baseline. **No contract code changed.** New
+`contracts/escrow/tests/budget.rs` drives every one of the contract's **34
+exported methods** to a state where the call genuinely succeeds, resets
+`env.cost_estimate().budget()` immediately before the measured call so
+scenario setup cannot leak in, and records CPU instructions, peak memory
+bytes, read/write entry counts and read/write byte counts against the new
+committed `contracts/escrow/budget.snapshot`. Coverage includes the oracle
+paths (`oracle_rate`, `resolve_fx_shortfall`, `refresh_fx_quote_status`,
+`fund_fx_shortfall`, `expire_fx_shortfall_window`, plus
+`replace_oracle_config`; reads go to an in-process fixed-quote oracle) and the
+multi-party paths
+(`reassign_buyer`, `resolve_dispute`, `cancel`). Adding, removing or renaming
+a method fails the suite until the harness and baseline are updated.
+
+The tolerance is **1%**, not the issue's suggested 5%: native host metering
+is deterministic here (two `BLESS_BUDGET=1` runs produced a byte-identical
+snapshot), while the smallest meaningful regression — one extra read of the
+stored `Commitment` — adds ~11k instructions, i.e. only ~1.9% of the heaviest
+method. Verified rather than assumed: injecting exactly that extra read into
+`cancel` failed the suite with
+`cancel cpu: 574297 -> 584725 (+1.8%) exceeds 1%`, then the probe was reverted.
+The baseline was re-blessed on top of current `upstream/main`: `initialize`
+moved +1,295 CPU with the new `CommitmentTerms` argument shape, and methods
+that publish `StatusChanged` carry the upstream default `map` encoding (the
+`single-value` switch is still an open PR, #345). Neither is a behavior change
+from this work.
+Re-bless workflow, format and the native-vs-WASM caveat are documented in
+`docs/gas-costs.md`'s new "Offline regression baseline" section, with a
+cross-link from `docs/cost-estimation.md` §4. The suite disables Soroban's
+`test_snapshots/*.json` capture for its envs, so the baseline adds no
+footprint artifacts per run.
+
+Verified at this HEAD: `cargo fmt --check` clean; `cargo test --no-fail-fast`
+**331 passing, 0 failing, 3 ignored** (231 unit; 100 across the 15 integration
+targets, including this new budget suite's 3/3). The pre-existing
+`clippy::too_many_arguments` warnings on contract entry points are unchanged
+and still not CI-gated.
+
+*Last updated: 23 Nov 2026 — two-issue bundle (#220, #221): one event
+encoding change, and a new fuzz crate for the XDR boundary. **No workflow
+files touched** (maintainer policy), and the contract's storage
+`Commitment` struct and every entry point's behaviour are unchanged.*
+
+*Last updated: 24 Nov 2026 — four-issue bundle (#274, #275, #276, #277).
+**No workflow files touched** (maintainer policy). New terminal `Error`
+variant `LockAfterDeliveryDeadline = 47`, so `error_discriminants.snapshot`
+and `interface.snapshot` grew by one line each and the WASM needs a rebuild
+before the interface guard is re-run.*
+
+- **#277 — `lock` refuses once the delivery window has passed.** The window
+  is `created_at + delivery_window_secs`, anchored at `initialize`, and
+  `delivery_deadline`'s field doc now says so (and why it is not anchored at
+  `lock`: re-anchoring would let a buyer extend the cooperative's deadline
+  unilaterally). `can_lock` gained a `now` argument and the
+  `now > delivery_deadline` guard, `available_actions` advertises `lock`
+  with `ActionDeadline::Inclusive(delivery_deadline)` instead of `None`, and
+  the deadline second itself is still in time. Closes the
+  late-lock-then-`reclaim_on_nondelivery` sequence. Tests: the exact
+  boundary from both sides, and the sequence itself (three tests).
+- **#275 — a zero remainder is funded by `ready_for_delivery`.** With
+  `advance1_bps + advance2_bps == 10_000` the deposit is `total_amount`, so
+  the remainder is 0 and requiring `fund_remainder`
+  let a fully-prepaid buyer be `Defaulted` — and lose the deposit — for not
+  sending zero tokens. New private helper `remainder_amount`, used by
+  `ready_for_delivery` (auto-fund), `fund_remainder` (transfers it) and the
+  new test-build invariant "a zero remainder is never left unfunded while
+  its window is open". `expire_remainder_window` is now unreachable for that
+  shape (`RemainderAlreadyFunded`). Tests: the full lifecycle for the 10 000
+  bps case, the default path refusing after the window lapses, and the
+  9 999 bps near-miss that must still be funded by the buyer (three tests).
+- **#274 — one test harness.** `crate::testutils` (new
+  `contracts/escrow/src/testutils.rs`, declared
+  `#[cfg(any(test, feature = "testutils"))]`) now holds the windows, the
+  grade schedule, token minting, the clock helpers, `World`/`Setup` and the
+  drive helpers, with a `Terms` builder. `src/test.rs` does
+  `use crate::testutils::*` and `tests/common/mod.rs` is a re-export shim;
+  no test body changed. Integration suites link this crate without
+  `cfg(test)`, so `Cargo.toml` gained a *dev-only self-dependency*
+  (`harvestlock-escrow = { path = ".", features = ["testutils"] }`) — plain
+  `cargo test` needs no `--features` flag, and the release WASM is
+  unaffected. `Cargo.lock` gained exactly one line (the crate's own package
+  listing itself as a dependency) and `--locked` builds stay valid.
+- **#276 — downstream integration example.** `examples/escrow-reader/` is a
+  minimal contract that imports the escrow's built WASM with
+  `soroban_sdk::contractimport!` and reads `get_status`/`get_commitment`
+  across the boundary, plus a test that registers the escrow *from that
+  WASM*. Deliberately **not** a member of the root workspace: the import
+  needs the escrow artifact at compile time, which would otherwise break
+  `cargo llvm-cov --workspace` and `stellar contract build` on a clean
+  checkout. Its README and the root README's "Building and testing" section
+  document the supported pattern (WASM import, not the rlib) and the build
+  order: `stellar contract build --package harvestlock-escrow`, then
+  `cargo test --manifest-path examples/escrow-reader/Cargo.toml`. Measured
+  locally: the example's own WASM is 8,156 bytes and exports exactly the two
+  read functions — it does not embed the escrow.
+
+Verified in this session: `cargo check --tests --locked` and `cargo build
+--tests --locked` (every test target compiles and links against the new
+harness), `stellar contract build --locked` for the escrow and for the
+example, the example's test target type-checks, `check_error_discriminants.sh`,
+`check_auth_docs.sh`, `check_wasm_size.sh` (87,640 bytes, +5,073 against the
+stale 82,567 baseline, inside the 5,120 budget) and
+`check_interface_snapshot.sh`. Once the PR's CI ran, `cargo test --locked`
+was also run locally in full: **230 unit tests (229 passing, 1 ignored) and
+96 across `tests/` (94 passing, 2 ignored)**, all green — the warnings it
+prints (unused `Ledger`/`TrancheClaimed`/`TrancheReclaimed`/`TOTAL_AMOUNT`/
+`Error` imports in `event_sourcing`, `nonstandard_token` and
+`state_machine_model`) are pre-existing and CI does not run Clippy or
+`-D warnings`.
+
+**Also fixed here, inherited from `main`:** `main` at `25dffee` was red.
+`terminal_transition_exclusivity::fx_funding_and_expiry_are_exclusive` built
+its pre-state with `prefix_claims = false`, leaving a tranche open, and then
+called `resolve_fx_shortfall`, which shares `settle`'s `tranches_resolved`
+guard (`cannot_resolve_fx_shortfall_before_tranches_are_resolved` pins that
+guard deliberately — it needs final, settled figures). The call was
+correctly refused with `TrancheUnresolved`, so the pair was never
+comparable; `cargo test`, `code coverage`, the 28.0.0 SDK differential and
+the mutation job all failed on that one test. The pair's pre-state now
+always claims both advances (the `prefix_claims` axis still varies in the
+other pairs, where it is meaningful), and a third `#[should_panic]`
+invariant test (`save_rejects_a_zero_remainder_left_unfunded_with_its_window_open`)
+keeps #275's new invariant from being weakenable to a no-op — without it,
+mutating the guard to `remainder_deadline == 0` would let every lifecycle
+test pass and the mutation job would report a survivor.
+
+Prior entry: 23 Nov 2026 — issue #285: extracted duplicate `claimed_by_coop` and
+`reclaimed_by_buyer` calculations into private helpers on `EscrowContract`
+with unit test coverage for all four claimed/reclaimed combinations. Zero
+behaviour change across `settle` and `resolve_fx_shortfall`.
+Prior entry: 23 Nov 2026 — issue #284: added `scripts/test-asset.sh` and
+documented per-role trustline prerequisites in `docs/trustline-prerequisites.md`.
+Deployment 12: issued a 7-decimal classic asset (`HLUSD`), configured issuer
+flags (`AUTH_REVOCABLE`, `AUTH_CLAWBACK_ENABLED`), deployed its Soroban Asset Contract
+(SAC `CAFC34O2KANLBWHYIPDT6MHPOETAEM7VXYSLHASJRUHEWUDMHNJW6SDL`), added trustlines for
+buyer and cooperative, minted 100,000,000 stroops to buyer, and verified live on
+testnet through `initialize`, `lock`, `release_advance_1`, and `claim_advance_1`
+(cooperative balance: 15,000,000 stroops). Closes the trustline visibility gap
+from prior native-XLM-only walkthroughs.
+
+Prior entry: 21 Nov 2026 — four-issue bundle (#254, #256, #258, #259):
+one new contract read view, a real FX-decimals bug fix, rounding-dust tests,
+and a new WASM-capability guard. **No workflow files touched** (maintainer
+policy), and the contract's storage `Commitment` struct is unchanged.
+
+- **#254 — compiled-artifact import guard.** New standalone crate
+  `tools/wasm-imports` (deliberately outside the contract workspace, so it
+  cannot change what `stellar contract build` compiles) reads the release
+  WASM's import section with `wasmparser`, maps each short import name to its
+  Soroban host function using a vendored copy of `soroban-env-common` 29.0.1's
+  `env.json`, prints the list, and **fails** on denylisted capabilities
+  (`update_current_contract_wasm`,
+  `update_current_contract_executable_ref`, `upload_wasm`, `create_contract`,
+  `create_contract_with_constructor`, `create_asset_contract`,
+  `create_external_ref_contract`). The full list is committed as
+  `tools/wasm-imports/imports.snapshot` — currently 27 imports, all ordinary
+  Soroban surface (auth, instance storage/TTL, `call`, events, ledger facts,
+  value/collection helpers), with no upgrade/deploy import among them. A new
+  capability therefore shows up as a review diff even before it is
+  denylisted. Tests assemble WAT fixtures, including one importing `l6`
+  (`update_current_contract_wasm`) and one importing `l3` (`create_contract`),
+  and assert `check_denied` fails; another pins the bug found while building
+  the tool — the first map-shaped implementation kept only one import per
+  module, swallowing 19 of the real artifact's 27 imports. Docs:
+  `tools/wasm-imports/README.md` (usage, denylist, `env.json` refresh, limits)
+  and threat-model entry 26 now cites it as the artifact-level guard. CI
+  wiring is documented in the README but deliberately **not** applied to
+  `.github/workflows/test.yml`; maintainers own that change.
+- **#256 — versioned read view.** New `get_commitment_view()` returns
+  `CommitmentView` with `schema_version = 1`
+  (`COMMITMENT_VIEW_SCHEMA_VERSION`), `status`/`created_at` at the top level,
+  and semantic groups `parties`, `terms`, `tranches` (per-tranche deadline /
+  claimed / expired), `funding`, `delivery`, `fx` (including `configured`, so
+  "no oracle" is distinguishable from "resolved to zero"), and `dispute`. It
+  is a total projection of all 33 `Commitment` fields; `get_commitment` is
+  kept unchanged for backward compatibility. Added a `docs/versioning.md`
+  §2.1 stability promise (view-shape changes bump the version; storage-only
+  changes do not), updated `docs/0002-interface-spec.md` (29 → 30 methods,
+  18 → 19 permissionless, 7 → 8 reads) and `docs/authorization-matrix.md`
+  (30 → 31 public functions, 5 → 6 views). Measured on the test host:
+  `get_commitment` 218,476 CPU instructions vs `get_commitment_view` 223,471
+  (~2.3% more, same single storage read); a test pins that the view does not
+  start re-reading storage. New tests: all-field mapping, oracle-unconfigured
+  reporting, pre-initialize `NotInitialized`, and the cost bound.
+- **#258 — settlement-token decimals.** `resolve_fx_shortfall` now reads
+  `token.decimals()` and rescales the 7-decimal FX result into the token's own
+  units instead of assuming the token is 7-decimal like native XLM/USDC. The
+  fix was explicit scaling rather than rejecting non-7-decimal tokens in
+  `initialize`, because a real pilot would settle in 6-decimal USDC; no new
+  `Error` variant, so the discriminant snapshot is unchanged. Regression test
+  uses a 6-decimal SEP-41 mock token and asserts `fx_adjusted_total = 700_000`
+  where the old formula would produce `7_000_000`; it also follows the money
+  through `settle`. `OracleConfig`/`resolve_fx_shortfall` doc comments and
+  `docs/reflector-decimals-assumption.md` §5 record the choice and the
+  remaining token-provider trust assumption.
+- **#259 — rounding dust.** New `contracts/escrow/tests/rounding_dust.rs`
+  (7 tests) uses `total_amount = 199`, `advance1_bps = advance2_bps = 1_500`:
+  the deposit floors to 59 while the tranches pay 29 + 29, leaving exactly one
+  unit in the contract. The suite follows that unit through `cancel` (buyer),
+  `expire_remainder_window` (cooperative), `reclaim_on_nondelivery` (buyer),
+  full `settle` (cooperative, because the obligation still exceeds the
+  balance), partial `settle` (buyer), and `expire_fx_shortfall_window`
+  (cooperative). `deposit_amount`'s doc comment now names the recipient on
+  every terminal path.
+
+Verified: `cargo fmt --check` clean; both guard scripts green (discriminants
+1..38; all 31 public-method doc comments name their auth party); `cargo test`
+**238 passing** (174 unit + 64 integration across the eight suites);
+`cargo test --manifest-path tools/wasm-imports/Cargo.toml` 9 passing; the
+tool's default check exits 0 against a fresh `stellar contract build`
+artifact. Test-snapshot policy unchanged: the new tests' snapshots are left
+untracked, and the 9 tracked files a local re-run re-recorded (random member
+hashes) were restored to HEAD rather than committed.
+
+Prior entry: 20 Nov 2026 — pinned the toolchain: new root
 `rust-toolchain.toml` (`channel = "1.97.1"`, `targets =
 ["wasm32v1-none"]`, `components = ["rustfmt", "clippy"]`). **No contract
 code changed, no test added or removed.** The problem it closes: the WASM
@@ -1147,6 +1407,12 @@ tracked files that a local re-run re-recorded (the new `fx_quote_stale`
 field, `live_until` drift) were restored to HEAD rather than committed,
 same reasoning as the prior entries below.
 
+Follow-up for issue #304: this record-only convention is superseded.
+Allocation-member test hashes are now deterministic, and
+`.github/scripts/check_test_snapshots.sh` runs the Rust tests and rejects
+changed, removed, or newly generated snapshots. The script is deliberately
+not wired into CI; workflow changes remain maintainer-managed.
+
 Prior entry: 17 Oct 2026 — #63, the Reflector `decimals()` question:
 documented finding plus one test, no contract behavior changed. `oracle_rate()`
 performs *no* conversion math — it returns the raw `price` from `lastprice`
@@ -1289,6 +1555,8 @@ is 4 Sept, not 5 Sept** (the instance it names, `CCUDE3MM…`, was created
 2026-09-04 22:16 UTC and its WASM hash matches the one above); the toolchain
 section names `soroban-sdk = "28.0.0"`, which is what `Cargo.toml` says since
 dependabot PR #5; and the test count is 134, not 129 (measured on `main`).
+
+Prior entry: 24 Nov 2026 — Scripted live e2e lifecycle runs with real transaction hashes (#286): added `scripts/e2e.sh`, `scripts/deploy.sh`, and resilient testnet transaction handling to `scripts/test-asset.sh`. Executed all three scenarios (happy path, buyer default, seller non-delivery) on testnet against issued classic SAC token HLUSD, asserting `get_status` and on-chain token balances at every step. Recorded complete JSON execution transcripts in `transcripts/e2e-testnet-latest.json` and captured real transaction hashes into snapshot replay fixtures (`deployment-13-real-hashes-*.snap`). Documented the transcript format in `docs/e2e-transcript.md`.
 
 Prior entry: 16 Oct 2026 — auth-model scrutiny of the staged multi-party
 Soroban flow (#138–#141). **#138**: proven a staged auth entry whose
