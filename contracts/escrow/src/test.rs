@@ -1723,28 +1723,32 @@ fn cannot_expire_fx_shortfall_window_once_funded() {
 // ---------- refresh_fx_quote_status (#1, "waiting on a fresh quote") ----------
 
 #[test]
-fn stale_quote_leaves_no_flag_but_refresh_fx_quote_status_records_one() {
-    // The whole reason #1 needed its own probe: `resolve_fx_shortfall`'s
-    // OracleStale refusal returns `Err`, and a Soroban invocation that
-    // errors rolls back every write it made — so the refusal itself can
-    // never record why it refused. Proven here, not assumed: after the
-    // failed resolve the flag is still false, and only the separate
-    // (successful) probe persists it.
-    let (s, _oracle) = setup_with_oracle(3_600);
+fn stale_quote_uses_recorded_rate_from_confirm_delivery() {
+    // First-caller fix (PRD §4.2 option (b)): record the oracle quote at
+    // confirm_delivery time, fixing the rate for the commitment's life.
+    // resolve_fx_shortfall uses this recorded snapshot instead of reading a
+    // live quote, so the rate is fixed regardless of later oracle movement.
+    let (s, oracle) = setup_with_oracle(3_600);
     advance_to_delivered_with_shortfall(&s);
+
+    // The oracle quote is fresh when confirm_delivery ran, so the rate
+    // is recorded. Now advance time to make the live quote stale — the
+    // recorded rate should still be used.
     advance_time(&s, 3_601); // the configured quote is now stale
 
-    assert_eq!(
-        s.contract.try_resolve_fx_shortfall(),
-        Err(Ok(Error::OracleStale))
-    );
-    assert!(
-        !s.contract.get_commitment().fx_quote_stale,
-        "the failed call must have written nothing"
-    );
+    // resolve_fx_shortfall uses the recorded snapshot from confirm_delivery,
+    // so it succeeds even though the live quote is stale.
+    s.contract.resolve_fx_shortfall();
+    let c = s.contract.get_commitment();
+    assert!(c.fx_resolved);
+    // The flag is informational only and cleared by resolution.
+    assert!(!c.fx_quote_stale);
 
-    s.contract.refresh_fx_quote_status();
-    assert!(s.contract.get_commitment().fx_quote_stale);
+    // After resolve_fx_shortfall with the recorded rate, fx_resolved is true
+    // and refresh_fx_quote_status is gated on !fx_resolved, so we verify
+    // the flag remains clear (resolution cleared it) and the core behavior
+    // — that the recorded rate was used — is confirmed by fx_resolved being set.
+    assert!(!s.contract.get_commitment().fx_quote_stale);
 }
 
 #[test]
