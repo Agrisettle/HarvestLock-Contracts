@@ -17,7 +17,7 @@
 #![allow(dead_code)]
 
 use harvestlock_escrow::{EscrowContract, EscrowContractClient, Status};
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Ledger as _, StellarAssetIssuer};
 use soroban_sdk::{token, Address, Env, Vec};
 
 pub const WINDOW: u64 = 7 * 24 * 60 * 60;
@@ -36,6 +36,10 @@ pub struct World {
     pub cooperative: Address,
     pub warehouse: Address,
     pub total_amount: i128,
+    /// The classic asset's issuer account handle, exposed so suites can set
+    /// `AUTH_REVOCABLE` / `AUTH_CLAWBACK_ENABLED` before any escrow balance is
+    /// created. Ordinary suites never touch it.
+    pub issuer: StellarAssetIssuer,
 }
 
 /// A fresh, initialized (`Status::Draft`) commitment at ledger timestamp 0.
@@ -74,6 +78,7 @@ pub fn world_in(
 ) -> World {
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let issuer = sac.issuer();
     let token_address = sac.address();
     let token = token::Client::new(env, &token_address);
     let token_admin_client = token::StellarAssetClient::new(env, &token_address);
@@ -106,6 +111,7 @@ pub fn world_in(
         cooperative,
         warehouse,
         total_amount: TOTAL_AMOUNT,
+        issuer,
     }
 }
 

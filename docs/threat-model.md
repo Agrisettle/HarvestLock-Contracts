@@ -99,7 +99,7 @@ linked section per arrow.
 | **HarvestLock / API maintainers** (off-chain) | Which transactions get built and submitted; the reputation store | Build, sign-request, and submit transactions on behalf of users; censor users *off chain*; enforce the default/forfeiture bars app-side | Sign *as* any party, pause, upgrade, drain, or redirect the contract — no HarvestLock address exists anywhere in the contract (PRD §4.5) |
 | **Member farmers** (record subjects) | Their off-chain identity | Nothing — no member key is ever a contract principal | Read or alter their on-chain `member_hash` row; be paid by the contract (v1 `settle` pays the cooperative a lump sum) |
 | **Deployers / maintainers** | Source code, CI, the WASM hash | Ship a new contract version; review PRs | Change a deployed instance — there is no upgrade entrypoint, by design |
-| **Token contract** (SAC / native XLM) | Its own transfer semantics | Halt every call that touches it (its failure unwinds the whole invocation) | Be swapped after `initialize` (address stored at creation) |
+| **Token contract** (SAC / native XLM) | Its own transfer semantics; for an issued asset, its issuer's `AUTH_REVOCABLE` / `AUTH_CLAWBACK_ENABLED` powers | Deauthorize a holder, claw back a balance, or halt every call that touches it (its failure unwinds the whole invocation) | Be swapped after `initialize` (address stored at creation); be constrained by any contract guard (entry 31) |
 
 Note on being named: the cooperative and warehouse operator **never sign at
 `initialize`** — only the buyer does. A commitment can therefore be created
@@ -647,6 +647,13 @@ documented at both the function-doc-comment layer and here, not folklore.
    are how anyone detects a transition; `every_transition_publishes_status_changed`
    holds that every mutation is announced (and `initialize` deliberately
    announces nothing — creation is not a transition).
+8. **The settlement asset's issuer does not freeze or claw back the escrow**
+   (entry 31). An issued stablecoin's issuer can deauthorize the escrow
+   address or the cooperative, or burn part of the escrowed balance, and no
+   contract-side guard can prevent it. A deauthorized escrow freezes every
+   value-moving call, including the deadline rescues; a deauthorized
+   cooperative makes `settle` revert forever in `Delivered`. The issuer's
+   policy is a counterparty risk the parties accept by choosing that asset.
 
 ## What this document does not authorize
 
