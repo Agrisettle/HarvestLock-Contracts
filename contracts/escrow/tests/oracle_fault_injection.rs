@@ -303,7 +303,7 @@ fn build_with(
         cooperative,
         warehouse,
         total_amount: common::TOTAL_AMOUNT,
-        issuer,
+        issuer: Some(issuer),
     }
 }
 

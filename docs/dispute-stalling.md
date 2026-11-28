@@ -132,27 +132,18 @@ cooperative's choice set:
 | `flag_dispute` before the buyer's call lands | buyer's reclaim rejects (`InvalidState`); cooperative now has one full window | still 350,000 for now, no strike yet |
 | Flag, then have the operator call `confirm_delivery` after expiry | status restored to `ReadyForDelivery`, operator attests late (no deadline guard), `settle` runs | 1,000,000 total, no strike |
 
-The flag buys the only thing that was missing: time for a late
-attestation. `confirm_delivery` checks `status == ReadyForDelivery`,
-`remainder_funded`, and the grade index — **not** `delivery_deadline`.
-`reclaim_on_nondelivery` checks that the deadline has passed. So after
-the deadline both calls are legal, and whichever lands first decides
-whether the remaining 650,000 goes to the cooperative or back to the
-buyer. A 7-day (or 30-day) freeze is more than enough to organize the
-operator's signature.
+**This attack is closed** (#199). `confirm_delivery` now guards on
+`delivery_deadline`: it returns `Error::DeliveryDeadlinePassed` if the
+ledger timestamp exceeds the deadline set at initialization. The
+at-deadline second is still valid (guard is strictly `>`, not `>=`), and
+`reclaim_on_nondelivery` requires the deadline to have passed, so the
+two calls are strict complements at that boundary: exactly one of them is
+callable in any given ledger second.
 
-The three-party resolution requirement does not deter this. The
-cooperative is the flagger and will simply refuse to sign
-`resolve_dispute`; the buyer can only wait out the permissionless expiry,
-then try again — and the cooperative can flag again if it still needs
-time. The buyer's recourse is a race, not a right.
-
-Caveat on severity: this requires the operator to cooperate with a late
-attestation. Nothing in the contract punishes the operator for attesting
-late, attesting a low grade, or never attesting at all — see §3.4 and
-[`griefing-and-inaction.md`](./griefing-and-inaction.md). So the
-cooperative's plan needs an accomplice, but the accomplice has no
-downside.
+After `delivery_deadline` the flag no longer buys usable time — a late
+`confirm_delivery` will fail with `DeliveryDeadlinePassed` whether or not
+the commitment was frozen during the dispute window. The table row above
+showing "1,000,000 total, no strike" is no longer reachable.
 
 ### 3.2 The buyer: postpone the permanent bar, and block settlement
 

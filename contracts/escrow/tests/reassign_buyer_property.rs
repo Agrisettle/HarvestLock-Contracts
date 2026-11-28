@@ -179,6 +179,10 @@ proptest! {
                 delivered_quantity,
                 grade_index,
             );
+            // Both worlds share one ledger clock and were initialized at 0;
+            // rewind it so the second lifecycle starts inside its delivery
+            // window (`lock` refuses after the deadline, #277).
+            reassigned.set_time(0);
             let changed = exercise_lifecycle(
                 &reassigned,
                 &incoming_buyer,

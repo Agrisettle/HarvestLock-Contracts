@@ -239,6 +239,14 @@ pub const MAX_DENOMINATED_AMOUNT: i128 = i128::MAX / 10_000;
 /// call site overflow-free by construction. See `Error::AmountTooLarge`.
 pub const MAX_TOTAL_AMOUNT: i128 = i128::MAX / 10_000;
 
+/// Maximum number of times `flag_dispute` may be called per commitment.
+/// Only a lapsed dispute window (resolved by `expire_dispute_window`) counts
+/// against the cap; a unanimous `resolve_dispute` does not.
+/// Three covers any realistic round of parallel good-faith attempts and
+/// closes the stalling attack documented in `docs/dispute-stalling.md`.
+/// See `Error::DisputeCapReached`.
+pub const MAX_DISPUTE_FLAGS: u32 = 3;
+
 /// The lifecycle state of a commitment. Advances monotonically through the
 /// main sequence; `Disputed` is a re-entrant pause; `Settled`, `Cancelled`,
 /// `Defaulted`, and `Forfeited` are terminal states from which no further
@@ -1516,6 +1524,7 @@ enum Method {
     ExpireFxShortfallWindow,
     Cancel,
     ReassignBuyer,
+    ReassignOperator,
     FlagDispute,
     ResolveDispute,
     ExpireDisputeWindow,
@@ -1553,7 +1562,7 @@ impl Method {
             | Method::ReplaceOracleConfig
             | Method::FundFxShortfall
             | Method::ExpireFxShortfallWindow => Some(&[Status::Delivered]),
-            Method::Cancel | Method::ReassignBuyer => Some(PRE_DELIVERY),
+            Method::Cancel | Method::ReassignBuyer | Method::ReassignOperator => Some(PRE_DELIVERY),
             Method::FlagDispute => Some(LOCKED_THROUGH_DELIVERED),
             Method::ResolveDispute | Method::ExpireDisputeWindow => Some(&[Status::Disputed]),
         }
@@ -2663,7 +2672,19 @@ impl EscrowContract {
             .get(&DataKey::OracleConfig)
             .ok_or(Error::OracleNotConfigured)?;
 
-        let rate = Self::read_oracle_rate(&env, &oracle_config)?;
+        // Use the oracle rate recorded at confirm_delivery time, fixing the
+        // FX snapshot for the commitment's life (PRD §4.2 option (b)
+        // first-caller fix). Fall back to a live read only if no snapshot
+        // was recorded (e.g. confirm_delivery ran before the oracle had a
+        // valid quote).
+        let rate = if c.fx_recorded_price != 0 {
+            OracleRate {
+                price: c.fx_recorded_price,
+                timestamp: c.fx_recorded_timestamp,
+            }
+        } else {
+            Self::read_oracle_rate(&env, &oracle_config)?
+        };
         // `try_decimals`, not `decimals` (#245): `lastprice` just succeeded
         // above, but the oracle can still fail on this second call, and
         // that should also be a contract error rather than a host abort.
@@ -3756,10 +3777,7 @@ impl EscrowContract {
     }
 
     fn can_reassign_operator(c: &Commitment) -> Result<(), Error> {
-        if !Self::is_pre_delivery_status(c.status) {
-            return Err(Error::InvalidState);
-        }
-        Ok(())
+        Self::require_status(c, Method::ReassignOperator)
     }
 
     fn can_flag_dispute(c: &Commitment, flagger: &Address) -> Result<(), Error> {
@@ -4011,6 +4029,16 @@ impl EscrowContract {
 
     fn claim_tranche(env: &Env, t: Tranche) -> Result<(), Error> {
         let mut c = Self::load(env)?;
+        // After terminal statuses the balance has already been swept;
+        // a claim/reclaim would reach token.transfer and trap on insufficient
+        // balance. Reject with a clean contract error rather than a token-level
+        // trap. Disputed is deliberately excluded — see dispute-stalling.md §2.
+        match c.status {
+            Status::Cancelled | Status::Forfeited | Status::Defaulted => {
+                return Err(Error::InvalidState);
+            }
+            _ => {}
+        }
         c.cooperative.require_auth();
         Self::can_claim_tranche(&mut c, t, env.ledger().timestamp())?;
 

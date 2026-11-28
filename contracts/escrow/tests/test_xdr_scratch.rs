@@ -1,15 +1,14 @@
-use soroban_sdk::{testutils::Ledger as _, Address, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec as SdkVec};
+use harvestlock_escrow::{AllocationMember, CommitmentTerms, OracleConfig, Status};
 use soroban_sdk::xdr::{Limits, ScVal, WriteXdr};
-use harvestlock_escrow::{AllocationMember, OracleConfig, Status};
+use soroban_sdk::{
+    testutils::Ledger as _, Address, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec as SdkVec,
+};
 
 use std::fs;
 use std::path::PathBuf;
 
 fn fixture_dir() -> PathBuf {
-    PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/xdr"
-    ))
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/xdr"))
 }
 
 fn to_b64(scval: &ScVal) -> std::string::String {
@@ -72,19 +71,23 @@ fn test_generate_xdr_fixtures() {
     // ------------------------------------------------------------------
     // 1. Full initialize argument vector, WITH oracle_config.
     // ------------------------------------------------------------------
-    let args_with_oracle: [Val; 13] = [
+    let terms = CommitmentTerms {
+        total_amount: 100_000_000,
+        advance1_bps: 1500,
+        advance2_bps: 1500,
+        claim_window_secs: 604800,
+        remainder_window_secs: 604800,
+        delivery_window_secs: 10368000,
+        contracted_quantity: 1000,
+        grade_price_bps: grade_prices.clone(),
+    };
+
+    let args_with_oracle: [Val; 6] = [
         buyer.clone().into_val(&env),
         cooperative.clone().into_val(&env),
         warehouse.clone().into_val(&env),
         token.clone().into_val(&env),
-        100_000_000i128.into_val(&env),
-        1500u32.into_val(&env),
-        1500u32.into_val(&env),
-        604800u64.into_val(&env),
-        604800u64.into_val(&env),
-        10368000u64.into_val(&env),
-        1000u32.into_val(&env),
-        grade_prices.clone().into_val(&env),
+        terms.clone().into_val(&env),
         Some(oracle_config.clone()).into_val(&env),
     ];
     let b64_with: std::vec::Vec<std::string::String> = args_with_oracle
@@ -107,19 +110,12 @@ fn test_generate_xdr_fixtures() {
     // ------------------------------------------------------------------
     // 2. Full initialize argument vector, WITHOUT oracle_config.
     // ------------------------------------------------------------------
-    let args_without: [Val; 13] = [
+    let args_without: [Val; 6] = [
         buyer.clone().into_val(&env),
         cooperative.clone().into_val(&env),
         warehouse.clone().into_val(&env),
         token.clone().into_val(&env),
-        100_000_000i128.into_val(&env),
-        1500u32.into_val(&env),
-        1500u32.into_val(&env),
-        604800u64.into_val(&env),
-        604800u64.into_val(&env),
-        10368000u64.into_val(&env),
-        1000u32.into_val(&env),
-        grade_prices.clone().into_val(&env),
+        terms.clone().into_val(&env),
         Option::<OracleConfig>::None.into_val(&env),
     ];
     let b64_without: std::vec::Vec<std::string::String> = args_without
@@ -201,12 +197,15 @@ fn test_generate_xdr_fixtures() {
         settlement_bps: 9000,
         fx_resolved: true,
         fx_adjusted_total: 90_000_000,
+        fx_recorded_price: 0,
+        fx_recorded_timestamp: 0,
         fx_shortfall_amount: 5_000_000,
         fx_shortfall_funded: true,
         fx_shortfall_deadline: 1700002400,
         fx_quote_stale: false,
         dispute_pre_status: Status::Draft,
         dispute_deadline: 0,
+        dispute_count: 0,
     };
     let scval_commitment = ScVal::try_from_val(
         &env,

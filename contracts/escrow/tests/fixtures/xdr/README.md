@@ -21,7 +21,7 @@ This rewrites every `*.json` file in this directory.
 From `bindings/typescript`:
 
 ```sh
-npm test
+npm install && npm run build && node --test test/*.mjs
 ```
 
 Runs `test/xdr.test.mjs`, which loads the fixtures above and asserts byte

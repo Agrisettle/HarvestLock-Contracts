@@ -128,8 +128,11 @@ echo "==> WASM sha256: $WASM_HASH"
 # Always emit into a fresh temp dir first, regardless of mode — so an
 # interrupted run can never leave the committed tree in a half-generated
 # state.
-TMP_OUT="$(mktemp -d)"
-trap 'rm -rf "$TMP_OUT"' EXIT
+# The CLI uses the output directory's basename as the npm package name and
+# rejects mktemp's mixed-case names, so generate into a fixed subdirectory.
+TMP_BASE="$(mktemp -d)"
+trap 'rm -rf "$TMP_BASE"' EXIT
+TMP_OUT="$TMP_BASE/typescript"
 
 echo "==> generating bindings into $TMP_OUT"
 stellar contract bindings typescript \
@@ -161,6 +164,8 @@ if [[ $CHECK_MODE -eq 1 ]]; then
       --exclude=dist \
       --exclude=.gitignore \
       --exclude=README.md \
+      --exclude=test \
+      --exclude=package-lock.json \
       "$COMMITTED_DIR" "$TMP_OUT" >/dev/null; then
     echo "OK: bindings match the current WASM (hash $WASM_HASH)."
     exit 0
@@ -173,6 +178,8 @@ if [[ $CHECK_MODE -eq 1 ]]; then
       --exclude=dist \
       --exclude=.gitignore \
       --exclude=README.md \
+      --exclude=test \
+      --exclude=package-lock.json \
       "$COMMITTED_DIR" "$TMP_OUT" >&2 || true
     exit 1
   fi
@@ -194,6 +201,12 @@ if [[ -f "$COMMITTED_DIR/.gitignore" ]]; then
   cp "$COMMITTED_DIR/.gitignore" "$SAVED_GITIGNORE"
 fi
 
+# Preserve the hand-written cross-language XDR test (#268) too.
+SAVED_TEST=""
+if [[ -d "$COMMITTED_DIR/test" ]]; then
+  SAVED_TEST="$(mktemp -d)"
+  cp -R "$COMMITTED_DIR/test/." "$SAVED_TEST/"
+fi
 rm -rf "$COMMITTED_DIR"
 mkdir -p "$COMMITTED_DIR"
 # Copy the generated contents in — `cp -R "$TMP_OUT"/. "$COMMITTED_DIR/"`
@@ -210,5 +223,10 @@ if [[ -n "$SAVED_GITIGNORE" ]]; then
   rm -f "$SAVED_GITIGNORE"
 fi
 
+if [[ -n "$SAVED_TEST" ]]; then
+  mkdir -p "$COMMITTED_DIR/test"
+  cp -R "$SAVED_TEST/." "$COMMITTED_DIR/test/"
+  rm -rf "$SAVED_TEST"
+fi
 echo "OK: $COMMITTED_DIR regenerated from WASM $WASM_HASH"
 echo "    Review the diff, then commit (the .wasm-sha256 file pins which WASM this came from)."

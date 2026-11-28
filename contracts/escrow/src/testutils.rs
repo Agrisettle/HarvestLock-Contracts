@@ -50,7 +50,7 @@
 //! unification and there is no behavior worth changing in renaming them.
 
 use crate::{CommitmentTerms, EscrowContract, EscrowContractClient, Status};
-use soroban_sdk::testutils::{Address as _, Ledger as _, MockAuthInvoke};
+use soroban_sdk::testutils::{Address as _, Ledger as _, MockAuthInvoke, StellarAssetIssuer};
 use soroban_sdk::{token, Address, Env, Val, Vec};
 
 /// Default claim window: 7 days, arbitrary but realistic.
@@ -229,10 +229,16 @@ pub struct World {
     pub env: Env,
     pub contract: EscrowContractClient<'static>,
     pub token: token::Client<'static>,
+    /// Mints the settlement token, for tests that fund extra parties.
+    pub token_admin: token::StellarAssetClient<'static>,
     pub buyer: Address,
     pub cooperative: Address,
     pub warehouse: Address,
     pub total_amount: i128,
+    /// The classic asset's issuer handle, so suites can set
+    /// `AUTH_REVOCABLE` / `AUTH_CLAWBACK_ENABLED` before any escrow balance
+    /// exists. `None` for worlds built on a non-SAC token.
+    pub issuer: Option<StellarAssetIssuer>,
 }
 
 /// The name `src/test.rs`'s existing tests use. Same type, not a wrapper.
@@ -320,7 +326,11 @@ pub fn world_in_with_terms(
     terms: Terms,
 ) -> World {
     let token_admin = Address::generate(env);
-    let (token_address, token, token_admin_client) = create_token(env, &token_admin);
+    let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let issuer = sac.issuer();
+    let token_address = sac.address();
+    let token = token::Client::new(env, &token_address);
+    let token_admin_client = token::StellarAssetClient::new(env, &token_address);
     token_admin_client.mint(&buyer, &terms.total_amount);
 
     let contract_id = env.register(EscrowContract, ());
@@ -338,6 +348,8 @@ pub fn world_in_with_terms(
         env: env.clone(),
         contract,
         token,
+        token_admin: token_admin_client,
+        issuer: Some(issuer),
         buyer,
         cooperative,
         warehouse,

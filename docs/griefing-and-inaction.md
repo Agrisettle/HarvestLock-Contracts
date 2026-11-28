@@ -25,6 +25,11 @@ each status pays), [`dispute-stalling.md`](./dispute-stalling.md)
   is callable by anyone after `delivery_deadline + remainder_window_secs`.
   It sets `Forfeited` and returns the balance to the buyer's address,
   so a lost key no longer locks funds forever. See §2.
+- **The settlement asset's issuer sits above every one of these paths**
+  (§4.5). For an issued stablecoin, the issuer can deauthorize the escrow
+  address — freezing every transfer, including every deadline rescue — or
+  deauthorize the cooperative, which makes `settle` revert forever once
+  the commitment reaches `Delivered`. Only the issuer can undo either.
 - **Two near-stuck scenarios are worse than they look because the
   griefer pays nothing:** a cooperative that never signals
   `ready_for_delivery`, and an operator that never marks the checkpoint
