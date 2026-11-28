@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "84462"
+                        "u64": "7691"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "5221"
+                        "u64": "98224"
                       }
                     },
                     {
@@ -228,7 +228,7 @@
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 343746459133,
+    "timestamp": 905026216319,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -422,7 +422,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "343746459134"
+                              "u64": "905026216320"
                             }
                           },
                           {
@@ -454,7 +454,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "343746459134"
+                              "u64": "905026216320"
                             }
                           },
                           {
@@ -478,7 +478,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "84462"
+                              "u64": "7691"
                             }
                           },
                           {
@@ -502,7 +502,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "343746309803"
+                              "u64": "905026192050"
                             }
                           },
                           {
@@ -518,7 +518,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "343746509803"
+                              "u64": "905026392050"
                             }
                           },
                           {
@@ -660,7 +660,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "5221"
+                              "u64": "98224"
                             }
                           },
                           {

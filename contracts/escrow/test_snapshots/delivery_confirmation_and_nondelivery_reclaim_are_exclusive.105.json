@@ -92,7 +92,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "86208"
+                        "u64": "10497"
                       }
                     },
                     {
@@ -108,7 +108,7 @@
                         "symbol": "delivery_window_secs"
                       },
                       "val": {
-                        "u64": "914257"
+                        "u64": "238266"
                       }
                     },
                     {
@@ -134,7 +134,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "75626"
+                        "u64": "86424"
                       }
                     },
                     {
@@ -290,33 +290,12 @@
       ]
     ],
     [],
-    [
-      [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-        {
-          "function": {
-            "contract_fn": {
-              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-              "function_name": "confirm_delivery",
-              "args": [
-                {
-                  "u32": 1000
-                },
-                {
-                  "u32": 0
-                }
-              ]
-            }
-          },
-          "sub_invocations": []
-        }
-      ]
-    ]
+    []
   ],
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 1252183157,
+    "timestamp": 497048674800,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -493,26 +472,6 @@
               "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
               "key": {
                 "ledger_key_nonce": {
-                  "nonce": "1194852393571756375"
-                }
-              },
-              "durability": "temporary",
-              "val": "void"
-            }
-          },
-          "ext": "v0"
-        },
-        "live_until": 6311999
-      },
-      {
-        "entry": {
-          "last_modified_ledger_seq": 0,
-          "data": {
-            "contract_data": {
-              "ext": "v0",
-              "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "key": {
-                "ledger_key_nonce": {
                   "nonce": "4270020994084947596"
                 }
               },
@@ -590,7 +549,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "1251355109"
+                              "u64": "497048447030"
                             }
                           },
                           {
@@ -622,7 +581,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "1251355109"
+                              "u64": "497048447030"
                             }
                           },
                           {
@@ -646,7 +605,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "86208"
+                              "u64": "10497"
                             }
                           },
                           {
@@ -670,7 +629,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "1251268901"
+                              "u64": "497048436533"
                             }
                           },
                           {
@@ -678,7 +637,7 @@
                               "symbol": "delivered_quantity"
                             },
                             "val": {
-                              "u32": 1000
+                              "u32": 0
                             }
                           },
                           {
@@ -686,7 +645,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "1252183158"
+                              "u64": "497048674799"
                             }
                           },
                           {
@@ -812,7 +771,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "1251435879"
+                              "u64": "497048616370"
                             }
                           },
                           {
@@ -828,7 +787,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "75626"
+                              "u64": "86424"
                             }
                           },
                           {
@@ -836,7 +795,7 @@
                               "symbol": "settlement_bps"
                             },
                             "val": {
-                              "u32": 10000
+                              "u32": 0
                             }
                           },
                           {
@@ -846,7 +805,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "Delivered"
+                                  "symbol": "ReadyForDelivery"
                                 }
                               ]
                             }
@@ -1162,78 +1121,5 @@
       }
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-        "type": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "status_changed"
-              },
-              {
-                "vec": [
-                  {
-                    "symbol": "ReadyForDelivery"
-                  }
-                ]
-              },
-              {
-                "vec": [
-                  {
-                    "symbol": "Delivered"
-                  }
-                ]
-              }
-            ],
-            "data": "void"
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
-        "type": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "delivery_confirmed"
-              },
-              {
-                "u32": 0
-              }
-            ],
-            "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "delivered_quantity"
-                  },
-                  "val": {
-                    "u32": 1000
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "settlement_bps"
-                  },
-                  "val": {
-                    "u32": 10000
-                  }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

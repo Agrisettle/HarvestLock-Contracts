@@ -93,7 +93,7 @@
                         "symbol": "claim_window_secs"
                       },
                       "val": {
-                        "u64": "77040"
+                        "u64": "94711"
                       }
                     },
                     {
@@ -135,7 +135,7 @@
                         "symbol": "remainder_window_secs"
                       },
                       "val": {
-                        "u64": "47626"
+                        "u64": "59538"
                       }
                     },
                     {
@@ -353,7 +353,7 @@
   "ledger": {
     "protocol_version": 29,
     "sequence_number": 0,
-    "timestamp": 996914142842,
+    "timestamp": 380813721044,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
     "min_persistent_entry_ttl": 4096,
@@ -650,7 +650,7 @@
                               "symbol": "advance1_deadline"
                             },
                             "val": {
-                              "u64": "996914094415"
+                              "u64": "380813661876"
                             }
                           },
                           {
@@ -682,7 +682,7 @@
                               "symbol": "advance2_deadline"
                             },
                             "val": {
-                              "u64": "996914094415"
+                              "u64": "380813661876"
                             }
                           },
                           {
@@ -706,7 +706,7 @@
                               "symbol": "claim_window_secs"
                             },
                             "val": {
-                              "u64": "77040"
+                              "u64": "94711"
                             }
                           },
                           {
@@ -730,7 +730,7 @@
                               "symbol": "created_at"
                             },
                             "val": {
-                              "u64": "996914017375"
+                              "u64": "380813567165"
                             }
                           },
                           {
@@ -746,7 +746,7 @@
                               "symbol": "delivery_deadline"
                             },
                             "val": {
-                              "u64": "996914217375"
+                              "u64": "380813767165"
                             }
                           },
                           {
@@ -806,7 +806,7 @@
                               "symbol": "fx_recorded_timestamp"
                             },
                             "val": {
-                              "u64": "996914095216"
+                              "u64": "380813661505"
                             }
                           },
                           {
@@ -830,7 +830,7 @@
                               "symbol": "fx_shortfall_deadline"
                             },
                             "val": {
-                              "u64": "996914142842"
+                              "u64": "380813721043"
                             }
                           },
                           {
@@ -872,7 +872,7 @@
                               "symbol": "remainder_deadline"
                             },
                             "val": {
-                              "u64": "996914142842"
+                              "u64": "380813721043"
                             }
                           },
                           {
@@ -888,7 +888,7 @@
                               "symbol": "remainder_window_secs"
                             },
                             "val": {
-                              "u64": "47626"
+                              "u64": "59538"
                             }
                           },
                           {
@@ -906,7 +906,7 @@
                             "val": {
                               "vec": [
                                 {
-                                  "symbol": "Delivered"
+                                  "symbol": "Defaulted"
                                 }
                               ]
                             }
@@ -1069,7 +1069,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "300000"
+                      "i128": "1000000"
                     }
                   },
                   {
@@ -1121,7 +1121,7 @@
                       "symbol": "amount"
                     },
                     "val": {
-                      "i128": "700000"
+                      "i128": "0"
                     }
                   },
                   {
@@ -1281,5 +1281,107 @@
       }
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "status_changed"
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Delivered"
+                  }
+                ]
+              },
+              {
+                "vec": [
+                  {
+                    "symbol": "Defaulted"
+                  }
+                ]
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "transfer"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+              },
+              {
+                "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAL7NV"
+              }
+            ],
+            "data": {
+              "i128": "700000"
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
+        "type": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "payout"
+              },
+              {
+                "symbol": "exp_fx"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "amount"
+                  },
+                  "val": {
+                    "i128": "700000"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "to"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }
