@@ -1,0 +1,31 @@
+[package]
+name = "harvestlock-escrow-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace: `fuzz/` sits inside the repository's workspace but is
+# deliberately not a member of it. cargo-fuzz builds with its own nightly
+# toolchain and sanitizer flags; keeping it detached means `cargo test` at the
+# repo root never tries to build the fuzz target.
+[workspace]
+
+[lib]
+name = "harvestlock_escrow_fuzz"
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = "1"
+soroban-sdk = { version = "29.0.1", features = ["testutils"] }
+harvestlock-escrow = { path = "../contracts/escrow", features = ["testutils"] }
+
+[[bin]]
+name = "entry_points"
+path = "fuzz_targets/entry_points.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,5 @@
+target/
+artifacts/
+coverage/
+test_snapshots/
+corpus/entry_points/*.fuzz
