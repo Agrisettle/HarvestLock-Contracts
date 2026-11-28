@@ -21,26 +21,20 @@ this doc and the code disagree about what the contract *does*, the code wins.
   math" is a slight misattribution: the only conversion is in
   `resolve_fx_shortfall()`.
 - **The one place `decimals()` is used is `resolve_fx_shortfall()`**, as the
-  divisor `10i128.pow(decimals)` (`lib.rs:1245`). It reads `decimals()` live
-  from the oracle on every call.
+  divisor `10^decimals`. It reads `decimals()` live from the oracle on every
+  call; checked arithmetic returns `OracleConversionOutOfRange` if the
+  conversion numerator or divisor cannot fit in `i128`.
 - **The assumption is that `decimals()` is immutable.** That is well-founded
   for today's deployed Reflector oracles: the real contract writes `decimals`
   exactly once at `config()` and aborts with `AlreadyInitialized` on any second
   call, exposes no `set_decimals`, and SEP-40 explicitly says the value
   "should never change."
-- **If it were ever violated, the failure is silent, not loud.** The
-  conversion would move by a power of ten with no error and no consistency
-  check — pinned by
+- **A plausible decimals change is still accepted without a consistency
+  check.** The conversion moves by a power of ten — pinned by
   `a_plausible_decimals_change_silently_rescales_resolve_fx_shortfall`. A
-  *plausible* new value (e.g. 15 instead of 14) rescales by 10×; only an
-  *absurd* value large enough to overflow `10i128.pow()` traps (that is
-  `an_absurd_decimals_count_traps_resolve_fx_shortfall`, a separate finding).
-- **No code change is recommended.** The assumption holds against the live
-  oracle, and `OracleConfig` deliberately does not duplicate `decimals()`
-  because it is a property of the oracle, not of the commitment. The
-  recommendation is to keep this as a documented, tested assumption and
-  revisit only if the configured oracle is ever replaced or redeployed with a
-  different scale.
+  *plausible* new value (e.g. 15 instead of 14) rescales by 10×. An *absurd*
+  value whose divisor overflows now returns `OracleConversionOutOfRange`
+  rather than trapping.
 
 ## 1. Where `decimals()` actually enters the math
 
@@ -58,22 +52,24 @@ let quote = client
 No `decimals()` call appears on either path. The raw `price` is returned
 untouched.
 
-The scale is applied in exactly one place, `resolve_fx_shortfall()`
-(`lib.rs:1242`–`1245`):
+The scale is applied in exactly one place, `resolve_fx_shortfall()`:
 
 ```rust
 let rate = Self::read_oracle_rate(&env, &oracle_config)?;
 let decimals = ReflectorPulseClient::new(&env, &oracle_config.oracle_contract).decimals();
 
 let ngn_owed = Self::bps_amount(oracle_config.denominated_amount, c.settlement_bps);
-let fx_adjusted_total = ngn_owed * rate.price / 10i128.pow(decimals);
+let fx_in_denominated_decimals =
+    Self::checked_fx_conversion(ngn_owed, rate.price, decimals)?;
 ```
 
-So `decimals()` is read *live, per settlement*, and used to divide the raw
-price. The `OracleRate` public type intentionally does **not** carry the
-decimals; `lib.rs`'s doc comment for it says callers "can read it directly off
-the oracle contract if they need it." (Both reads happen inside one Soroban
-invocation/ledger, so the two cross-contract calls cannot straddle a state
+`checked_fx_conversion` uses checked multiplication and checked exponentiation;
+either overflow returns the contract error `OracleConversionOutOfRange`, leaving
+the commitment unresolved. So `decimals()` is read *live, per settlement*, and
+used to divide the raw price. The `OracleRate` public type intentionally does
+**not** carry the decimals; `lib.rs`'s doc comment for it says callers "can read
+it directly off the oracle contract if they need it." (Both reads happen
+inside one Soroban invocation/ledger, so the two cross-contract calls cannot straddle a state
 change — the consistency question is purely whether `decimals()` is stable
 *across time*, which §2 answers.)
 
@@ -156,13 +152,13 @@ never records the scale it expected. This is why it is worth documenting: an
 operator seeing a wildly wrong `fx_adjusted_total` after an oracle migration
 would get no on-chain signal pointing at the cause.
 
-Contrast with the separate, already-pinned F5 finding
-(`an_absurd_decimals_count_traps_resolve_fx_shortfall`): a value like `200`
-makes `10i128.pow(decimals)` overflow, which *does* trap (and Soroban's
-atomicity leaves no partial state). A merely-different-but-valid value such as
-15 or 6 does **not** trap; it silently rescales.
+Contrast with the separate F5 regression
+(`an_absurd_decimals_count_returns_error_without_recording_anything`): a value
+like `200` makes the decimal divisor unrepresentable and returns
+`OracleConversionOutOfRange`. A merely-different-but-valid value such as 15 or
+6 does not overflow; it silently rescales.
 
-## 4. Why no code change follows
+## 4. Why the scale is not pinned in `OracleConfig`
 
 - **The assumption is verified, not guessed.** It is grounded in the oracle's
   actual source, not just its docs.
@@ -178,12 +174,51 @@ atomicity leaves no partial state). A merely-different-but-valid value such as
   and require re-initialization? accept the new scale and document it?), not a
   silent guard invented here.
 
+The conversion arithmetic itself is checked: an overflowing numerator or
+decimal divisor returns `OracleConversionOutOfRange` rather than trapping.
+This does not detect a plausible-but-changed scale, which remains the separate
+assumption described above.
+
 **Flip condition:** if the `oracle_contract` this contract points at is ever
 replaced or upgraded in a way that changes `decimals()` (a new oracle
 deployment, not an in-place value change — the latter is impossible in the
 current source), this assumption is void and the conversion should be
 re-examined, ideally by storing the expected scale in `OracleConfig` and
 rejecting a mismatch with a dedicated error.
+
+## 5. The settlement token's own `decimals()` (#258)
+
+The sections above are about the *oracle's* scale. A separate assumption sat
+next to it: `OracleConfig::denominated_amount` is documented in 7-decimal
+units because `total_amount` used the native token's 7-decimal convention, and
+`resolve_fx_shortfall` divided only by `10^oracle_decimals`. That is correct
+for the native XLM and USDC SACs (both 7 decimals) but wrong by a power of ten
+for any SEP-41 token with 6, 18, or another scale.
+
+**The chosen fix is explicit scaling, not a rejection at `initialize`.**
+`resolve_fx_shortfall` now reads the settlement token's live `decimals()` and
+converts the 7-decimal FX result into the token's own units:
+
+```rust
+let fx_adjusted_total = ngn_owed * rate.price
+    * 10i128.pow(token_decimals)
+    / (10i128.pow(oracle_decimals) * 10_000_000);
+```
+
+Rejecting non-7-decimal tokens in `initialize` was the smaller change, but it
+would make the contract unusable with USDC (6 decimals), the very stablecoin a
+real pilot would settle in. Reading the token's scale keeps the 7-decimal
+convention meaningful only where it belongs: the fiat side of the
+conversion. No new `Error` variant is needed, so
+`contracts/escrow/error_discriminants.snapshot` is unchanged.
+
+The token's `decimals()` is read per call, like the oracle's, and carries the
+same provider-trust assumption: a token proxy that changed its scale between
+funding and settlement would silently move the conversion. Unlike the oracle
+side, that risk is inherent to any SEP-41 token this contract accepts, and
+reading live is still strictly better than hardcoding 7. Regression test:
+`resolve_fx_shortfall_scales_to_the_settlement_tokens_own_decimals` in
+`contracts/escrow/src/test.rs`, using a 6-decimal mock token.
 
 ## References
 

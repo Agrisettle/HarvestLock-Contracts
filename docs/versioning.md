@@ -58,6 +58,17 @@ repo deploys a fresh instance per deal from whatever `ESCROW_WASM_HASH` is set
 **callers and the ABI** — does a client written against the previous build have
 to change — not about migrating live instances.
 
+Two companion documents carry the consequences of that immutability, and both
+key off the WASM hash rather than the version label:
+
+- [commitment-schema-history.md](./commitment-schema-history.md) — the exact
+  `Commitment`/`OracleConfig`/`AllocationMember`/`Status`/`Error` shape each
+  deployment below produced, its ScMap key order, and which changes break a
+  decoder built against the latest bindings. Use it to read an old instance.
+- [migration-runbook.md](./migration-runbook.md) — what a release does to
+  in-flight commitments, the per-status cost of unwinding one with `cancel`,
+  and the exact signing sequence for replacing it.
+
 ## 2. Bump rules (decision procedure for the next upload)
 
 Take the diff between the build you're about to upload and the last uploaded
@@ -95,6 +106,59 @@ Two corollaries:
   auth fix, the guard scripts) is `[Unreleased]` and only becomes `0.9.1` (see §3)
   the day it is uploaded.
 
+### 2.1 The read view's own `schema_version` (#256)
+
+§2 versions the *WASM*. One thing inside it has a second, faster-moving
+version: the client-facing commitment shape. `get_commitment` returns the
+storage struct `Commitment` itself, so adding a field for a storage reason is
+silently an ABI change for every indexer. `get_commitment_view` returns
+`CommitmentView` instead, with:
+
+- an explicit `schema_version` (currently `2`, mirroring
+  `COMMITMENT_VIEW_SCHEMA_VERSION` in `lib.rs`). Version `2` is #270:
+  `terms.delivery_deadline` became the agreed `terms.delivery_window_secs`,
+  making `terms` the very same `CommitmentTerms` type `initialize` accepts;
+  version-1 readers recompute the absolute deadline as
+  `created_at + terms.delivery_window_secs`. No other field moved;
+- semantic sub-structs — `parties`, `terms`, `tranches`, `funding`,
+  `delivery`, `fx`, `dispute` — instead of storage order;
+- a documented stability promise: fields are only added, removed, renamed, or
+  re-meaninged with a `schema_version` bump. **Storage-only** changes to
+  `Commitment` never bump it. That is the whole point of the separate view.
+
+`get_commitment` stays for backward compatibility and remains the canonical
+on-chain record. New clients should read the view and reject a
+`schema_version` they don't understand.
+
+### 2.2 Event shapes (#214)
+
+Events are part of the ABI even though they are not function signatures.
+Indexers decode them by topic position and data key, so renaming a field,
+reordering a `#[topic]`, moving a field between topic and data, or changing a
+field's XDR type silently changes what every consumer reads — the event still
+decodes, it just means something else.
+
+**Therefore an event-shape change is a MINOR bump marked `**BREAKING**`, even
+when the exported functions are untouched.** Adding a wholly new event is the
+additive case (MINOR, not `**BREAKING**`); changing an existing one is not
+purely additive. This is the same rule §2 already applies to return shapes,
+stated here because §2's function-centric wording did not mention events.
+
+The mechanical guard is [`docs/events.md`](./events.md) and
+`contracts/escrow/events.snapshot`: `events_snapshot.rs` fails when any event's
+serialized topics or data differ from the committed snapshot, and the re-bless
+instruction is printed with the failure. Re-bless only as part of a deliberate
+MINOR `**BREAKING**` deployment, and update `docs/events.md` in the same PR.
+
+The view is a projection of the same single instance-storage read, not a
+second source of truth. Measured on the test host, `get_commitment` costs
+218,476 CPU instructions and `get_commitment_view` 223,471 (≈2.3% more,
+dominated by the shared storage read); the measurement is pinned by
+`get_commitment_view_costs_the_same_order_as_the_storage_struct`, which
+fails if the view ever starts re-reading storage. Host metering undercounts
+the WASM path, so treat those numbers as an order-of-magnitude check rather
+than a network fee estimate.
+
 ## 3. Retroactive mapping of Deployments 1–10
 
 Applying §2 to the recorded history. The "class" column is the input to the
@@ -114,6 +178,11 @@ CHANGELOG; full hashes and per-deployment detail are in HANDOFF.
 | 9 | 2026-09-06 | `7940147d…` | 26 | **BREAKING** — FX shortfall wired into `settle`'s gating; `OracleConfig` gains `denominated_amount` | `0.8.0` |
 | 10 | 2026-09-06 | `21a4bb2e…` | 29 | additive — dispute path (`flag_dispute`/`resolve_dispute`/`expire_dispute_window`), new `Disputed` status | `0.9.0` |
 | *(unreleased)* | — | *(not uploaded)* | — | ABI-identical: #138–#141 overlapping-role auth correctness fix + two CI guard scripts | next upload ⇒ **`0.9.1`** (patch) |
+
+Per-deployment struct shapes and decode compatibility for every hash in that
+table are in [commitment-schema-history.md](./commitment-schema-history.md); the
+operational meaning of a bump for deals that are already open is in
+[migration-runbook.md](./migration-runbook.md).
 
 Notes on the two judgement calls the history forces:
 
@@ -173,6 +242,41 @@ semantics of its own beyond mirroring the deployment line; if they ever diverge,
 the deployment line (§2, tied to the WASM hash) is authoritative and the Cargo
 field is the thing to correct.
 
+### The version embedded in the WASM (#246)
+
+Since #246, the Cargo `version` is also written into every build. The crate
+root (`contracts/escrow/src/lib.rs`) calls `soroban_sdk::contractmeta!`
+twice, and the values end up in the WASM's `contractmetav0` custom section:
+
+| key | value | source |
+| --- | --- | --- |
+| `version` | `escrow-vX.Y.Z` (this doc's tag format) | `concat!("escrow-v", env!("CARGO_PKG_VERSION"))`, i.e. `contracts/escrow/Cargo.toml` `version` |
+| `repository` | `https://github.com/agrisettle/HarvestLock-Contracts` | `env!("CARGO_PKG_REPOSITORY")`, i.e. the root `Cargo.toml` `[workspace.package] repository` |
+
+Each value has exactly one source, so bumping the Cargo `version` as
+described above is also what updates the embedded version. Nothing is
+hand-copied into `lib.rs`. To read it from a build:
+
+```sh
+stellar contract build --locked
+stellar contract info meta --wasm target/wasm32v1-none/release/harvestlock_escrow.wasm
+#  • version: escrow-v0.1.0
+#  • repository: https://github.com/agrisettle/HarvestLock-Contracts
+#  • rsver / rssdkver / cliver: toolchain entries the CLI adds itself
+```
+
+For a contract that is already deployed, pass `--contract-id <C…> --network
+testnet` instead of `--wasm`. This works on any build from #246 onwards;
+older deployments still need the CHANGELOG hash lookup.
+
+The values are deliberately static: no timestamp, git commit, or hostname.
+Any of those would make two clean builds of the same commit differ and break
+the `build-wasm` job's reproducibility check. Two clean
+`stellar contract build --locked` runs were confirmed to produce
+byte-identical WASM with the metadata in place. The embedded `version` is
+only as accurate as the Cargo `version`: if they disagree with the
+deployment line, the WASM hash and CHANGELOG still win (§1).
+
 ## 6. Where this is enforced going forward
 
 This doc defines the scheme; it does not add CI to enforce it (repo policy:
@@ -186,6 +290,41 @@ tie-backs, each owned by a human step at upload time:
    already records.
 3. `git tag escrow-vX.Y.Z` the source commit and note the tag in HANDOFF's
    per-deployment paragraph.
+
+Two mechanical checks now back up those human steps:
+
+- **Exported-interface snapshot (#244).** `contracts/escrow/interface.snapshot`
+  lists the contract's exported surface, one fact per line: every
+  function's name, argument names and types, and return type; every event;
+  every field or case of the types they reach; and every `Error` code.
+  `bash .github/scripts/check_interface_snapshot.sh` builds the WASM
+  (`stellar contract build`, or pass `WASM=<path>`), decodes the spec from
+  its `contractspecv0` section, and fails with a unified diff on any
+  difference. It also prints a hint for the §2 decision:
+  - no difference → **PATCH**, as far as the ABI is concerned (a
+    state-machine or payout change can still make it MINOR, which the script
+    can't see);
+  - only additions (a new function, event or type, or a new case on an
+    existing enum/union/`Error`, following the Deployment 10 `Disputed`
+    precedent) → **MINOR**;
+  - anything removed or changed (a signature, a return type, a new or
+    changed struct field, following the Deployment 9 `OracleConfig`
+    precedent) → **MINOR `**BREAKING**`**.
+
+  This answers §2's "did the exported ABI change?" from the build itself
+  rather than by reading the diff. It also turns threat-model entry 26 (no
+  admin, upgrade or pause function: "defended by absence") into something
+  checkable, because any new `pub fn` appears in this file's diff and the
+  script calls out new entry points by name. To accept an intended change,
+  run the script with `--update` and commit the regenerated snapshot in
+  the same PR. The script ships in this repo but is not wired into
+  `.github/workflows/test.yml`; per the PR template, a maintainer adds it
+  (the natural place is the `build-wasm` job, right after
+  `stellar contract build`, with `WASM=target/wasm32v1-none/release/harvestlock_escrow.wasm`).
+- **Embedded version metadata (#246).** See §5. Given a contract id,
+  `stellar contract info meta` reports which `escrow-vX.Y.Z` it is without a
+  CHANGELOG lookup. Step 1 above is now also "bump the Cargo `version`", so
+  the uploaded build carries its own label.
 
 CHANGELOG.md remains the index of hashes; this file is the index of *versions*.
 The version table in §3 and the CHANGELOG headings are kept in sync by hand, the

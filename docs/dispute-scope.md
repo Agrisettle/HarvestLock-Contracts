@@ -92,10 +92,14 @@ stating because "nothing else can move" would be literally false:
 one-shot flags, and the party's auth. A dispute therefore does **not**
 block a claim or a reclaim, and cannot be used to protect a tranche from
 the other side. See [`dispute-frontrunning.md`](./dispute-frontrunning.md)
-§2 for why that matters. `resolve` / `expire` restore
-*exactly* the status recorded at flag time — if the off-chain resolution is
-"unwind the deal," the parties call the existing `cancel()` next, same as
-they would have without ever disputing.
+§2 for why that matters. Four tests pin both directions from both tranche
+pre-statuses: `claim_advance_1_while_disputed_still_pays`,
+`reclaim_advance_1_while_disputed_still_refunds`,
+`claim_advance_2_while_disputed_still_pays`, and
+`reclaim_advance_2_while_disputed_still_refunds`. `resolve` / `expire`
+restore *exactly* the status recorded at flag time — if the off-chain
+resolution is "unwind the deal," the parties call the existing `cancel()`
+next, same as they would have without ever disputing.
 
 One known limitation is documented in `flag_dispute`'s doc comment and
 pinned by a dedicated test rather than left as prose: **the freeze does not

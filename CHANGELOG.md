@@ -41,6 +41,32 @@ lifetime has decayed below half the network max, closing the gap where
 a dormant `Locked` escrow's own state could be archived while still
 needed (`docs/storage-ttl.md`; #98).
 
+`initialize` now bounds `total_amount` at `MAX_TOTAL_AMOUNT`
+(`i128::MAX / 10_000`) and rejects anything above it with the new
+`Error::AmountTooLarge` (#249). Previously it only rejected non-positive
+amounts, so it would accept a commitment whose `bps_amount` multiply
+(`total * bps`) overflows — with `overflow-checks = true` in the release
+profile that is a trap in `lock`, `claim_*`, `deposit_amount` or `settle`,
+three calls after the value was supplied. Every `bps_amount` call site is
+safe by construction once the bound holds; tests cover the bound itself,
+one stroop over it, and the multiply at the bound. An absurd total that
+could never have been locked is now refused at the call that took it.
+
+Two reference docs for operating across the ten live WASM builds:
+`docs/commitment-schema-history.md` (#248) records, per deployment, the
+`Commitment`/`OracleConfig`/`AllocationMember`/`Status`/`Error` shape,
+its ScMap key order and the functions that build added, cross-checked
+against `git log -p contracts/escrow/src/lib.rs`, and states which
+differences break a decoder built against the latest bindings;
+`docs/migration-runbook.md` (#250) covers what a new hash means for deals
+that are already open, the per-status cost of unwinding one with `cancel`,
+and the exact signing sequence for replacing it. Both are linked from
+`docs/versioning.md`. What a buyer's signature covers at the token-transfer
+level is now pinned too — `lock`, `fund_remainder` and `fund_fx_shortfall`
+assert their exact nested `transfer` amount and reject a `mock_auths` entry
+scoped to a different one (#253), with the amounts documented in
+`docs/authorization-matrix.md` §1.1.
+
 Security review of the permissionless tranche-opening calls, on the
 record (#2): `docs/permissionless-release-review.md` answers the open
 "is this actually safe?" question with a full reader audit of
@@ -72,6 +98,100 @@ against the RustSec advisory database on every push/PR (#58), and
 list in `deny.toml` (#59), whose first run surfaced and triaged
 `wasmparser`'s `Apache-2.0 WITH LLVM-exception`. Docs-only otherwise — no
 contract code changed.
+
+Oracle hardening, build metadata, and an interface guard (#244–#247). Not
+uploaded yet. Under docs/versioning.md §2 the next build is a **MINOR**:
+there is a new error code, and `initialize` now refuses inputs it used to
+accept.
+
+- **`initialize` validates `OracleConfig::denominated_amount` (#247).** A
+  value `<= 0` or `> MAX_DENOMINATED_AMOUNT` (`i128::MAX / 10_000`, the
+  largest value for which `bps_amount(_, 10_000)` can't overflow) is now
+  refused with the existing `InvalidOracleConfig`. Before this, a zero or
+  negative value was accepted, and after a full delivery `settle` would pay
+  the cooperative nothing and refund the buyer in full. An oversized value
+  would have trapped at settlement.
+- **New `Error::OracleUnavailable` (= 46, appended) (#245).**
+  `read_oracle_rate` and `resolve_fx_shortfall` now use the generated
+  `try_lastprice` / `try_decimals`. An oracle address with no contract
+  behind it, a callee that panics, or a reply that doesn't decode now
+  returns a contract error from `oracle_rate`, `resolve_fx_shortfall` and
+  `refresh_fx_quote_status` instead of aborting the invocation. This fixes
+  fault-injection finding F1. Budget exhaustion inside the oracle still
+  aborts, because the host gives the caller nothing to recover with; the
+  harness header in `tests/oracle_fault_injection.rs` documents this.
+- **Contract metadata embedded in the WASM (#246).** `contractmeta!` writes
+  `version` (`escrow-v` + the Cargo package version) and `repository` (the
+  workspace repository URL) into the `contractmetav0` section. Read them
+  with `stellar contract info meta --wasm …`. Neither value depends on the
+  build environment, so two clean builds still give the same hash.
+- **Exported-interface snapshot (#244).** New committed
+  `contracts/escrow/interface.snapshot`, plus
+  `.github/scripts/check_interface_snapshot.sh`. The script fails on any
+  change to the exported functions, events or types and prints a PATCH /
+  MINOR / MINOR **BREAKING** hint. Not yet wired into CI; that is a
+  maintainer step per the PR template.
+
+Four small Wave backlog items landed together — one test suite, two
+property/edge tests, and one script-and-vendor-tree chore. The
+non-standard SEP-41 token suite (#264,
+`contracts/escrow/tests/nonstandard_token.rs`) runs `lock`/`settle`/`cancel`
+against a fee-on-transfer token and a token that lies upward about its
+balance, pinning what the escrow actually does and extending threat-model
+entry 30 with the written-down "use a SAC" requirement. A new oracle-path
+test (#265) mirrors the existing non-oracle
+`severe_shortfall_does_not_claw_back_advances_already_claimed` on the
+`resolve_fx_shortfall` + `settle` path, where `fx_adjusted_total`
+collapses below the already-claimed advances. A property test (#267)
+proves that a dispute round-trip — `flag_dispute` followed by either
+`resolve_dispute` or `expire_dispute_window` — changes `Commitment` in
+exactly three fields (`status` restored, `dispute_pre_status` back to
+`Draft`, `dispute_deadline` back to 0) and moves no tokens, across every
+allowed pre-status, flagger and exit path (the `Commitment` struct gains
+a test-only `PartialEq`/`Eq`/`Debug` derive behind `cfg(test)` so the
+WASM pays nothing for it). The TypeScript bindings now live in-tree at
+[`bindings/typescript/`](./bindings/typescript/), produced from the
+WASM by [`scripts/gen-bindings.sh`](./scripts/gen-bindings.sh), with a
+`--check` drift mode a maintainer wires into CI separately per the PR
+template's "CI is maintainer-managed" note (#266). No contract code
+changed; no deployment entry until the next build goes to testnet.
+
+`initialize` now takes its eight agreed terms as one named
+`CommitmentTerms` struct (#270) — a **MINOR `**BREAKING**`** change per
+docs/versioning.md §2, because a caller written against the positional form
+must reshape one call. The parties and the optional `oracle_config` stay
+standalone arguments: an `Address` cannot be confused by position the way
+the numeric terms could. Eight positional parameters had become a real
+hazard — `advance1_bps`/`advance2_bps` are adjacent `u32`s and
+`claim_window_secs`/`remainder_window_secs`/`delivery_window_secs` are
+adjacent `u64`s, so a swap type-checked and silently produced a different
+deal. No validation, stored field or state transition changed: every
+existing rejection test still returns the same `Error` for the same input,
+only its call shape moved. `get_commitment_view`'s `terms` is now the same
+type, with `delivery_deadline` replaced by the agreed
+`delivery_window_secs`, so the view's `schema_version` moves to `2`
+(docs/versioning.md §2.1). Migration: reshape the call site, and where a
+view consumer read `terms.delivery_deadline`, compute
+`created_at + terms.delivery_window_secs`. Generated TypeScript bindings
+must be refreshed with `scripts/gen-bindings.sh`; the committed
+`examples/ts` snapshot predates the change and is not checked by CI.
+
+Three coverage issues landed with it. A differential proptest (#269) runs
+the same plan — random bps splits, claim windows, open times and attempt
+times — against tranche 1 (from `Locked`) and tranche 2 (from
+`CheckpointPassed`) and asserts identical rule-level observations: the
+deadline the open wrote, whether the attempt was accepted or which exact
+`Error` refused it, the claimed/expired flags, and that each transfer
+matches that tranche's own bps amount and pays the party the action names.
+`tests/window_overflow.rs` gains `resolve_fx_shortfall`'s
+`fx_shortfall_deadline = now + remainder_window_secs` as its fifth
+property, plus pinned `u64::MAX` boundary cases (#271), using the shared
+minimal mock Reflector now in `tests/common/mod.rs`; the paragraph that
+left that site out as out of scope is gone. And a `Draft`-stage
+reassignment test (#273) proves that swapping the buyer before `lock`
+charges the **new** buyer's wallet, leaves the outgoing buyer's balance
+untouched, refuses the outgoing buyer's signature for `lock`, and pays
+both refund paths (`cancel`, `reclaim_on_nondelivery`) to the new buyer.
 
 ## [Deployment 11] — 2026-10-20
 

@@ -180,8 +180,8 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # Unreachable / panicking / garbage-returning / stale oracle against the
-      # documented OracleNotConfigured / OraclePriceUnavailable / OracleStale
-      # degradation paths.
+      # documented OracleNotConfigured / OraclePriceUnavailable / OracleStale /
+      # OraclePriceInvalid degradation paths.
       - name: cargo test --test oracle_fault_injection
         working-directory: contracts/escrow
         run: cargo test --test oracle_fault_injection --verbose
@@ -333,6 +333,12 @@ jobs:
       # one entirely.
       - name: Guard public method auth doc comments
         run: bash .github/scripts/check_auth_docs.sh
+
+      # Fails if docs/0002-interface-spec.md is missing a section for a
+      # `pub fn` in the #[contractimpl] block (or documents one that no longer
+      # exists), or its Summary counts drift from the method sections.
+      - name: Guard interface spec covers every public method
+        run: bash .github/scripts/check_interface_spec.sh
 
   # Mutation testing (#62): deliberately break the code and require the test
   # suite to notice. A surviving mutant on a tested line means the assertion
