@@ -1019,6 +1019,8 @@ fn setup_with_oracle_denomination(
 
     (
         Setup {
+            token_admin: token::StellarAssetClient::new(&env, &token_address),
+            issuer: None,
             env,
             contract,
             token,
@@ -1408,6 +1410,8 @@ fn resolve_fx_with_token_decimals(token_decimals: u32, total_amount: i128) -> Se
     contract.resolve_fx_shortfall();
 
     Setup {
+        token_admin: token::StellarAssetClient::new(&env, &token_id),
+        issuer: None,
         env,
         contract,
         token,
@@ -3662,6 +3666,131 @@ fn reassign_buyer_requires_current_buyer_cooperative_and_new_buyer_auth() {
     assert!(touched(&s.buyer), "expected the outgoing buyer's auth");
     assert!(touched(&s.cooperative), "expected the cooperative's auth");
     assert!(touched(&new_buyer), "expected the incoming buyer's auth");
+}
+
+// ---------- reassign_operator (#203) ----------
+
+#[test]
+fn reassign_operator_updates_the_warehouse_operator_field() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_op = Address::generate(&s.env);
+
+    s.contract.reassign_operator(&new_op);
+
+    assert_eq!(s.contract.get_commitment().warehouse_operator, new_op);
+}
+
+#[test]
+fn reassign_operator_requires_buyer_cooperative_and_new_operator_auth() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_op = Address::generate(&s.env);
+
+    s.contract.reassign_operator(&new_op);
+    let auths = s.env.auths();
+    let touched = |addr: &Address| auths.iter().any(|(a, _)| a == addr);
+    assert!(touched(&s.buyer), "expected the buyer's auth");
+    assert!(touched(&s.cooperative), "expected the cooperative's auth");
+    assert!(touched(&new_op), "expected the incoming operator's auth");
+}
+
+#[test]
+fn reassign_operator_is_legal_from_draft() {
+    let s = setup(1_500, 1_500);
+    let new_op = Address::generate(&s.env);
+    assert!(s.contract.try_reassign_operator(&new_op).is_ok());
+}
+
+#[test]
+fn reassign_operator_is_legal_from_locked() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_op = Address::generate(&s.env);
+    assert!(s.contract.try_reassign_operator(&new_op).is_ok());
+}
+
+#[test]
+fn reassign_operator_rejects_after_delivery() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    let new_op = Address::generate(&s.env);
+
+    let result = s.contract.try_reassign_operator(&new_op);
+    assert_eq!(result, Err(Ok(Error::InvalidState)));
+}
+
+#[test]
+fn reassign_operator_allows_confirm_delivery_by_new_operator() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    let new_op = Address::generate(&s.env);
+    s.contract.reassign_operator(&new_op);
+
+    advance_to_remainder_funded(&s);
+    s.contract
+        .confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(s.contract.get_status(), Status::Delivered);
+}
+
+// ---------- delivery deadline guard (#199) ----------
+
+#[test]
+fn confirm_delivery_at_deadline_second_still_succeeds() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    let deadline = s.contract.get_commitment().delivery_deadline;
+    s.env.ledger().with_mut(|l| l.timestamp = deadline);
+
+    let result = s
+        .contract
+        .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert!(
+        result.is_ok(),
+        "confirm_delivery must succeed at the deadline second"
+    );
+}
+
+#[test]
+fn confirm_delivery_one_second_past_deadline_returns_delivery_deadline_passed() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    let deadline = s.contract.get_commitment().delivery_deadline;
+    s.env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+
+    let result = s
+        .contract
+        .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE);
+    assert_eq!(result, Err(Ok(Error::DeliveryDeadlinePassed)));
+}
+
+#[test]
+fn reclaim_on_nondelivery_and_confirm_delivery_are_strict_complements_at_the_deadline() {
+    let s = setup(1_500, 1_500);
+    s.contract.lock();
+    advance_to_remainder_funded(&s);
+    let deadline = s.contract.get_commitment().delivery_deadline;
+    s.env.ledger().with_mut(|l| l.timestamp = deadline);
+    assert!(s
+        .contract
+        .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE)
+        .is_ok());
+
+    // At `deadline + 1`: reclaim_on_nondelivery succeeds, confirm_delivery fails.
+    let s2 = setup(1_500, 1_500);
+    s2.contract.lock();
+    s2.env.ledger().with_mut(|l| l.timestamp = deadline + 1);
+    assert!(s2.contract.try_reclaim_on_nondelivery().is_ok());
+    assert_eq!(
+        s2.contract
+            .try_confirm_delivery(&CONTRACTED_QUANTITY, &FULL_PRICE_GRADE),
+        Err(Ok(Error::InvalidState))
+    );
 }
 
 // ---------- disputes ----------
@@ -6959,6 +7088,8 @@ mod oracle_identity_rate_differential {
         );
 
         Setup {
+            token_admin: token::StellarAssetClient::new(&env, &token_address),
+            issuer: None,
             env,
             contract,
             token,
@@ -7112,4 +7243,35 @@ mod oracle_identity_rate_differential {
             );
         }
     }
+}
+
+// ---------- #318: no tranche claim or reclaim after a terminal status ----------
+
+/// `cancel` refunds the whole balance, so a still-open advance window must
+/// answer with a clean `InvalidState` instead of reaching a token transfer
+/// that has nothing left to move.
+#[test]
+fn claim_advance_1_after_cancel_is_invalid_state() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.cancel();
+    assert_eq!(s.contract.get_status(), Status::Cancelled);
+    assert_eq!(
+        s.contract.try_claim_advance_1(),
+        Err(Ok(Error::InvalidState))
+    );
+}
+
+#[test]
+fn reclaim_advance_1_after_cancel_is_invalid_state() {
+    let s = setup(1_500, 2_000);
+    s.contract.lock();
+    s.contract.release_advance_1();
+    s.contract.cancel();
+    advance_time(&s, WINDOW + 1);
+    assert_eq!(
+        s.contract.try_reclaim_advance_1(),
+        Err(Ok(Error::InvalidState))
+    );
 }

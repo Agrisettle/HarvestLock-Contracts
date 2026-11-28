@@ -1,5 +1,3 @@
-node_modules/
-out/
 # Artifacts produced by `npm install` / `npm run build` inside this
 # generated package. They are rebuilt per-environment and must not be
 # committed — the committed surface is the emitted TypeScript source and

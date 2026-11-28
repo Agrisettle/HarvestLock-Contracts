@@ -52,8 +52,14 @@ fn asset_admin(s: &World) -> StellarAssetClient<'static> {
 /// created (at `lock`). The clawback-enabled bit on a contract balance is
 /// latched when that balance first exists, so ordering matters here.
 fn enable_issuer_controls(s: &World) -> StellarAssetClient<'static> {
-    s.issuer.set_flag(IssuerFlags::RevocableFlag);
-    s.issuer.set_flag(IssuerFlags::ClawbackEnabledFlag);
+    s.issuer
+        .as_ref()
+        .expect("SAC-backed world")
+        .set_flag(IssuerFlags::RevocableFlag);
+    s.issuer
+        .as_ref()
+        .expect("SAC-backed world")
+        .set_flag(IssuerFlags::ClawbackEnabledFlag);
     asset_admin(s)
 }
 

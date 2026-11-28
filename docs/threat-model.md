@@ -602,6 +602,63 @@ The on-chain mitigation is no stronger than §4.5's custody-model
 assumption — the buyer picked the token — but the requirement is now
 documented at both the function-doc-comment layer and here, not folklore.
 
+#### 31. Settlement-asset issuer freezes or claws back
+**Verdict: accepted risk — the control sits above the contract and cannot be
+defended on-chain; bounded by visibility and by the clawback being an
+accounting loss, not a redirection to the issuer.**
+
+Every live verification before this entry used the native XLM SAC, which has
+no issuer controls. A pilot settling in an issued stablecoin inherits the
+issuer's `AUTH_REVOCABLE` and `AUTH_CLAWBACK_ENABLED` powers over the escrow
+contract's own balance. `contracts/escrow/tests/asset_issuer_controls.rs` uses
+a classic-asset SAC with both flags enabled before any escrow balance exists
+and pins three scenarios.
+
+**Deauthorizing the escrow contract address** while funds are locked makes
+every token transfer into or out of escrow fail: the suite pins
+`claim_advance_*`, `reclaim_advance_*`, `cancel`, `fund_remainder`, `settle`,
+`expire_remainder_window`, and `reclaim_on_nondelivery`
+(`fund_fx_shortfall` and `expire_fx_shortfall_window` share the same transfer
+path). Tokenless transitions still run, so the commitment can walk as far as
+`ReadyForDelivery` — or sit in `Delivered` — but no terminal status is
+reachable. The balance is **frozen, not lost**: it remains in the contract and
+is released by the same `cancel`/`settle` path once the issuer re-authorizes.
+Nothing in the escrow can detect or undo the freeze; the token's `transfer`
+traps and Soroban rolls the whole invocation back.
+
+**Deauthorizing the cooperative** is narrower but can be permanent in a
+different way. Its claims fail at the token layer, while the buyer's
+`reclaim_advance_*` still works (it pays the buyer). If delivery is
+nonetheless confirmed, `settle` reverts on its payout to the cooperative
+forever, and `cancel` is not legal from `Delivered`, so the commitment is
+stuck in a non-terminal state with the remainder in escrow until the issuer
+re-authorizes.
+
+**Clawing back part of the escrow balance before `settle`** does not brick
+settlement. `settle` splits the balance it actually sees
+(`coop_payment = min(owed_from_remainder, balance)`,
+`buyer_refund = balance - coop_payment`), so it still reaches `Settled`. At
+full delivery the cooperative is the residual claimant and absorbs the whole
+clawback; the buyer's refund was already zero and stays zero. The clawed-back
+tokens are burned, and `total_amount`/`settlement_bps` are not rewritten, so
+the recorded terms no longer sum to what the parties received.
+
+A deauthorization also defeats every deadline rescue: a frozen escrow balance
+cannot pay the buyer on `reclaim_on_nondelivery` or the cooperative on either
+expiry sweep. Recovery is therefore external to this contract — the issuer
+re-authorizing, or an off-chain remedy. This is accepted because no contract
+can force an issuer to honor a balance it has frozen or burned; a stablecoin's
+freeze/clawback policy is a counterparty risk of the asset, inherited exactly
+like its credit risk. Mitigation is due diligence and monitoring, not code:
+agree the issuer's powers with the parties, watch `set_authorized` / `clawback`
+events on the escrow address, and treat the issuer as a trust assumption
+(assumption 8). Tests:
+`deauthorizing_the_escrow_address_freezes_every_value_moving_path`,
+`deauthorizing_the_escrow_address_during_delivered_blocks_settle`,
+`deauthorizing_the_cooperative_blocks_claim_advance_1_but_not_the_buyers_reclaim`,
+`deauthorizing_the_cooperative_bricks_settle_in_delivered_until_reauthorized`,
+`clawback_before_settle_is_absorbed_by_the_cooperative_not_the_buyer`.
+
 ## Out of scope
 
 | Attack / concern | Why it is explicitly out of scope |
@@ -646,7 +703,13 @@ documented at both the function-doc-comment layer and here, not folklore.
 7. **Observability works**: `status_changed` events and the view functions
    are how anyone detects a transition; `every_transition_publishes_status_changed`
    holds that every mutation is announced (and `initialize` deliberately
-   announces nothing — creation is not a transition).
+   announces nothing — creation is not a transition). Value-movement calls
+   additionally emit typed events: `TrancheClaimed` (cooperative claims an
+   advance), `TrancheReclaimed` (buyer reclaims an unclaimed advance),
+   `RemainderFunded` (buyer deposits the remainder), and `FxShortfallFunded`
+   (buyer tops up the FX shortfall) — giving indexers a machine-readable
+   record of every token flow without requiring them to decode raw transfer
+   calls (#202).
 8. **The settlement asset's issuer does not freeze or claw back the escrow**
    (entry 31). An issued stablecoin's issuer can deauthorize the escrow
    address or the cooperative, or burn part of the escrowed balance, and no

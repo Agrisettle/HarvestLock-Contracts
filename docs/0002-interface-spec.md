@@ -492,7 +492,24 @@ values it reads without renaming a single field.
 
 *Buyer-position assignability (PRD §4.8): transfers `buyer` to `new_buyer`. Requires three signatures: current buyer, cooperative, and new buyer.*
 
-### 29. `flag_dispute`
+### 29. `reassign_operator`
+
+```json
+{
+  "name": "reassign_operator",
+  "args": [
+    { "name": "new_operator", "type": "Address" }
+  ],
+  "returns": "Result<(), Error>",
+  "errors": ["InvalidState"],
+  "state_transition": null,
+  "auth_requirement": "buyer_cooperative_and_new_operator"
+}
+```
+
+*Replaces `warehouse_operator` with `new_operator` before delivery. Requires three signatures: buyer, cooperative, and the new operator.*
+
+### 30. `flag_dispute`
 
 ```json
 {
@@ -509,7 +526,7 @@ values it reads without renaming a single field.
 
 *Dispute flagging (PRD's must-have "dispute flagging with defined escalation"). Any one of the three named parties can freeze the commitment by moving it to `Status::Disputed`, which blocks every other state-changing call.*
 
-### 30. `resolve_dispute`
+### 31. `resolve_dispute`
 
 ```json
 {
@@ -524,7 +541,7 @@ values it reads without renaming a single field.
 
 *Resolves a dispute by unanimous consent — all three named parties' auth. Restores `status` to exactly whatever it was the moment `flag_dispute` ran. Deadline-free on purpose.*
 
-### 31. `expire_dispute_window`
+### 32. `expire_dispute_window`
 
 ```json
 {
@@ -539,7 +556,7 @@ values it reads without renaming a single field.
 
 *The dispute-side escape hatch: permissionless, deadline-gated. If the three parties can't reach unanimous consent before `dispute_deadline`, this restores the pre-dispute status, exactly like `resolve_dispute` would.*
 
-### 32. `get_status`
+### 33. `get_status`
 
 ```json
 {
@@ -554,7 +571,7 @@ values it reads without renaming a single field.
 
 *No auth required — read-only view, callable by anyone.*
 
-### 33. `get_commitment`
+### 34. `get_commitment`
 
 ```json
 {
@@ -571,7 +588,7 @@ values it reads without renaming a single field.
 
 ---
 
-### 34. `get_commitment_view`
+### 35. `get_commitment_view`
 
 ```json
 {
@@ -588,7 +605,7 @@ values it reads without renaming a single field.
 
 ---
 
-### 35. `available_actions`
+### 36. `available_actions`
 
 ```json
 {
@@ -609,9 +626,9 @@ values it reads without renaming a single field.
 
 ## Summary
 
-| Total Methods | 35 public methods |
+| Total Methods | 36 public methods |
 |---|---|
-| Auth-gated | 19 methods require explicit auth (buyer/cooperative/warehouse_operator/new buyer/flagger) |
+| Auth-gated | 20 methods require explicit auth (buyer/cooperative/warehouse_operator/new buyer/flagger) |
 | Permissionless | 16 methods are permissionless reads or state transitions that don't require auth |
 | State transitions | 17 methods declare a `state_transition`, 7 are read-only views |
 | Error variants | 45 distinct `Error` variants across all methods |
